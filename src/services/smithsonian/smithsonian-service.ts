@@ -17,6 +17,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import type {
   FullObject,
   ImageItem,
+  MediaResolution,
   ObjectSummary,
   RawContentResponse,
   RawEDAN,
@@ -218,7 +219,7 @@ function buildResolution(
   url: string,
   width: number | undefined,
   height: number | undefined,
-): import('./types.js').MediaResolution {
+): MediaResolution {
   return width !== undefined && height !== undefined ? { url, width, height } : { url };
 }
 
@@ -228,8 +229,8 @@ function normalizeToImage(m: RawMediaItem): ImageItem | null {
   if (!mediaId) return null;
 
   // Parse resource list for high-res, screen, thumb
-  let high_res_jpeg: import('./types.js').MediaResolution | undefined;
-  let high_res_tiff: import('./types.js').MediaResolution | undefined;
+  let high_res_jpeg: MediaResolution | undefined;
+  let high_res_tiff: MediaResolution | undefined;
   let screen_url: string | undefined;
   let thumbnail_url = m.thumbnail;
 
@@ -273,12 +274,13 @@ export class SmithsonianService {
   private async get<T extends { error?: { code?: string; message?: string } }>(
     url: string,
     ctx: RequestContextLike,
+    extraHeaders?: Record<string, string>,
   ): Promise<T> {
     return withRetry(
       async () => {
         const signal = (ctx as { signal?: AbortSignal }).signal;
         const response = await fetchWithTimeout(url, 15_000, ctx, {
-          headers: { Accept: 'application/json' },
+          headers: { Accept: 'application/json', ...extraHeaders },
           ...(signal && { signal }),
         });
         const raw = (await response.json()) as T;
@@ -333,12 +335,12 @@ export class SmithsonianService {
       q: params.query,
       rows: String(params.rows),
       start: String(params.start),
-      api_key: cfg.apiKey,
     });
     for (const fq of fqs) qs.append('fq', fq);
     const url = `${base}?${qs.toString()}`;
 
-    const raw = await this.get<RawSearchResponse>(url, ctx);
+    // Pass API key as header (not query param) so it never appears in logs or errors.
+    const raw = await this.get<RawSearchResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
     const rows = (raw.response?.rows ?? []).map(normalizeToSummary);
     return { rows, rowCount: raw.response?.rowCount ?? rows.length };
   }
@@ -350,11 +352,12 @@ export class SmithsonianService {
   async getContent(recordId: string, ctx: RequestContextLike): Promise<RawEDAN> {
     const cfg = getServerConfig();
     const prefixed = recordId.startsWith('edanmdm:') ? recordId : `edanmdm:${recordId}`;
-    const url = `${cfg.baseUrl}/content/${encodeURIComponent(prefixed)}?api_key=${encodeURIComponent(cfg.apiKey)}`;
+    const url = `${cfg.baseUrl}/content/${encodeURIComponent(prefixed)}`;
 
+    // Pass API key as header (not query param) so it never appears in logs or errors.
     let raw: RawContentResponse;
     try {
-      raw = await this.get<RawContentResponse>(url, ctx);
+      raw = await this.get<RawContentResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
     } catch (err: unknown) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         throw notFound(`No Smithsonian object found for ID "${recordId}".`, { recordId });

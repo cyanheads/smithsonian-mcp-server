@@ -190,9 +190,6 @@ export const smithsonianSearch = tool('smithsonian_search', {
       });
     }
 
-    // Extract date field for canvas rows
-    const canvasRows = objects.map((o) => ({ ...o, date: undefined as string | undefined }));
-
     ctx.log.info('Search complete', { count: objects.length, total: rowCount });
 
     // DataCanvas spillover when rows > preview cap or canvas_id supplied
@@ -205,6 +202,9 @@ export const smithsonianSearch = tool('smithsonian_search', {
       const instance = await dataCanvas.acquire(input.canvas_id, ctx);
       canvasId = instance.canvasId;
 
+      // Spread to plain objects: ObjectSummary lacks an index signature,
+      // so a spread is required to satisfy the canvas Row constraint.
+      const canvasRows = objects.map((o) => ({ ...o }));
       const spillResult = await spillover({
         canvas: instance,
         source: canvasRows,
@@ -216,23 +216,8 @@ export const smithsonianSearch = tool('smithsonian_search', {
       tableName = spillResult.spilled ? spillResult.handle.tableName : 'smithsonian_search';
     }
 
-    // Inline objects capped at preview
-    const inlineObjects = objects.slice(0, PREVIEW_CAP);
-
-    // Map to output shape
-    const outputObjects = inlineObjects.map((o) => ({
-      record_id: o.record_id,
-      title: o.title,
-      unit_code: o.unit_code,
-      museum_name: o.museum_name,
-      object_type: o.object_type,
-      thumbnail_url: o.thumbnail_url,
-      is_cc0: o.is_cc0,
-      has_media: o.has_media,
-    }));
-
     return {
-      objects: outputObjects,
+      objects: objects.slice(0, PREVIEW_CAP),
       total_count: rowCount,
       ...(canvasId && { canvas_id: canvasId }),
       ...(tableName && { table_name: tableName }),

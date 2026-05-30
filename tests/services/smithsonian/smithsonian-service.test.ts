@@ -191,7 +191,7 @@ describe('SmithsonianService', () => {
       expect(result.rows[0]?.has_media).toBe(true);
     });
 
-    it('appends api_key to the request URL', async () => {
+    it('sends api key as X-Api-Key header — not in the URL', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
@@ -203,7 +203,13 @@ describe('SmithsonianService', () => {
       const ctx = createMockContext();
       await svc.search({ query: 'test', rows: 5, start: 0 }, ctx);
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
-      expect(calledUrl).toContain('api_key=test-key-12345');
+      const calledInit = (fetchMock.mock.calls[0] as [string, RequestInit])[1];
+      // Key must not appear in the URL query string
+      expect(calledUrl).not.toContain('api_key');
+      expect(calledUrl).not.toContain('test-key-12345');
+      // Key must be present in the X-Api-Key header
+      const headers = calledInit?.headers as Record<string, string> | undefined;
+      expect(headers?.['X-Api-Key']).toBe('test-key-12345');
     });
 
     it('appends fq params for filters', async () => {

@@ -1,9 +1,10 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-05-30 09:59:37
+Generated on: 2026-05-30 13:15:52
 
 ```text
 smithsonian-mcp-server/
+├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -18,8 +19,10 @@ smithsonian-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
+│   ├── design.md
 │   └── idea.md
 ├── scripts/
 │   ├── build-changelog.ts
@@ -106,26 +109,41 @@ smithsonian-mcp-server/
 │   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── src/
+│   ├── config/
+│   │   └── server-config.ts
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
-│   │   │       └── echo.prompt.ts
 │   │   ├── resources/
 │   │   │   └── definitions/
-│   │   │       ├── echo-app-ui.app-resource.ts
-│   │   │       └── echo.resource.ts
 │   │   └── tools/
 │   │       └── definitions/
-│   │           ├── echo-app.app-tool.ts
-│   │           └── echo.tool.ts
+│   │           ├── smithsonian-explore.tool.ts
+│   │           ├── smithsonian-find-related.tool.ts
+│   │           ├── smithsonian-get-media.tool.ts
+│   │           ├── smithsonian-get-object.tool.ts
+│   │           └── smithsonian-search.tool.ts
+│   ├── services/
+│   │   ├── smithsonian/
+│   │   │   ├── smithsonian-service.ts
+│   │   │   └── types.ts
+│   │   └── canvas-accessor.ts
 │   └── index.ts
 ├── tests/
+│   ├── mcp-server/
+│   │   └── tools/
+│   │       └── definitions/
+│   │           ├── smithsonian-explore.tool.test.ts
+│   │           ├── smithsonian-find-related.tool.test.ts
+│   │           ├── smithsonian-get-media.tool.test.ts
+│   │           ├── smithsonian-get-object.tool.test.ts
+│   │           └── smithsonian-search.tool.test.ts
 │   ├── prompts/
-│   │   └── echo.prompt.test.ts
 │   ├── resources/
-│   │   └── echo.resource.test.ts
+│   ├── services/
+│   │   └── smithsonian/
+│   │       └── smithsonian-service.test.ts
 │   └── tools/
-│       └── echo.tool.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
@@ -133,11 +151,14 @@ smithsonian-mcp-server/
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
+├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json

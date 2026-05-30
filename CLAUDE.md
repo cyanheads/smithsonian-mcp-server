@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. The framework, skills, and example definitions are in place — the domain isn't. The user's first messages will set direction; wait for them before proceeding.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -61,25 +48,26 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const smithsonianSearch = tool('smithsonian_search', {
+  description: 'Search across 19.4 million Smithsonian objects by text query and optional filters.',
+  annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    query: z.string().describe('Free-text search terms.'),
+    rows: z.number().int().min(1).max(100).default(20).describe('Page size (max 100).'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    objects: z.array(z.object({
+      record_id: z.string().describe('Unique object identifier.'),
+      title: z.string().describe('Object title.'),
+    })).describe('Matching object summaries.'),
+    total_count: z.number().describe('Total matching objects.'),
   }),
-  auth: ['inventory:read'],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    const svc = getSmithsonianService();
+    const { rows: objects, rowCount } = await svc.search({ query: input.query, rows: input.rows, start: 0, fq: [] }, ctx);
+    ctx.log.info('Search complete', { query: input.query, count: objects.length });
+    return { objects, total_count: rowCount };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
@@ -88,7 +76,7 @@ export const searchItems = tool('search_items', {
   // Enforced at lint time: every field in `output` must appear in the rendered text.
   format: (result) => [{
     type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
+    text: result.objects.map(o => `**${o.record_id}**: ${o.title}`).join('\n'),
   }],
 });
 ```
@@ -99,14 +87,14 @@ export const searchItems = tool('search_items', {
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
+export const smithsonianObject = resource('smithsonian://{recordId}', {
+  description: 'Fetch a Smithsonian catalog object by record ID.',
+  params: z.object({ recordId: z.string().describe('Object record_id from smithsonian_search.') }),
   async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
+    const svc = getSmithsonianService();
+    const raw = await svc.getContent(params.recordId, ctx);
+    if (!raw) throw notFound(`Object ${params.recordId} not found`, { recordId: params.recordId });
+    return svc.toFullObject(raw);
   },
 });
 ```
@@ -136,21 +124,23 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
+  apiKey: z.string().min(1).describe('API key from https://api.data.gov/signup. Required.'),
+  baseUrl: z.string().default('https://api.si.edu/openaccess/api/v1.0'),
+  maxRows: z.coerce.number().int().min(1).max(100).default(20),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
+    apiKey: 'SMITHSONIAN_API_KEY',
+    baseUrl: 'SMITHSONIAN_BASE_URL',
+    maxRows: 'SMITHSONIAN_MAX_ROWS',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`SMITHSONIAN_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
 ### Server instructions
 
@@ -225,18 +215,19 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 src/
   index.ts                              # createApp() entry point
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # SMITHSONIAN_API_KEY, SMITHSONIAN_BASE_URL, SMITHSONIAN_MAX_ROWS
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    canvas-accessor.ts                  # DataCanvas singleton accessor
+    smithsonian/
+      smithsonian-service.ts            # Smithsonian API client (init/accessor pattern)
+      types.ts                          # Domain types (ObjectSummary, FullObject, ImageItem)
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      smithsonian-search.tool.ts        # smithsonian_search
+      smithsonian-get-object.tool.ts    # smithsonian_get_object
+      smithsonian-get-media.tool.ts     # smithsonian_get_media
+      smithsonian-explore.tool.ts       # smithsonian_explore
+      smithsonian-find-related.tool.ts  # smithsonian_find_related
 ```
 
 ---

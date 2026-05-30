@@ -1,7 +1,7 @@
 {
   "name": "@cyanheads/smithsonian-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -39,11 +39,33 @@
     "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js",
     "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish"
   },
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "smithsonian",
+    "open-access",
+    "museum",
+    "cultural-heritage",
+    "cc0",
+    "art",
+    "natural-history",
+    "edan"
+  ],
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/cyanheads/smithsonian-mcp-server"
   },
+  "author": "Casey Hand <casey@caseyjhand.com>",
+  "homepage": "https://github.com/cyanheads/smithsonian-mcp-server#readme",
+  "bugs": {
+    "url": "https://github.com/cyanheads/smithsonian-mcp-server/issues"
+  },
+  "mcpName": "io.github.cyanheads/smithsonian-mcp-server",
   "license": "Apache-2.0",
   "engines": {
     "bun": ">=1.3.0",

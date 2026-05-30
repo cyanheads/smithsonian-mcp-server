@@ -1,19 +1,20 @@
 {
-  "name": "smithsonian-mcp-server",
+  "name": "@cyanheads/smithsonian-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
   "author": {
-    "name": ""
+    "name": "Casey Hand"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/smithsonian-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/smithsonian-mcp-server",
   "license": "Apache-2.0",
   "mcpServers": {
-    "smithsonian-mcp-server": {
+    "@cyanheads/smithsonian-mcp-server": {
       "command": "npx",
-      "args": ["-y", "smithsonian-mcp-server"],
+      "args": ["-y", "@cyanheads/smithsonian-mcp-server"],
       "env": {
-        "MCP_TRANSPORT_TYPE": "stdio"
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "SMITHSONIAN_API_KEY": "your-api-key"
       }
     }
   }

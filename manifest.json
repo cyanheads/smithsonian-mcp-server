@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "smithsonian-mcp-server",
   "version": "0.1.0",
-  "description": "",
-  "author": { "name": "" },
+  "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
+  "author": { "name": "Casey Hand" },
   "server": {
     "type": "node",
     "entry_point": "dist/index.js",
@@ -13,7 +13,8 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
-        "NODE_ENV": "production"
+        "NODE_ENV": "production",
+        "SMITHSONIAN_API_KEY": "${user_config.smithsonian_api_key}"
       }
     }
   },
@@ -22,5 +23,12 @@
   },
   "tools_generated": true,
   "prompts_generated": true,
-  "user_config": {}
+  "user_config": {
+    "smithsonian_api_key": {
+      "title": "Smithsonian API Key",
+      "description": "Free API key from https://api.data.gov/signup — approval is instant.",
+      "type": "string",
+      "required": true
+    }
+  }
 }

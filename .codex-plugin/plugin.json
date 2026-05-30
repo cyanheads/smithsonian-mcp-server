@@ -1,25 +1,34 @@
 {
-  "name": "smithsonian-mcp-server",
+  "name": "@cyanheads/smithsonian-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
   "author": {
-    "name": "",
-    "email": "",
-    "url": ""
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/smithsonian-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/smithsonian-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "smithsonian",
+    "open-access",
+    "museum",
+    "cultural-heritage",
+    "cc0"
+  ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "smithsonian-mcp-server",
-    "shortDescription": "",
-    "longDescription": "",
-    "developerName": "",
-    "category": "",
+    "displayName": "@cyanheads/smithsonian-mcp-server",
+    "shortDescription": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
+    "longDescription": "Five tools covering the full Smithsonian Open Access workflow: search 19.4M objects from 20+ museums with rich filters, fetch full provenance metadata, retrieve CC0-licensed images at multiple resolutions, browse by category (museum/culture/period/medium), and discover related objects via cross-collection fan-out. Requires a free api.data.gov API key.",
+    "developerName": "Casey Hand",
+    "category": "Research",
     "capabilities": ["Read"],
-    "websiteURL": "",
+    "websiteURL": "https://github.com/cyanheads/smithsonian-mcp-server",
     "defaultPrompt": []
   }
 }

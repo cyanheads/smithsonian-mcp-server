@@ -1,9 +1,10 @@
 {
-  "smithsonian-mcp-server": {
+  "@cyanheads/smithsonian-mcp-server": {
     "command": "npx",
-    "args": ["-y", "smithsonian-mcp-server"],
+    "args": ["-y", "@cyanheads/smithsonian-mcp-server"],
     "env": {
-      "MCP_TRANSPORT_TYPE": "stdio"
+      "MCP_TRANSPORT_TYPE": "stdio",
+      "SMITHSONIAN_API_KEY": "your-api-key"
     }
   }
 }

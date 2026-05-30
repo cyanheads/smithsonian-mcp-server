@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.cyanheads/smithsonian-mcp-server",
-  "description": "Search and explore millions of CC0 Smithsonian Open Access museum objects, artworks, and specimens.",
+  "description": "Search 19.4M Smithsonian Open Access objects, get CC0 images, find cross-collection connections.",
   "repository": {
     "url": "https://github.com/cyanheads/smithsonian-mcp-server",
     "source": "github"
@@ -25,6 +25,12 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "SMITHSONIAN_API_KEY",
+          "description": "Required. Free API key from https://api.data.gov/signup — approval is instant.",
+          "format": "string",
+          "isRequired": true
+        },
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
@@ -54,6 +60,12 @@
         }
       ],
       "environmentVariables": [
+        {
+          "name": "SMITHSONIAN_API_KEY",
+          "description": "Required. Free API key from https://api.data.gov/signup — approval is instant.",
+          "format": "string",
+          "isRequired": true
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
