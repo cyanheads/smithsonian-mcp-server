@@ -1,0 +1,20 @@
+{
+  "name": "smithsonian-mcp-server",
+  "version": "0.1.0",
+  "description": "",
+  "author": {
+    "name": ""
+  },
+  "homepage": "",
+  "repository": "",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "smithsonian-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "smithsonian-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "smithsonian-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "smithsonian-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}
