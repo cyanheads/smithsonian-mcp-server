@@ -134,6 +134,33 @@ function mockFetch(response: unknown): void {
   );
 }
 
+/**
+ * Mock fetch returning HTTP 429 with the real API's error body shape.
+ * The live Smithsonian API returns HTTP 429 (not HTTP 200) for rate limits.
+ * fetchWithTimeout reads `response.ok === false` and throws RateLimited before
+ * the service layer ever parses the body.
+ */
+function mockFetch429(): void {
+  const errorBody = JSON.stringify({
+    error: {
+      code: 'OVER_RATE_LIMIT',
+      message:
+        'You have exceeded your rate limit. Try again later or contact us at https://api.si.edu:443/contact/ for assistance',
+    },
+  });
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      statusText: 'Too Many Requests',
+      headers: { get: (name: string) => (name === 'retry-after' ? '40' : null) },
+      text: async () => errorBody,
+      json: async () => JSON.parse(errorBody),
+    }),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -233,6 +260,21 @@ describe('SmithsonianService', () => {
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     });
 
+    it('HTTP 429 response uses RateLimited code — real API shape', async () => {
+      // The live Smithsonian API returns HTTP 429 (not HTTP 200) for rate limits.
+      // fetchWithTimeout maps 429 → RateLimited (-32003) before the service body parser runs.
+      // RateLimited is in withRetry's TRANSIENT_CODES — use fake timers to exhaust retries.
+      vi.useFakeTimers();
+      mockFetch429();
+      const svc = makeService();
+      const ctx = createMockContext();
+      const promise = svc.search({ query: 'test', rows: 5, start: 0 }, ctx).catch((e) => e);
+      await vi.runAllTimersAsync();
+      const err = await promise;
+      vi.useRealTimers();
+      expect(err.code).toBe(JsonRpcErrorCode.RateLimited);
+    });
+
     it('handles sparse row — missing optional fields do not throw', async () => {
       const sparseResponse: RawSearchResponse = {
         status: 200,
@@ -283,6 +325,25 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = createMockContext();
       await expect(svc.getContent('nasm_MISSING', ctx)).rejects.toThrow(/No Smithsonian object/i);
+    });
+
+    it('HTTP 404 from content endpoint surfaces as notFound — not retried', async () => {
+      // fetchWithTimeout throws NotFound on HTTP 404; getContent re-wraps it with record context.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          statusText: 'Not Found',
+          headers: { get: () => null },
+          text: async () => '{"error":{"code":"NOT_FOUND","message":"Record not found"}}',
+        }),
+      );
+      const svc = makeService();
+      const ctx = createMockContext();
+      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
+      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err.message).toMatch(/nasm_MISSING/i);
     });
 
     it('reads object from response directly — not response.rows[0] (content endpoint shape)', async () => {
