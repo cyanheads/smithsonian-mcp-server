@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
 
 const RelatedObjectSchema = z
   .object({
@@ -61,7 +61,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     related: z
       .array(RelatedObjectSchema)
       .describe(
-        'Related objects ranked by number of matching metadata signals. Empty when no related objects were found across all fan-out searches.',
+        'Related objects interleaved across the fan-out signals so each signal contributes. Empty when no related objects were found across all fan-out searches.',
       ),
     search_signals_used: z
       .array(z.string().describe('A metadata signal used for a fan-out search.'))
@@ -109,40 +109,47 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const objectTypes = indexed?.object_type ?? [];
     const dates = indexed?.date ?? [];
 
-    // Build fan-out queries: culture, maker, topic, period+type
-    type FanOut = { query: string; fq: string[]; signal: string };
+    // Build fan-out queries: culture, maker, topic, period+type.
+    // Field constraints are embedded in q as Lucene field:value terms.
+    type FanOut = { query: string; filters: string[]; signal: string };
     const fanOuts: FanOut[] = [];
 
-    if (cultures.length > 0) {
+    const culture0 = cultures[0];
+    if (culture0) {
       fanOuts.push({
-        query: cultures[0]!,
-        fq: [`culture:${cultures[0]!}`],
-        signal: `culture: ${cultures[0]!}`,
+        query: '',
+        filters: [luceneField('culture', culture0)],
+        signal: `culture: ${culture0}`,
       });
     }
-    if (makerNames.length > 0) {
+    const maker0 = makerNames[0];
+    if (maker0) {
       fanOuts.push({
-        query: makerNames[0]!,
-        fq: [],
-        signal: `maker: ${makerNames[0]!}`,
+        query: maker0,
+        filters: [],
+        signal: `maker: ${maker0}`,
       });
     }
-    if (topics.length > 0) {
+    const topic0 = topics[0];
+    if (topic0) {
       fanOuts.push({
-        query: topics[0]!,
-        fq: ['type:edanmdm'],
-        signal: `topic: ${topics[0]!}`,
+        query: topic0,
+        filters: [],
+        signal: `topic: ${topic0}`,
       });
     }
     // Always add period+type combo
     const period = dates[0];
     const objType = objectTypes[0];
     if (period || objType) {
-      const q = [period, objType].filter(Boolean).join(' ');
+      const filters = [
+        period && `date:${period}`,
+        objType && luceneField('object_type', objType),
+      ].filter((x): x is string => Boolean(x));
       const signal = [period && `period: ${period}`, objType && `type: ${objType}`]
         .filter(Boolean)
         .join(', ');
-      fanOuts.push({ query: q, fq: ['type:edanmdm'], signal });
+      fanOuts.push({ query: '', filters, signal });
     }
 
     const searchSignalsUsed = fanOuts.map((f) => f.signal);
@@ -151,45 +158,56 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     // Step 2: fan-out searches in parallel (graceful degradation)
     const fanOutResults = await Promise.allSettled(
       fanOuts.map((fo) =>
-        svc.search({ query: fo.query, rows: 10, start: 0, fq: fo.fq }, ctx).then((res) => ({
-          items: res.rows,
-          signal: fo.signal,
-        })),
+        svc
+          .search({ query: fo.query, rows: 10, start: 0, filters: fo.filters }, ctx)
+          .then((res) => ({ items: res.rows, signal: fo.signal })),
       ),
     );
 
-    // Step 3: collect, deduplicate, rank
+    // Step 3: collect, deduplicate, then interleave round-robin so every
+    // fan-out signal contributes before any one backfills.
     const seen = new Set<string>([anchorSummary.record_id]);
-    const relatedMap = new Map<string, { item: typeof anchorSummary; signals: string[] }>();
+    const buckets: Array<{ item: typeof anchorSummary; signal: string }[]> = [];
 
     for (const result of fanOutResults) {
       if (result.status === 'rejected') continue;
       const { items, signal } = result.value;
+      const bucket: { item: typeof anchorSummary; signal: string }[] = [];
       for (const item of items) {
         if (seen.has(item.record_id)) continue;
         seen.add(item.record_id);
-        const existing = relatedMap.get(item.record_id);
-        if (existing) {
-          existing.signals.push(signal);
-        } else {
-          relatedMap.set(item.record_id, { item, signals: [signal] });
-        }
+        bucket.push({ item, signal });
       }
+      if (bucket.length > 0) buckets.push(bucket);
     }
 
-    // Sort by signal count descending, cap at limit
-    const related = [...relatedMap.values()]
-      .sort((a, b) => b.signals.length - a.signals.length)
-      .slice(0, input.limit)
-      .map(({ item, signals }) => ({
-        record_id: item.record_id,
-        title: item.title,
-        unit_code: item.unit_code,
-        museum_name: item.museum_name,
-        thumbnail_url: item.thumbnail_url,
-        is_cc0: item.is_cc0,
-        similarity_signals: signals,
-      }));
+    // Round-robin interleave: take one item from each bucket per round so every
+    // signal contributes before any one backfills. Buckets are deduplicated
+    // against each other above, so each item carries exactly one signal.
+    const merged: Array<{ item: typeof anchorSummary; signals: string[] }> = [];
+    let round = 0;
+    while (merged.length < input.limit) {
+      let advanced = false;
+      for (const bucket of buckets) {
+        const entry = bucket[round];
+        if (!entry) continue;
+        merged.push({ item: entry.item, signals: [entry.signal] });
+        advanced = true;
+        if (merged.length >= input.limit) break;
+      }
+      if (!advanced) break;
+      round++;
+    }
+
+    const related = merged.map(({ item, signals }) => ({
+      record_id: item.record_id,
+      title: item.title,
+      unit_code: item.unit_code,
+      museum_name: item.museum_name,
+      thumbnail_url: item.thumbnail_url,
+      is_cc0: item.is_cc0,
+      similarity_signals: signals,
+    }));
 
     ctx.log.info('Related search complete', {
       anchor: anchorSummary.record_id,

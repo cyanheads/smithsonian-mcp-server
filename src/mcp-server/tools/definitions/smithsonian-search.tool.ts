@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
 
 const ObjectSummarySchema = z
   .object({
@@ -41,7 +41,7 @@ const ObjectSummarySchema = z
 export const smithsonianSearch = tool('smithsonian_search', {
   title: 'Search Smithsonian Collections',
   description:
-    'Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, media type, and online-only availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media.',
+    'Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -82,10 +82,6 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .describe(
             'Geographic place (e.g. "United States of America"). Search first to discover valid values.',
           ),
-        online_media_type: z
-          .enum(['Images', 'Videos', 'Audio', '3D Images'])
-          .optional()
-          .describe('Restrict to objects with a specific media type.'),
         online_only: z
           .boolean()
           .optional()
@@ -137,23 +133,28 @@ export const smithsonianSearch = tool('smithsonian_search', {
   async handler(input, ctx) {
     const svc = getSmithsonianService();
 
-    // Build filter queries
-    const fq: string[] = [];
+    // Build Lucene field:value filters to embed in q.
+    // Multi-word values are quoted; single tokens are bare.
+    const filters: string[] = [];
     const f = input.filters;
-    if (f?.unit_code) fq.push(`unit_code:${f.unit_code}`);
-    if (f?.object_type) fq.push(`object_type:${f.object_type}`);
-    if (f?.date_decade) fq.push(`date:${f.date_decade}`);
-    if (f?.culture) fq.push(`culture:${f.culture}`);
-    if (f?.place) fq.push(`place:${f.place}`);
-    if (f?.online_media_type) fq.push(`online_media_type:${f.online_media_type}`);
-    if (f?.online_only) fq.push('online_media_type:*');
-    if (f?.cc0_only) fq.push('media_usage:CC0');
+    if (f?.unit_code) filters.push(`unit_code:${f.unit_code}`);
+    if (f?.object_type) filters.push(luceneField('object_type', f.object_type));
+    if (f?.date_decade) filters.push(`date:${f.date_decade}`);
+    if (f?.culture) filters.push(luceneField('culture', f.culture));
+    if (f?.place) filters.push(luceneField('place', f.place));
+    if (f?.online_only) filters.push('online_media_type:*');
+    if (f?.cc0_only) filters.push('media_usage:CC0');
 
     const rows = Math.min(input.rows, 100);
-    ctx.log.info('Searching Smithsonian', { query: input.query, rows, start: input.start, fq });
+    ctx.log.info('Searching Smithsonian', {
+      query: input.query,
+      rows,
+      start: input.start,
+      filters,
+    });
 
     const { rows: objects, rowCount } = await svc.search(
-      { query: input.query, rows, start: input.start, fq },
+      { query: input.query, rows, start: input.start, filters },
       ctx,
     );
 

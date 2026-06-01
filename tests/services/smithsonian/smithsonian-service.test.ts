@@ -212,7 +212,7 @@ describe('SmithsonianService', () => {
       expect(headers?.['X-Api-Key']).toBe('test-key-12345');
     });
 
-    it('appends fq params for filters', async () => {
+    it('embeds filters into q as ANDed Lucene constraints', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
         status: 200,
@@ -223,12 +223,16 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = createMockContext();
       await svc.search(
-        { query: 'test', rows: 5, start: 0, fq: ['unit_code:NASM', 'media_usage:CC0'] },
+        { query: 'test', rows: 5, start: 0, filters: ['unit_code:NASM', 'media_usage:CC0'] },
         ctx,
       );
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
-      expect(calledUrl).toContain('fq=unit_code%3ANASM');
-      expect(calledUrl).toContain('fq=media_usage%3ACC0');
+      // Filters must appear in q, not as separate fq params
+      expect(calledUrl).not.toContain('fq=');
+      const qs = new URL(calledUrl).searchParams;
+      const q = qs.get('q') ?? '';
+      // ANDed as hard constraints; base query parenthesized so AND doesn't bind to one word
+      expect(q).toBe('(test) AND unit_code:NASM AND media_usage:CC0');
     });
 
     it('throws on API_KEY_MISSING error-in-200', async () => {

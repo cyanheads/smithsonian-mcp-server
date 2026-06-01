@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
 
 const SampleObjectSchema = z
   .object({
@@ -85,39 +85,40 @@ export const smithsonianExplore = tool('smithsonian_explore', {
   async handler(input, ctx) {
     const svc = getSmithsonianService();
 
-    // Build the constrained search based on mode
-    const fq: string[] = [];
-    let query = input.value;
+    // Build the constrained search based on mode.
+    // Field constraints are embedded in q as Lucene field:value terms (EDAN has no fq param).
+    const filters: string[] = [];
+    let query = '';
 
     switch (input.mode) {
       case 'museum':
-        // unit_code takes short codes; if it looks like a long name, use it as query
+        // Short alphanumeric codes are unit_code values (e.g. "NASM", "NMNH").
+        // Long values are museum names — use as free-text query only.
         if (input.value.length <= 8 && /^[A-Za-z]+$/.test(input.value)) {
-          fq.push(`unit_code:${input.value.toUpperCase()}`);
-          query = '*';
+          filters.push(`unit_code:${input.value.toUpperCase()}`);
+          query = '';
         } else {
-          // Search by museum name as free text
-          fq.push('type:edanmdm');
+          query = input.value;
         }
         break;
       case 'culture':
-        fq.push(`culture:${input.value}`);
-        query = input.value;
+        filters.push(luceneField('culture', input.value));
+        query = '';
         break;
       case 'period':
-        fq.push(`date:${input.value}`);
-        query = input.value;
+        filters.push(`date:${input.value}`);
+        query = '';
         break;
       case 'medium':
-        fq.push(`object_type:${input.value}`);
-        query = input.value;
+        filters.push(luceneField('object_type', input.value));
+        query = '';
         break;
     }
 
-    ctx.log.info('Exploring Smithsonian', { mode: input.mode, value: input.value, fq, query });
+    ctx.log.info('Exploring Smithsonian', { mode: input.mode, value: input.value, filters, query });
 
     const { rows: objects, rowCount } = await svc.search(
-      { query, rows: input.rows, start: 0, fq },
+      { query, rows: input.rows, start: 0, filters },
       ctx,
     );
 

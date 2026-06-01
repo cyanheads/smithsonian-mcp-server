@@ -72,7 +72,7 @@ describe('smithsonianExplore', () => {
     });
   });
 
-  it('adds culture fq filter for culture mode', async () => {
+  it('embeds culture filter in q for culture mode', async () => {
     const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(1), rowCount: 1 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       search: searchFn,
@@ -82,11 +82,14 @@ describe('smithsonianExplore', () => {
     const input = smithsonianExplore.input.parse({ mode: 'culture', value: 'Plains Indian' });
     await smithsonianExplore.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { fq: string[] };
-    expect(calledParams.fq).toContain('culture:Plains Indian');
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
+    // Multi-word culture value must be quoted in the Lucene term
+    expect(calledParams.filters).toContain('culture:"Plains Indian"');
+    // Culture mode uses filter only — no free-text query
+    expect(calledParams.query).toBe('');
   });
 
-  it('adds date fq filter for period mode', async () => {
+  it('embeds date filter in q for period mode', async () => {
     const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(1), rowCount: 1 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       search: searchFn,
@@ -96,8 +99,25 @@ describe('smithsonianExplore', () => {
     const input = smithsonianExplore.input.parse({ mode: 'period', value: '1940s' });
     await smithsonianExplore.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { fq: string[] };
-    expect(calledParams.fq).toContain('date:1940s');
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
+    expect(calledParams.filters).toContain('date:1940s');
+    expect(calledParams.query).toBe('');
+  });
+
+  it('passes unit_code filter and empty query for museum mode with short code', async () => {
+    const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(3), rowCount: 150 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext();
+    const input = smithsonianExplore.input.parse({ mode: 'museum', value: 'NMNH' });
+    await smithsonianExplore.handler(input, ctx);
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
+    expect(calledParams.filters).toContain('unit_code:NMNH');
+    // Museum mode with short code uses filter only — no free-text query
+    expect(calledParams.query).toBe('');
   });
 
   it('format renders mode, value, total_count, and sample record_ids', () => {

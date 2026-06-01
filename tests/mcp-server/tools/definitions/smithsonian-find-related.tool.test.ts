@@ -154,6 +154,73 @@ describe('smithsonianFindRelated', () => {
     expect(result.related.length).toBeLessThanOrEqual(5);
   });
 
+  it('interleaves fan-out signals so each contributes before any backfills', async () => {
+    // Setup: anchor has culture + maker + topic signals.
+    // Each fan-out returns distinct non-overlapping results.
+    const anchorRaw = makeAnchorRaw();
+    const anchorSummary = {
+      record_id: 'nasm_TEST001',
+      title: 'Anchor',
+      unit_code: 'NASM',
+      museum_name: 'National Air and Space Museum',
+      is_cc0: true,
+      has_media: true,
+    };
+
+    // Build distinct result sets per signal
+    const cultureResults: ObjectSummary[] = Array.from({ length: 5 }, (_, i) => ({
+      record_id: `culture_${i + 1}`,
+      title: `Culture Object ${i + 1}`,
+      unit_code: 'NMAI',
+      museum_name: 'National Museum of the American Indian',
+      is_cc0: true,
+      has_media: false,
+    }));
+    const makerResults: ObjectSummary[] = Array.from({ length: 5 }, (_, i) => ({
+      record_id: `maker_${i + 1}`,
+      title: `Maker Object ${i + 1}`,
+      unit_code: 'NMAH',
+      museum_name: 'National Museum of American History',
+      is_cc0: false,
+      has_media: true,
+    }));
+    const topicResults: ObjectSummary[] = Array.from({ length: 5 }, (_, i) => ({
+      record_id: `topic_${i + 1}`,
+      title: `Topic Object ${i + 1}`,
+      unit_code: 'NMNH',
+      museum_name: 'National Museum of Natural History',
+      is_cc0: true,
+      has_media: true,
+    }));
+
+    // Each search call returns a different result set based on call order
+    const searchFn = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: cultureResults, rowCount: 5 })
+      .mockResolvedValueOnce({ rows: makerResults, rowCount: 5 })
+      .mockResolvedValueOnce({ rows: topicResults, rowCount: 5 })
+      .mockResolvedValue({ rows: [], rowCount: 0 });
+
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue(anchorSummary),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    // Limit to 6 — with round-robin we expect 2 from each signal (culture, maker, topic)
+    const input = smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 6 });
+    const result = await smithsonianFindRelated.handler(input, ctx);
+
+    expect(result.related.length).toBe(6);
+
+    // Verify each signal contributes at least one result
+    const signalsRepresented = new Set(result.related.flatMap((r) => r.similarity_signals));
+    expect(signalsRepresented.has('culture: American')).toBe(true);
+    expect(signalsRepresented.has('maker: Lockheed')).toBe(true);
+    expect(signalsRepresented.has('topic: Aviation')).toBe(true);
+  });
+
   it('returns empty related array when all fan-out searches return only the anchor or no hits', async () => {
     // Design spec: "Returns up to 20 related objects ... empty when no related objects were found."
     // If every fan-out search result only contains the anchor ID (already in seen set),

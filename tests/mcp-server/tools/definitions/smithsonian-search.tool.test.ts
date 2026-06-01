@@ -68,7 +68,7 @@ describe('smithsonianSearch', () => {
     });
   });
 
-  it('builds filter queries from all filter fields', async () => {
+  it('builds filter queries embedded in q for all filter fields', async () => {
     const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       search: searchFn,
@@ -86,11 +86,33 @@ describe('smithsonianSearch', () => {
     });
     await smithsonianSearch.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { fq: string[] };
-    expect(calledParams.fq).toContain('unit_code:NASM');
-    expect(calledParams.fq).toContain('object_type:Aircraft');
-    expect(calledParams.fq).toContain('media_usage:CC0');
-    expect(calledParams.fq).toContain('online_media_type:*');
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    // Filters are passed as Lucene terms to embed in q — not as separate fq params
+    expect(calledParams.filters).toContain('unit_code:NASM');
+    expect(calledParams.filters).toContain('object_type:Aircraft');
+    expect(calledParams.filters).toContain('media_usage:CC0');
+    expect(calledParams.filters).toContain('online_media_type:*');
+  });
+
+  it('quotes multi-word filter values in Lucene terms', async () => {
+    const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({
+      query: 'test',
+      filters: {
+        culture: 'Plains Indian',
+        place: 'United States of America',
+      },
+    });
+    await smithsonianSearch.handler(input, ctx);
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    expect(calledParams.filters).toContain('culture:"Plains Indian"');
+    expect(calledParams.filters).toContain('place:"United States of America"');
   });
 
   it('defaults rows to 20 and start to 0', async () => {

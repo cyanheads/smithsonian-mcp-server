@@ -264,6 +264,15 @@ function normalizeToImage(m: RawMediaItem): ImageItem | null {
 }
 
 // ---------------------------------------------------------------------------
+// Query construction
+// ---------------------------------------------------------------------------
+
+/** Build a Lucene `field:value` term, quoting values that contain whitespace. */
+export function luceneField(field: string, value: string): string {
+  return value.includes(' ') ? `${field}:"${value}"` : `${field}:${value}`;
+}
+
+// ---------------------------------------------------------------------------
 // SmithsonianService
 // ---------------------------------------------------------------------------
 
@@ -317,26 +326,42 @@ export class SmithsonianService {
   /**
    * Search across Smithsonian objects.
    * Returns normalized summaries and the total row count.
+   *
+   * Field constraints are embedded in `q` as ANDed Lucene `field:value` terms
+   * (EDAN has no `fq` parameter), so each filter is a hard constraint rather
+   * than a scoring-only hint.
    */
   async search(
     params: {
       query: string;
       rows: number;
       start: number;
-      fq?: string[];
+      /** Lucene field:value terms, ANDed into the query as hard constraints (e.g. "unit_code:NASM"). */
+      filters?: string[];
     },
     ctx: RequestContextLike,
   ): Promise<{ rows: ObjectSummary[]; rowCount: number }> {
-    const fqs = params.fq ?? [];
-    // URLSearchParams doesn't support multi-value — append each fq separately.
+    const activeFilters = params.filters ?? [];
     const cfg = getServerConfig();
     const base = `${cfg.baseUrl}/search`;
+
+    // Embed field constraints into q as ANDed Lucene terms so each filter is a
+    // HARD constraint (EDAN has no fq param). The base query is parenthesized
+    // because an explicit AND otherwise binds only to the adjacent word.
+    // Space-joining instead would make filters soft (scoring-only), letting
+    // non-matching units outrank filtered results — so the AND is required.
+    let q = params.query;
+    if (activeFilters.length > 0) {
+      const baseQ = q && q !== '*' ? `(${q})` : '';
+      const terms = activeFilters.join(' AND ');
+      q = baseQ ? `${baseQ} AND ${terms}` : terms;
+    }
+
     const qs = new URLSearchParams({
-      q: params.query,
+      q,
       rows: String(params.rows),
       start: String(params.start),
     });
-    for (const fq of fqs) qs.append('fq', fq);
     const url = `${base}?${qs.toString()}`;
 
     // Pass API key as header (not query param) so it never appears in logs or errors.
