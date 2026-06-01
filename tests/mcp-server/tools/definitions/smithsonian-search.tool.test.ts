@@ -6,7 +6,6 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianSearch } from '@/mcp-server/tools/definitions/smithsonian-search.tool.js';
-import * as canvasModule from '@/services/canvas-accessor.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary } from '@/services/smithsonian/types.js';
 
@@ -26,7 +25,6 @@ function makeObjectSummary(id = 'nasm_TEST001'): ObjectSummary {
 describe('smithsonianSearch', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    vi.spyOn(canvasModule, 'getCanvas').mockReturnValue(undefined);
   });
 
   it('returns results for a valid query', async () => {
@@ -41,6 +39,21 @@ describe('smithsonianSearch', () => {
     expect(result.objects).toHaveLength(1);
     expect(result.objects[0]?.record_id).toBe('nasm_TEST001');
     expect(result.total_count).toBe(100);
+  });
+
+  it('returns up to `rows` objects directly when rows exceeds 20', async () => {
+    const many = Array.from({ length: 25 }, (_, i) => makeObjectSummary(`nasm_TEST${i}`));
+    const searchFn = vi.fn().mockResolvedValue({ rows: many, rowCount: 5000 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'quilt', rows: 25 });
+    const result = await smithsonianSearch.handler(input, ctx);
+
+    expect(result.objects).toHaveLength(25);
+    expect(searchFn.mock.calls[0]?.[0]).toMatchObject({ rows: 25 });
   });
 
   it('throws no_results when the API returns zero rows', async () => {
@@ -111,18 +124,5 @@ describe('smithsonianSearch', () => {
     expect(text).toContain('NASM');
     expect(text).toContain('100');
     expect(text).toContain('CC0');
-  });
-
-  it('format includes canvas_id and table_name when present', () => {
-    const output = {
-      objects: [makeObjectSummary()],
-      total_count: 500,
-      canvas_id: 'abc1234567',
-      table_name: 'smithsonian_search',
-    };
-    const blocks = smithsonianSearch.format!(output);
-    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
-    expect(text).toContain('abc1234567');
-    expect(text).toContain('smithsonian_search');
   });
 });

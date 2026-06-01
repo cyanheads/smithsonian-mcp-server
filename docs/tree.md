@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-05-30 13:15:52
+Generated on: 2026-06-01 02:17:43
 
 ```text
 smithsonian-mcp-server/
@@ -124,10 +124,9 @@ smithsonian-mcp-server/
 │   │           ├── smithsonian-get-object.tool.ts
 │   │           └── smithsonian-search.tool.ts
 │   ├── services/
-│   │   ├── smithsonian/
-│   │   │   ├── smithsonian-service.ts
-│   │   │   └── types.ts
-│   │   └── canvas-accessor.ts
+│   │   └── smithsonian/
+│   │       ├── smithsonian-service.ts
+│   │       └── types.ts
 │   └── index.ts
 ├── tests/
 │   ├── mcp-server/

@@ -4,9 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { spillover } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvas } from '@/services/canvas-accessor.js';
 import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
 
 const ObjectSummarySchema = z
@@ -101,15 +99,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
       })
       .optional()
       .describe('Optional structured filters to narrow the search.'),
-    rows: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(20)
-      .describe(
-        'Page size (default 20, max 100). Results beyond 20 spill to DataCanvas when canvas is enabled.',
-      ),
+    rows: z.number().int().min(1).max(100).default(20).describe('Page size (default 20, max 100).'),
     start: z
       .number()
       .int()
@@ -117,12 +107,6 @@ export const smithsonianSearch = tool('smithsonian_search', {
       .default(0)
       .describe(
         'Pagination offset — 0-indexed. Use with rows for paging through large result sets.',
-      ),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'Existing DataCanvas token to extend. Omit to create a fresh canvas when results exceed the preview cap.',
       ),
   }),
 
@@ -133,16 +117,6 @@ export const smithsonianSearch = tool('smithsonian_search', {
     total_count: z
       .number()
       .describe('Total matching objects in the Smithsonian catalog before pagination.'),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        'DataCanvas token when results were spilled (rows > 20 or canvas_id was supplied). Pass to dataframe_query for SQL analysis across the full result set.',
-      ),
-    table_name: z
-      .string()
-      .optional()
-      .describe('Canvas table name holding the full result set when canvas_id is present.'),
   }),
 
   errors: [
@@ -192,36 +166,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
 
     ctx.log.info('Search complete', { count: objects.length, total: rowCount });
 
-    // DataCanvas spillover when rows > preview cap or canvas_id supplied
-    const PREVIEW_CAP = 20;
-    const dataCanvas = getCanvas();
-    let canvasId: string | undefined;
-    let tableName: string | undefined;
-
-    if (dataCanvas && (rows > PREVIEW_CAP || input.canvas_id)) {
-      const instance = await dataCanvas.acquire(input.canvas_id, ctx);
-      canvasId = instance.canvasId;
-
-      // Spread to plain objects: ObjectSummary lacks an index signature,
-      // so a spread is required to satisfy the canvas Row constraint.
-      const canvasRows = objects.map((o) => ({ ...o }));
-      const spillResult = await spillover({
-        canvas: instance,
-        source: canvasRows,
-        previewChars: 200_000,
-        tableName: 'smithsonian_search',
-        signal: ctx.signal,
-      });
-
-      tableName = spillResult.spilled ? spillResult.handle.tableName : 'smithsonian_search';
-    }
-
-    return {
-      objects: objects.slice(0, PREVIEW_CAP),
-      total_count: rowCount,
-      ...(canvasId && { canvas_id: canvasId }),
-      ...(tableName && { table_name: tableName }),
-    };
+    return { objects, total_count: rowCount };
   },
 
   format: (result) => {
@@ -236,9 +181,6 @@ export const smithsonianSearch = tool('smithsonian_search', {
         `**CC0:** ${obj.is_cc0 ? 'Yes' : 'No'} | **Has media:** ${obj.has_media ? 'Yes' : 'No'}`,
       );
       if (obj.thumbnail_url) lines.push(`**Thumbnail:** ${obj.thumbnail_url}`);
-    }
-    if (result.canvas_id) {
-      lines.push(`\n**DataCanvas:** \`${result.canvas_id}\` — table \`${result.table_name}\``);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

@@ -10,7 +10,6 @@ import { smithsonianFindRelated } from './mcp-server/tools/definitions/smithsoni
 import { smithsonianGetMedia } from './mcp-server/tools/definitions/smithsonian-get-media.tool.js';
 import { smithsonianGetObject } from './mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import { smithsonianSearch } from './mcp-server/tools/definitions/smithsonian-search.tool.js';
-import { setCanvas } from './services/canvas-accessor.js';
 import { initSmithsonianService } from './services/smithsonian/smithsonian-service.js';
 
 await createApp({
@@ -32,6 +31,5 @@ await createApp({
     '- Requires SMITHSONIAN_API_KEY (free from https://api.data.gov/signup).',
   setup(core) {
     initSmithsonianService(core.config, core.storage);
-    setCanvas(core.canvas);
   },
 });

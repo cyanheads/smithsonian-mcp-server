@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -54,7 +54,6 @@ Full-text search with structured filters across the entire Smithsonian catalog.
 - Free-text search over 19.4M objects from 20+ museums
 - Filters: museum unit code, object type, decade (`1920s`), culture, geographic place, media type (`Images`, `Videos`, `Audio`, `3D Images`), online-only, CC0-only
 - Returns curated summaries: title, museum, object type, thumbnail URL, CC0 flag, `record_id`
-- Results beyond 20 spill to a DataCanvas dataframe when canvas is enabled — pass `canvas_id` to extend across pages
 - Use `start` + `rows` for standard pagination (offset-based, max 100 per page)
 
 ---
@@ -115,7 +114,6 @@ Smithsonian-specific:
 
 - Wraps the [Smithsonian Open Access API](https://edan.si.edu/openaccess/apidocs/) (19.4M objects across 20+ museums) with a free `api.data.gov` key
 - CC0 gating on `smithsonian_get_media` — only open-access images returned, never restricted content
-- DataCanvas integration on `smithsonian_search` — results beyond the preview cap spill to a DuckDB-backed dataframe for SQL analysis
 - Parallel fan-out in `smithsonian_find_related` with graceful degradation (partial failures don't abort)
 - Response normalization across heterogeneous museum metadata schemas
 

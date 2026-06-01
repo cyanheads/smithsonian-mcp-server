@@ -16,7 +16,7 @@
 
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
-| `smithsonian_search` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. Spills large result sets to DataCanvas. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, media_type, online_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (InvalidParams) |
+| `smithsonian_search` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, media_type, online_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (InvalidParams) |
 | `smithsonian_get_object` | Full record by ID: title, description, dates, materials, dimensions, provenance, exhibition, credit, media URLs. Returns all media items with per-image CC0 status. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (InvalidParams) |
 | `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Searches a constrained query internally and returns category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. | `mode`, `value`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound) |
 | `smithsonian_find_related` | Given an object ID, finds related items across collections. Fetches the anchor object's metadata (culture, period, object_type, maker topics), then fan-searches the API to surface cross-collection connections. Returns up to 20 related objects with similarity rationale. | `id`, `limit` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (InvalidParams) |
@@ -47,7 +47,6 @@ The server earns standalone status: single-source, but with massive cross-collec
 - CC0 gating: check `content.descriptiveNonRepeating.metadata_usage.access === 'CC0'` for the object; per-image `media[].usage.access === 'CC0'` for each image.
 - Images are served by the Smithsonian IDS (Image Delivery Service) at `ids.si.edu`. **No IIIF manifests** — the IDS uses direct download URLs with `_screen`, `_thumb`, and high-res TIFF/JPEG variants.
 - Read-only throughout.
-- DataCanvas opt-in for large result sets (search returning 100+ items).
 
 ## Domain Mapping
 
@@ -80,7 +79,7 @@ Single service — one API, one base URL, one auth pattern. Two primary methods 
 
 1. Config (`src/config/server-config.ts`) — `SMITHSONIAN_API_KEY`, base URL, max rows. Hard-fail on missing key.
 2. `SmithsonianService` — `search()` + `getContent()` with retry/backoff, URL construction, API key injection, response normalization helpers (flatten `freetext[]` label-content arrays, extract media, check CC0).
-3. `smithsonian_search` — search + DataCanvas spillover for large result sets.
+3. `smithsonian_search` — search returning up to `rows` (≤100) curated summaries with offset pagination.
 4. `smithsonian_get_object` — single content fetch with full field normalization.
 5. `smithsonian_get_media` — extract and gate images from a fetched object.
 6. `smithsonian_explore` — mode-dispatch to constrained searches.
@@ -94,7 +93,7 @@ Each step is independently testable.
 
 ### `smithsonian_search`
 
-**Description:** Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, media type, and online-only availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. When results exceed the page size, a DataCanvas table holds the full result set for SQL analysis. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
+**Description:** Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, media type, and online-only availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
 
 **Input:**
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`).
@@ -109,12 +108,10 @@ Each step is independently testable.
   - `cc0_only?: boolean` — when true, adds `fq=media_usage:CC0` to restrict to CC0 objects. Useful before calling `smithsonian_get_media`.
 - `rows?: number` — page size (default 20, max 100).
 - `start?: number` — offset for pagination (default 0).
-- `canvas_id?: string` — existing DataCanvas token to extend. Omit to create a new canvas when results are large.
 
 **Output:**
 - `objects[]` — curated summaries: `{ record_id, title, date, unit_code, museum_name, object_type, thumbnail_url, is_cc0, has_media }`.
 - `total_count` — total matching objects before pagination.
-- `canvas_id?` — DataCanvas token when `rows > 20` (the inline display cap) or when `canvas_id` is explicitly passed. SQL-queryable with columns mirroring `objects[]`.
 
 **Errors:**
 - `no_results` (NotFound) — no objects matched the query and filters. Recovery: broaden the query, remove filters, or check spelling.
@@ -271,9 +268,9 @@ The idea doc used `smithsonian_get_image`. Renamed to `smithsonian_get_media` �
 
 The API response has two ID-like fields: `url` (e.g. `"edanmdm:nasm_A19670093000"`) and `content.descriptiveNonRepeating.record_ID` (e.g. `"nasm_A19670093000"`). The content endpoint accepts the full `edanmdm:` prefixed URL. The design uses `record_id` (the shorter form) as the identifier agents work with; the service layer prepends `edanmdm:` when calling the content endpoint. This matches the observable SI URL patterns (e.g., `si.edu/object/...:nasm_A19670093000`).
 
-### DataCanvas for large search results
+### No DataCanvas — direct paginated returns
 
-The API's `rowCount` can be in the millions for broad queries. A page of 100 results is already large. The `smithsonian_search` tool pages at 20 by default. When `rows > 20` or the caller explicitly passes `canvas_id`, results spill to DataCanvas. The inline `objects[]` array stays capped at 20 for `format()` display; the canvas holds the full page for SQL analysis (filter by `is_cc0`, sort by `unit_code`, count by `object_type`).
+An earlier iteration spilled large result sets to a DuckDB-backed DataCanvas (`rows > 20` routed the full page to a SQL-queryable table). It was removed: the result set is catalog object summaries capped at ≤100 rows, where the workflow is find-the-object-then-drill-in, not aggregate-over-rows — the wrong shape for SQL, and `smithsonian_explore` already covers the cross-museum breakdown case. `smithsonian_search` now returns up to `rows` (≤100) summaries directly; page through larger result sets with `start` + `rows`.
 
 ### CC0 gating is object-level AND image-level
 
