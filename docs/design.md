@@ -144,7 +144,7 @@ Each step is independently testable.
 - `object_rights` — CC0 or other rights statement from `freetext.objectRights`
 - `is_cc0` — boolean gated on `metadata_usage.access === 'CC0'`
 - `record_link` — canonical SI URL for the object
-- `media_summary` — `{ count, has_cc0_images, thumbnail_url }` — call `smithsonian_get_media` for full image list
+- `media_summary` — `{ count, cc0_image_count, has_cc0_images, thumbnail_url }` — `count` is the raw total across all media types (images, 3D models, video); `cc0_image_count` is what `smithsonian_get_media` returns, so the two reconcile. Call `smithsonian_get_media` for the full image list
 
 **Errors:**
 - `not_found` (NotFound) — no object with that ID in the catalog. Recovery: verify the ID via `smithsonian_search`.
@@ -258,7 +258,7 @@ The idea doc assumed a category browse endpoint. Live probing confirmed the `/te
 
 ### `smithsonian_get_media` is a separate tool, not merged into `smithsonian_get_object`
 
-The object endpoint returns a `media_summary` (count, has_cc0, thumbnail). Full image arrays can be 15–20 images per object, each with 4 resolution variants — 300–500 lines of data in a typical object like the Amelia Earhart Vega. Separating media retrieval keeps `smithsonian_get_object` focused on provenance/catalog data and lets agents skip the image fetch for text-only research workflows.
+The object endpoint returns a `media_summary` (count, cc0_image_count, has_cc0_images, thumbnail). Full image arrays can be 15–20 images per object, each with 4 resolution variants — 300–500 lines of data in a typical object like the Amelia Earhart Vega. Separating media retrieval keeps `smithsonian_get_object` focused on provenance/catalog data and lets agents skip the image fetch for text-only research workflows.
 
 ### Rename from `smithsonian_get_image` to `smithsonian_get_media`
 

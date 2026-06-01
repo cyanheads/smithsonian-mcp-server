@@ -7,7 +7,11 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
-import type { RawContentResponse, RawSearchResponse } from '@/services/smithsonian/types.js';
+import type {
+  RawContentResponse,
+  RawEDAN,
+  RawSearchResponse,
+} from '@/services/smithsonian/types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -396,7 +400,62 @@ describe('SmithsonianService', () => {
       expect(full.description).toBe('A test object description.');
       expect(full.culture).toEqual(['American']);
       expect(full.media_summary.count).toBe(1);
+      expect(full.media_summary.cc0_image_count).toBe(1);
       expect(full.media_summary.has_cc0_images).toBe(true);
+    });
+
+    it('cc0_image_count counts only CC0 image-type items — reconciles with get_media', () => {
+      // Mirrors the real nasm_A19700102000 shape: CC0 images alongside CC0
+      // non-image media (3D models). `count` is the raw total; `cc0_image_count`
+      // is what get_media returns, so the two legitimately differ.
+      const svc = makeService();
+      const raw: RawEDAN = {
+        title: 'Mixed Media Object',
+        unitCode: 'NASM',
+        content: {
+          descriptiveNonRepeating: {
+            record_ID: 'nasm_MIXED',
+            metadata_usage: { access: 'CC0' },
+            online_media: {
+              mediaCount: 3,
+              media: [
+                { id: 'a', type: 'Images', usage: { access: 'CC0' } },
+                { id: 'b', type: '3d_voyager', usage: { access: 'CC0' } },
+                { id: 'c', type: 'Images', usage: { access: 'Usage Conditions Apply' } },
+              ],
+            },
+          },
+        },
+      };
+      const full = svc.toFullObject(raw);
+      expect(full.media_summary.count).toBe(3);
+      // Only the CC0 image-type item counts: the 3D model (non-image) and the
+      // non-CC0 image are both excluded — matching smithsonian_get_media.
+      expect(full.media_summary.cc0_image_count).toBe(1);
+      expect(full.media_summary.has_cc0_images).toBe(true);
+      // toImageItems returns both image-type items; CC0 filtering happens in get_media.
+      expect(svc.toImageItems(raw)).toHaveLength(2);
+    });
+
+    it('has_cc0_images is false when CC0 media are all non-image (e.g. 3D models)', () => {
+      const svc = makeService();
+      const raw: RawEDAN = {
+        title: '3D Only',
+        unitCode: 'NASM',
+        content: {
+          descriptiveNonRepeating: {
+            record_ID: 'nasm_3DONLY',
+            online_media: {
+              mediaCount: 1,
+              media: [{ id: 'x', type: '3d_voyager', usage: { access: 'CC0' } }],
+            },
+          },
+        },
+      };
+      const full = svc.toFullObject(raw);
+      expect(full.media_summary.count).toBe(1);
+      expect(full.media_summary.cc0_image_count).toBe(0);
+      expect(full.media_summary.has_cc0_images).toBe(false);
     });
   });
 

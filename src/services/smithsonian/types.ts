@@ -138,6 +138,7 @@ export interface FullObject {
   materials: string[];
   media_summary: {
     count: number;
+    cc0_image_count: number;
     has_cc0_images: boolean;
     thumbnail_url?: string;
   };

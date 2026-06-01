@@ -181,9 +181,12 @@ function normalizeToFull(raw: RawEDAN): FullObject {
   // Rights
   const object_rights = firstContent(freetext?.objectRights);
 
-  // Media summary
+  // Media summary — cc0_image_count runs the SAME image pipeline as
+  // smithsonian_get_media (extractImageItems → CC0 filter), so the two counts
+  // reconcile by construction. `count` is the raw total across all media types
+  // (images, 3D models, video, …), which is why it can exceed cc0_image_count.
   const media = dnr?.online_media?.media ?? [];
-  const cc0MediaCount = media.filter((m) => m.usage?.access === 'CC0').length;
+  const cc0ImageCount = extractImageItems(media).filter((img) => img.is_cc0).length;
   const mediaCount = dnr?.online_media?.mediaCount ?? media.length;
 
   const thumbnailUrl = firstThumbnail(raw);
@@ -208,7 +211,8 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     ...(dnr?.record_link !== undefined && { record_link: dnr.record_link }),
     media_summary: {
       count: mediaCount,
-      has_cc0_images: cc0MediaCount > 0,
+      cc0_image_count: cc0ImageCount,
+      has_cc0_images: cc0ImageCount > 0,
       ...(thumbnailUrl !== undefined && { thumbnail_url: thumbnailUrl }),
     },
   };
@@ -261,6 +265,19 @@ function normalizeToImage(m: RawMediaItem): ImageItem | null {
     ...(high_res_jpeg !== undefined && { high_res_jpeg }),
     ...(high_res_tiff !== undefined && { high_res_tiff }),
   };
+}
+
+/**
+ * Select and normalize the image-type items from an online_media `media[]` array.
+ * Mirrors smithsonian_get_media's selection (type 'Images' or untyped, with a
+ * resolvable media id) so callers that count CC0 images agree with what
+ * get_media actually returns. Non-image media (3D models, video) is excluded.
+ */
+function extractImageItems(media: RawMediaItem[]): ImageItem[] {
+  return media
+    .filter((m): m is RawMediaItem => m.type === 'Images' || !m.type)
+    .map(normalizeToImage)
+    .filter((m): m is ImageItem => m !== null);
 }
 
 // ---------------------------------------------------------------------------
@@ -403,11 +420,7 @@ export class SmithsonianService {
 
   /** Extract and normalize image items from a raw EDAN record. */
   toImageItems(raw: RawEDAN): ImageItem[] {
-    const media = raw.content?.descriptiveNonRepeating?.online_media?.media ?? [];
-    return media
-      .filter((m): m is RawMediaItem => m.type === 'Images' || !m.type)
-      .map(normalizeToImage)
-      .filter((m): m is ImageItem => m !== null);
+    return extractImageItems(raw.content?.descriptiveNonRepeating?.online_media?.media ?? []);
   }
 
   /** Check whether an object is CC0. */

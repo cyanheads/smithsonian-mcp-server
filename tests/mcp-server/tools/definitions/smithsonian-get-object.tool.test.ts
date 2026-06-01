@@ -29,7 +29,12 @@ function makeFullObject(id = 'nasm_TEST001'): FullObject {
     object_rights: 'CC0',
     is_cc0: true,
     record_link: 'http://n2t.net/ark:/65665/test',
-    media_summary: { count: 5, has_cc0_images: true, thumbnail_url: 'https://ids.si.edu/thumb' },
+    media_summary: {
+      count: 5,
+      cc0_image_count: 4,
+      has_cc0_images: true,
+      thumbnail_url: 'https://ids.si.edu/thumb',
+    },
   };
 }
 
@@ -53,6 +58,7 @@ describe('smithsonianGetObject', () => {
     expect(result.is_cc0).toBe(true);
     expect(result.makers).toHaveLength(1);
     expect(result.media_summary.count).toBe(5);
+    expect(result.media_summary.cc0_image_count).toBe(4);
   });
 
   it('throws invalid_id for empty ID', async () => {
@@ -87,7 +93,8 @@ describe('smithsonianGetObject', () => {
     expect(text).toContain('1965');
     expect(text).toContain('Manufacturer');
     expect(text).toContain('Lockheed');
-    expect(text).toContain('5 item');
+    expect(text).toContain('5 total item');
+    expect(text).toContain('4 CC0 image');
     expect(text).toContain('A19670093000');
     expect(text).toContain('http://n2t.net');
   });
@@ -108,7 +115,7 @@ describe('smithsonianGetObject', () => {
       exhibitions: [],
       identifiers: [],
       is_cc0: false,
-      media_summary: { count: 0, has_cc0_images: false },
+      media_summary: { count: 0, cc0_image_count: 0, has_cc0_images: false },
     };
     const blocks = smithsonianGetObject.format!(sparse);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');

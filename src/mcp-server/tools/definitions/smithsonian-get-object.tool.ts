@@ -108,8 +108,19 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       .describe('Canonical Smithsonian Institution URL for this object.'),
     media_summary: z
       .object({
-        count: z.number().describe('Total number of online media items.'),
-        has_cc0_images: z.boolean().describe('True when at least one image is CC0.'),
+        count: z
+          .number()
+          .describe(
+            'Total number of online media items, across all types (includes non-image media such as 3D models).',
+          ),
+        cc0_image_count: z
+          .number()
+          .describe(
+            'Number of CC0 images smithsonian_get_media returns for this object. Lower than count when the object has non-image media (e.g. 3D models) or non-CC0 images.',
+          ),
+        has_cc0_images: z
+          .boolean()
+          .describe('True when at least one CC0 image is available (cc0_image_count > 0).'),
         thumbnail_url: z.string().optional().describe('Thumbnail URL from the first media item.'),
       })
       .describe('Media availability summary. Call smithsonian_get_media for full image URLs.'),
@@ -204,11 +215,12 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     if (result.credit_line) lines.push(`**Credit:** ${result.credit_line}`);
     if (result.object_rights) lines.push(`**Rights:** ${result.object_rights}`);
     lines.push('');
+    const media = result.media_summary;
     lines.push(
-      `**Media:** ${result.media_summary.count} item(s), CC0 images: ${result.media_summary.has_cc0_images ? 'Yes' : 'No'}`,
+      `**Media:** ${media.count} total item(s); ${media.cc0_image_count} CC0 image(s) via smithsonian_get_media. CC0 images: ${media.has_cc0_images ? 'Yes' : 'No'}`,
     );
-    if (result.media_summary.thumbnail_url) {
-      lines.push(`**Thumbnail:** ${result.media_summary.thumbnail_url}`);
+    if (media.thumbnail_url) {
+      lines.push(`**Thumbnail:** ${media.thumbnail_url}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
