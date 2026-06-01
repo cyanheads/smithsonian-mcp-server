@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-05-31
+
+Fix structured filters being silently dropped, fix find_related fan-out returning only first signal's results, remove non-functional online_media_type filter
+
 ## [0.1.2](changelog/0.1.x/0.1.2.md) — 2026-05-31
 
 Remove DataCanvas integration from smithsonian_search; fixes rows > 20 crash on hosted instance
