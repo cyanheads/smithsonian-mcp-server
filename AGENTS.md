@@ -1,8 +1,8 @@
 # Developer Protocol
 
 **Server:** smithsonian-mcp-server
-**Version:** 0.1.4
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.16`
+**Version:** 0.1.5
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.21`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
 **Zod:** ^4.4.3
@@ -282,6 +282,8 @@ Available skills:
 | `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
 | `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
 | `api-workers` | Cloudflare Workers runtime |
+| `api-mirror` | MirrorService: persistent SQLite-backed local mirror of bulk upstream datasets — `defineMirror`, `sqliteMirrorStore`, FTS5, sync state machine |
+| `orchestrations` | Multi-agent pipeline orchestration workflows — phased fanout, barrier gates, model tiers |
 
 When you complete a skill's checklist, check the boxes and add a completion timestamp at the end (e.g., `Completed: 2026-03-11`).
 
@@ -307,6 +309,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `npm run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `npm run changelog:check` | Verify `CHANGELOG.md` is in sync (used by devcheck) |
 | `npm run bundle` | Build and pack as `.mcpb` for one-click Claude Desktop install |
+| `bun run release:github` | Create GitHub Release from the current annotated tag (used by `release-and-publish` skill) |
 
 ---
 

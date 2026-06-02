@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-06-02
+
+Adopt @cyanheads/mcp-ts-core 0.9.21; sync skills (api-mirror, orchestrations, 8 updated); add release:github script
+
 ## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-05-31
 
 Fix media_summary.count/get_media count mismatch; add cc0_image_count field that reconciles with get_media by construction
