@@ -56,31 +56,31 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .string()
           .optional()
           .describe(
-            'Museum unit code (e.g. "NASM", "NMNH", "SAAM", "NMAH", "NMAAHC", "NMAI", "NPG", "CHNDM", "SIL"). Search first to discover valid codes.',
+            'Museum unit code (e.g. "NASM", "NMNH", "SAAM", "NMAH", "NMAAHC", "NMAI", "NPG", "CHNDM", "SIL"). Use smithsonian_list_terms with field "unit_code" to enumerate valid values.',
           ),
         object_type: z
           .string()
           .optional()
           .describe(
-            'Object type term (e.g. "Aircraft", "Painting", "Fossil"). Search first to discover valid values.',
+            'Object type term (e.g. "Aircraft", "Painting", "Fossil"). Use smithsonian_list_terms with field "object_type" to enumerate valid values.',
           ),
         date_decade: z
           .string()
           .optional()
           .describe(
-            'Decade filter (e.g. "1920s", "1960s"). Must match the "NNNNs" format exactly.',
+            'Decade filter (e.g. "1920s", "1960s"). Must match the "NNNNs" format exactly. Use smithsonian_list_terms with field "date" to see indexed decades.',
           ),
         culture: z
           .string()
           .optional()
           .describe(
-            'Culture term (e.g. "Plains Indian", "Aztec"). Search first to discover valid values.',
+            'Culture term (e.g. "Plains Indian", "Aztec"). Use smithsonian_list_terms with field "culture" to enumerate valid values.',
           ),
         place: z
           .string()
           .optional()
           .describe(
-            'Geographic place (e.g. "United States of America"). Search first to discover valid values.',
+            'Geographic place (e.g. "United States of America"). Use smithsonian_list_terms with field "place" to enumerate valid values.',
           ),
         online_only: z
           .boolean()
@@ -126,7 +126,8 @@ export const smithsonianSearch = tool('smithsonian_search', {
       reason: 'invalid_filter',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'An unknown or malformed filter value was provided.',
-      recovery: 'Use only documented filter fields with values discovered via a prior search.',
+      recovery:
+        'Call smithsonian_list_terms with the relevant field name to get the valid vocabulary, then retry with an exact term from that list.',
     },
   ],
 

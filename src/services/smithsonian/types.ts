@@ -110,6 +110,17 @@ export interface RawContentResponse {
   status?: number;
 }
 
+/** Terms endpoint: response.terms[] */
+export interface RawTermsResponse {
+  error?: { code?: string; message?: string };
+  response?: {
+    terms?: Array<{ term?: string; count?: number }>;
+    rowCount?: number;
+  };
+  responseCode?: number;
+  status?: number;
+}
+
 // ---------------------------------------------------------------------------
 // Normalized domain types
 // ---------------------------------------------------------------------------

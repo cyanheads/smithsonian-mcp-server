@@ -24,6 +24,7 @@ import type {
   RawFreetextEntry,
   RawMediaItem,
   RawSearchResponse,
+  RawTermsResponse,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -431,6 +432,29 @@ export class SmithsonianService {
   /** Normalize raw EDAN to ObjectSummary (exposed for tools that already have raw). */
   toSummary(raw: RawEDAN): ObjectSummary {
     return normalizeToSummary(raw);
+  }
+
+  /**
+   * Enumerate the valid term vocabulary for an indexed field.
+   * Calls `/terms/{field}` and returns the term list sorted by count descending.
+   */
+  async listTerms(
+    params: { field: string; start: number; rows: number },
+    ctx: RequestContextLike,
+  ): Promise<{ terms: Array<{ value: string; count: number }>; total: number }> {
+    const cfg = getServerConfig();
+    const qs = new URLSearchParams({
+      q: '',
+      start: String(params.start),
+      rows: String(params.rows),
+    });
+    const url = `${cfg.baseUrl}/terms/${encodeURIComponent(params.field)}?${qs.toString()}`;
+
+    const raw = await this.get<RawTermsResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
+    const terms = (raw.response?.terms ?? [])
+      .filter((t): t is { term: string; count?: number } => Boolean(t.term))
+      .map((t) => ({ value: t.term, count: t.count ?? 0 }));
+    return { terms, total: raw.response?.rowCount ?? terms.length };
   }
 }
 

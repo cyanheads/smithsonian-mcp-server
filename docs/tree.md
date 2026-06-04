@@ -133,6 +133,7 @@ smithsonian-mcp-server/
 │   │           ├── smithsonian-find-related.tool.ts
 │   │           ├── smithsonian-get-media.tool.ts
 │   │           ├── smithsonian-get-object.tool.ts
+│   │           ├── smithsonian-list-terms.tool.ts
 │   │           └── smithsonian-search.tool.ts
 │   ├── services/
 │   │   └── smithsonian/
@@ -147,6 +148,7 @@ smithsonian-mcp-server/
 │   │           ├── smithsonian-find-related.tool.test.ts
 │   │           ├── smithsonian-get-media.tool.test.ts
 │   │           ├── smithsonian-get-object.tool.test.ts
+│   │           ├── smithsonian-list-terms.tool.test.ts
 │   │           └── smithsonian-search.tool.test.ts
 │   ├── prompts/
 │   ├── resources/
