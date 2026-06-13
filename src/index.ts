@@ -14,6 +14,8 @@ import { smithsonianSearch } from './mcp-server/tools/definitions/smithsonian-se
 import { initSmithsonianService } from './services/smithsonian/smithsonian-service.js';
 
 await createApp({
+  name: 'smithsonian-mcp-server',
+  title: 'smithsonian-mcp-server',
   tools: [
     smithsonianSearch,
     smithsonianListTerms,

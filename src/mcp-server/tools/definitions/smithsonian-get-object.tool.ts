@@ -135,7 +135,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     },
     {
       reason: 'invalid_id',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The ID format is clearly malformed (empty string, whitespace only).',
       recovery:
         'Use record_id values directly from smithsonian_search results — do not construct IDs manually.',

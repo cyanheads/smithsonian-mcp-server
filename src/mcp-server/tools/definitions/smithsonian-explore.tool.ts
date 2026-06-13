@@ -73,6 +73,16 @@ export const smithsonianExplore = tool('smithsonian_explore', {
       ),
   }),
 
+  enrichment: {
+    truncated: z.boolean().describe('True when the sample was capped by the rows parameter.'),
+    shown: z.number().describe('Number of sample objects returned.'),
+    cap: z.number().describe('The rows cap that was applied.'),
+    truncationCeiling: z
+      .number()
+      .optional()
+      .describe('Total matching objects (upper bound for omitted items).'),
+  },
+
   errors: [
     {
       reason: 'no_results',
@@ -164,6 +174,10 @@ export const smithsonianExplore = tool('smithsonian_explore', {
       total: rowCount,
       samples: sampleObjects.length,
     });
+
+    if (sampleObjects.length < rowCount) {
+      ctx.enrich.truncated({ shown: sampleObjects.length, cap: input.rows, ceiling: rowCount });
+    }
 
     return {
       mode: input.mode,

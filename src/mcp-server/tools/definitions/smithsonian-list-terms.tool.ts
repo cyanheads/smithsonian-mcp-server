@@ -63,6 +63,16 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .describe('Total number of distinct terms for this field in the Smithsonian index.'),
   }),
 
+  enrichment: {
+    truncated: z.boolean().describe('True when the term list was capped by the rows parameter.'),
+    shown: z.number().describe('Number of terms returned in this page.'),
+    cap: z.number().describe('The rows cap that was applied.'),
+    truncationCeiling: z
+      .number()
+      .optional()
+      .describe('Total distinct terms for the field (upper bound for omitted items).'),
+  },
+
   errors: [
     {
       reason: 'no_terms',
@@ -94,6 +104,10 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
     }
 
     ctx.log.info('Terms listed', { field: input.field, count: terms.length, total });
+
+    if (terms.length < total) {
+      ctx.enrich.truncated({ shown: terms.length, cap: input.rows, ceiling: total });
+    }
 
     return { field: input.field, terms, total };
   },

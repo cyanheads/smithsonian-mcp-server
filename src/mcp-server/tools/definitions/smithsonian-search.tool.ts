@@ -115,6 +115,16 @@ export const smithsonianSearch = tool('smithsonian_search', {
       .describe('Total matching objects in the Smithsonian catalog before pagination.'),
   }),
 
+  enrichment: {
+    truncated: z.boolean().describe('True when the result set was capped by the rows parameter.'),
+    shown: z.number().describe('Number of objects returned in this page.'),
+    cap: z.number().describe('The rows cap that was applied.'),
+    truncationCeiling: z
+      .number()
+      .optional()
+      .describe('Total matching objects (upper bound for omitted items).'),
+  },
+
   errors: [
     {
       reason: 'no_results',
@@ -124,7 +134,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
     },
     {
       reason: 'invalid_filter',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'An unknown or malformed filter value was provided.',
       recovery:
         'Call smithsonian_list_terms with the relevant field name to get the valid vocabulary, then retry with an exact term from that list.',
@@ -167,6 +177,10 @@ export const smithsonianSearch = tool('smithsonian_search', {
     }
 
     ctx.log.info('Search complete', { count: objects.length, total: rowCount });
+
+    if (objects.length < rowCount) {
+      ctx.enrich.truncated({ shown: objects.length, cap: rows, ceiling: rowCount });
+    }
 
     return { objects, total_count: rowCount };
   },

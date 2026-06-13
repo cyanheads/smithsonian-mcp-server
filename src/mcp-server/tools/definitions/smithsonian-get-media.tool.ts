@@ -82,7 +82,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
     },
     {
       reason: 'invalid_id',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The ID is empty or contains only whitespace.',
       recovery:
         'Use record_id values directly from smithsonian_search results — do not construct IDs manually.',

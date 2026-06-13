@@ -68,6 +68,14 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .describe('Metadata fields that drove the fan-out searches.'),
   }),
 
+  enrichment: {
+    truncated: z
+      .boolean()
+      .describe('True when the related list was capped by the limit parameter.'),
+    shown: z.number().describe('Number of related objects returned.'),
+    cap: z.number().describe('The limit cap that was applied.'),
+  },
+
   errors: [
     {
       reason: 'not_found',
@@ -77,7 +85,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     },
     {
       reason: 'invalid_id',
-      code: JsonRpcErrorCode.InvalidParams,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The ID is empty or contains only whitespace.',
       recovery:
         'Use record_id values directly from smithsonian_search results — do not construct IDs manually.',
@@ -213,6 +221,12 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       anchor: anchorSummary.record_id,
       related_count: related.length,
     });
+
+    // Disclose cap when the fan-out produced more candidates than the limit allowed.
+    const totalCandidates = buckets.reduce((sum, b) => sum + b.length, 0);
+    if (related.length < totalCandidates) {
+      ctx.enrich.truncated({ shown: related.length, cap: input.limit });
+    }
 
     return {
       anchor: {
