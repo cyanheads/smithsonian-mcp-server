@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-06-12
+
+Adopt @cyanheads/mcp-ts-core 0.10.6; truncation enrichment on list tools, ValidationError migration, Docker healthcheck, MCPB bundle cleaner; sync skills
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-06-04
 
 Add smithsonian_list_terms tool — enumerate valid filter vocabulary for unit_code, object_type, culture, place, date, and other indexed fields
