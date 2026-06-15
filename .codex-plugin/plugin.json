@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/smithsonian-mcp-server",
-  "version": "0.1.2",
+  "version": "0.1.7",
   "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
   "author": {
     "name": "Casey Hand",
