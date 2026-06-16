@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/smithsonian-mcp-server",
+  "name": "smithsonian-mcp-server",
   "version": "0.1.7",
   "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
   "author": {
@@ -9,7 +9,7 @@
   "repository": "https://github.com/cyanheads/smithsonian-mcp-server",
   "license": "Apache-2.0",
   "mcpServers": {
-    "@cyanheads/smithsonian-mcp-server": {
+    "smithsonian-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/smithsonian-mcp-server"],
       "env": {

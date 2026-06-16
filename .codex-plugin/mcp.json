@@ -1,5 +1,5 @@
 {
-  "@cyanheads/smithsonian-mcp-server": {
+  "smithsonian-mcp-server": {
     "command": "npx",
     "args": ["-y", "@cyanheads/smithsonian-mcp-server"],
     "env": {
