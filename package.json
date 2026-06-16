@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/smithsonian-mcp-server",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
   "type": "module",
   "main": "dist/index.js",
@@ -38,7 +38,7 @@
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js",
     "publish-mcp": "mcp-publisher login github -token \"$(security find-generic-password -a \"$USER\" -s mcp-publisher-github-pat -w)\" && mcp-publisher publish",
-    "release:github": "tsx scripts/release-github.ts"
+    "release:github": "bun run scripts/release-github.ts"
   },
   "keywords": [
     "mcp",
@@ -87,6 +87,6 @@
     "ignore": "^7.0.5",
     "tsc-alias": "^1.8.17",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "vitest": "^4.1.9"
   }
 }
