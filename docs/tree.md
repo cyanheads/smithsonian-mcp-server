@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-06-13 04:42:13
+Generated on: 2026-06-20 18:10:44
 
 ```text
 smithsonian-mcp-server/
@@ -27,6 +27,7 @@ smithsonian-mcp-server/
 ├── scripts/
 │   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
