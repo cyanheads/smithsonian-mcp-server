@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: smithsonian-mcp-server
+abstract: "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/smithsonian-mcp-server"
+license: Apache-2.0
+keywords:
+  - mcp
+  - model-context-protocol
+  - smithsonian
+  - museum
+  - cultural-heritage
+  - open-access
