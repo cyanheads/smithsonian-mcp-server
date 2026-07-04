@@ -18,7 +18,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 function makeService(): SmithsonianService {
-  return new SmithsonianService({} as never, {} as never);
+  return new SmithsonianService();
 }
 
 /** Build a minimal search response with one row. */
@@ -490,6 +490,64 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const raw = makeContentResponse('nasm_TEST001', false).response!;
       expect(svc.isCC0(raw)).toBe(false);
+    });
+  });
+
+  describe('listTerms()', () => {
+    it('parses the real string-array terms response and slices client-side', async () => {
+      // Mirrors the live upstream shape: response = { message, terms: string[] }.
+      // No per-term counts, no rowCount — upstream ignores rows/start and returns
+      // the full vocabulary, so the service pages by slicing the array itself.
+      const fullVocab = ['AAA', 'AAG', 'ACAH', 'ACM', 'CHNDM', 'FSG', 'HMSG', 'NASM'];
+      mockFetch({
+        status: 200,
+        responseCode: 1,
+        response: { message: 'search terms returned successfully', terms: fullVocab },
+      });
+      const svc = makeService();
+      const ctx = createMockContext();
+      const result = await svc.listTerms({ field: 'unit_code', start: 2, rows: 3 }, ctx);
+      // total is the full vocabulary size; terms is only the requested page
+      expect(result.total).toBe(8);
+      expect(result.terms).toEqual(['ACAH', 'ACM', 'CHNDM']);
+    });
+
+    it('sends no rows/start to upstream — pagination is client-side only', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 200, response: { terms: ['AAA', 'AAG'] } }),
+        text: async () => JSON.stringify({ status: 200, response: { terms: ['AAA', 'AAG'] } }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const svc = makeService();
+      const ctx = createMockContext();
+      await svc.listTerms({ field: 'unit_code', start: 5, rows: 10 }, ctx);
+      const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
+      // Upstream ignores rows/start; the URL must not carry them (avoids implying
+      // server-side pagination that does not exist).
+      expect(calledUrl).not.toContain('rows=');
+      expect(calledUrl).not.toContain('start=');
+      expect(calledUrl).toContain('/terms/unit_code');
+    });
+
+    it('returns an empty page but real total when start is past the end', async () => {
+      mockFetch({ status: 200, responseCode: 1, response: { terms: ['AAA', 'AAG'] } });
+      const svc = makeService();
+      const ctx = createMockContext();
+      const result = await svc.listTerms({ field: 'unit_code', start: 50, rows: 10 }, ctx);
+      expect(result.total).toBe(2);
+      expect(result.terms).toEqual([]);
+    });
+
+    it('handles an absent terms array without throwing', async () => {
+      // e.g. an unsupported field returning { response: { message } } and no terms.
+      mockFetch({ status: 200, responseCode: 1, response: { message: 'no terms' } });
+      const svc = makeService();
+      const ctx = createMockContext();
+      const result = await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      expect(result.total).toBe(0);
+      expect(result.terms).toEqual([]);
     });
   });
 });

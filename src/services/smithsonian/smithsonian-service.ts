@@ -295,10 +295,8 @@ export function luceneField(field: string, value: string): string {
 // ---------------------------------------------------------------------------
 
 export class SmithsonianService {
-  constructor(_config: AppConfig, _storage: StorageService) {}
-
   /** Execute a GET request with retry/backoff. Handles error-in-200 responses. */
-  private async get<T extends { error?: { code?: string; message?: string } }>(
+  private get<T extends { error?: { code?: string; message?: string } }>(
     url: string,
     ctx: RequestContextLike,
     extraHeaders?: Record<string, string>,
@@ -436,25 +434,24 @@ export class SmithsonianService {
 
   /**
    * Enumerate the valid term vocabulary for an indexed field.
-   * Calls `/terms/{field}` and returns the term list sorted by count descending.
+   *
+   * The upstream `/terms/{field}` endpoint returns `response.terms` as a bare
+   * `string[]` (no per-term counts) and ignores `rows`/`start`, always returning
+   * the full vocabulary — `place` alone is ~114k terms (~3.2 MB). Pagination is
+   * therefore done client-side: fetch once, then slice. Only the requested page
+   * is returned, so a full vocabulary never reaches the tool output.
    */
   async listTerms(
     params: { field: string; start: number; rows: number },
     ctx: RequestContextLike,
-  ): Promise<{ terms: Array<{ value: string; count: number }>; total: number }> {
+  ): Promise<{ terms: string[]; total: number }> {
     const cfg = getServerConfig();
-    const qs = new URLSearchParams({
-      q: '',
-      start: String(params.start),
-      rows: String(params.rows),
-    });
-    const url = `${cfg.baseUrl}/terms/${encodeURIComponent(params.field)}?${qs.toString()}`;
+    const url = `${cfg.baseUrl}/terms/${encodeURIComponent(params.field)}`;
 
     const raw = await this.get<RawTermsResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
-    const terms = (raw.response?.terms ?? [])
-      .filter((t): t is { term: string; count?: number } => Boolean(t.term))
-      .map((t) => ({ value: t.term, count: t.count ?? 0 }));
-    return { terms, total: raw.response?.rowCount ?? terms.length };
+    const all = raw.response?.terms ?? [];
+    const page = all.slice(params.start, params.start + params.rows);
+    return { terms: page, total: all.length };
   }
 }
 
@@ -464,8 +461,8 @@ export class SmithsonianService {
 
 let _service: SmithsonianService | undefined;
 
-export function initSmithsonianService(config: AppConfig, storage: StorageService): void {
-  _service = new SmithsonianService(config, storage);
+export function initSmithsonianService(_config: AppConfig, _storage: StorageService): void {
+  _service = new SmithsonianService();
 }
 
 export function getSmithsonianService(): SmithsonianService {

@@ -110,12 +110,17 @@ export interface RawContentResponse {
   status?: number;
 }
 
-/** Terms endpoint: response.terms[] */
+/**
+ * Terms endpoint: `response.terms` is a bare `string[]` — no per-term counts,
+ * and `response` carries only `message` + `terms` (no `rowCount`). Upstream
+ * ignores `rows`/`start` and returns the full vocabulary on every call, so
+ * pagination is done client-side by slicing this array.
+ */
 export interface RawTermsResponse {
   error?: { code?: string; message?: string };
   response?: {
-    terms?: Array<{ term?: string; count?: number }>;
-    rowCount?: number;
+    message?: string;
+    terms?: string[];
   };
   responseCode?: number;
   status?: number;

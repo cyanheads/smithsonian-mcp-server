@@ -50,7 +50,7 @@ describe('smithsonianExplore', () => {
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianExplore.errors });
-    const input = smithsonianExplore.input.parse({ mode: 'culture', value: 'Aztec' });
+    const input = smithsonianExplore.input.parse({ mode: 'culture', value: 'Aztecs' });
     const result = await smithsonianExplore.handler(input, ctx);
 
     expect(result.museum_breakdown.length).toBeGreaterThan(0);
@@ -120,10 +120,26 @@ describe('smithsonianExplore', () => {
     expect(calledParams.query).toBe('');
   });
 
+  it('non-truncated result validates against the effective output schema (issue #13)', async () => {
+    // sample_objects.length === rowCount, so no truncation enrichment is written.
+    // The framework validates output.extend(enrichment); required-but-unpopulated
+    // enrichment fields (the pre-fix contract) threw on this path.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: makeSamples(3), rowCount: 3 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianExplore.errors });
+    const input = smithsonianExplore.input.parse({ mode: 'museum', value: 'NASM', rows: 10 });
+    const result = await smithsonianExplore.handler(input, ctx);
+
+    const effectiveOutput = smithsonianExplore.output.extend(smithsonianExplore.enrichment!);
+    expect(() => effectiveOutput.parse(result)).not.toThrow();
+  });
+
   it('format renders mode, value, total_count, and sample record_ids', () => {
     const output = {
       mode: 'culture',
-      value: 'Aztec',
+      value: 'Aztecs',
       total_count: 500,
       sample_objects: makeSamples(2).map((o) => ({
         record_id: o.record_id,
@@ -138,7 +154,7 @@ describe('smithsonianExplore', () => {
     const blocks = smithsonianExplore.format!(output);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('culture');
-    expect(text).toContain('Aztec');
+    expect(text).toContain('Aztecs');
     expect(text).toContain('500');
     expect(text).toContain('nasm_TEST001');
     expect(text).toContain('NASM');

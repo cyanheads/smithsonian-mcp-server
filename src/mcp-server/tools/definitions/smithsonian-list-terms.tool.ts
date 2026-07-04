@@ -10,22 +10,14 @@ import { getSmithsonianService } from '@/services/smithsonian/smithsonian-servic
 export const smithsonianListTerms = tool('smithsonian_list_terms', {
   title: 'List Valid Filter Terms',
   description:
-    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field. Call this before using smithsonian_search or smithsonian_explore filters to discover exact term strings — guessing filter values produces empty results. Returns the distinct terms sorted by object count descending, so the most-populated terms appear first.',
+    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field (unit_code, culture, place, date, online_media_type). Call this before using smithsonian_search or smithsonian_explore filters to discover exact term strings — Smithsonian uses a controlled vocabulary where terms are often plural or qualified (e.g. "Paintings", not "Painting"), so guessing filter values produces empty results. Returns a page of the field\'s distinct term values; large vocabularies (place has 100k+ terms) page via start and rows.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
     field: z
-      .enum([
-        'unit_code',
-        'object_type',
-        'culture',
-        'place',
-        'date',
-        'media_usage',
-        'online_media_type',
-      ])
+      .enum(['unit_code', 'culture', 'place', 'date', 'online_media_type'])
       .describe(
-        'Indexed field to enumerate. Common choices: unit_code (museum codes like "NASM"), object_type (artifact categories like "Aircraft"), culture (e.g. "Aztec"), place (geographic terms), date (decade values like "1920s").',
+        'Indexed field to enumerate. Choices: unit_code (museum codes like "NASM"), culture (e.g. "Aztecs"), place (geographic terms), date (decade/era values like "1920s"), online_media_type (media formats like "Images", "3D Models").',
       ),
     start: z
       .number()
@@ -47,26 +39,28 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
     terms: z
       .array(
         z
-          .object({
-            value: z
-              .string()
-              .describe(
-                'Term string — pass directly as the filter value in smithsonian_search or smithsonian_explore.',
-              ),
-            count: z.number().describe('Number of Smithsonian objects indexed under this term.'),
-          })
-          .describe('A single term entry with its object count.'),
+          .string()
+          .describe(
+            'A term value — pass directly as the filter value in smithsonian_search or smithsonian_explore.',
+          ),
       )
-      .describe('Valid term vocabulary for the field, sorted by count descending.'),
+      .describe(
+        "The field's distinct term values for this page, in the Smithsonian index's native order. No per-term object counts are available upstream.",
+      ),
     total: z
       .number()
-      .describe('Total number of distinct terms for this field in the Smithsonian index.'),
+      .describe(
+        'Total number of distinct terms for this field (the full vocabulary size; terms is one page of it).',
+      ),
   }),
 
   enrichment: {
-    truncated: z.boolean().describe('True when the term list was capped by the rows parameter.'),
-    shown: z.number().describe('Number of terms returned in this page.'),
-    cap: z.number().describe('The rows cap that was applied.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the term list was capped by the rows parameter.'),
+    shown: z.number().optional().describe('Number of terms returned in this page.'),
+    cap: z.number().optional().describe('The rows cap that was applied.'),
     truncationCeiling: z
       .number()
       .optional()
@@ -79,7 +73,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The field returned no indexed terms.',
       recovery:
-        'Try a different field name. Valid fields: unit_code, object_type, culture, place, date, media_usage, online_media_type.',
+        'Try a different field name. Valid fields: unit_code, culture, place, date, online_media_type.',
     },
   ],
 
@@ -117,7 +111,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       `**Field:** \`${result.field}\` — ${result.total.toLocaleString()} total distinct terms, showing ${result.terms.length}\n`,
     ];
     for (const t of result.terms) {
-      lines.push(`- \`${t.value}\` (${t.count.toLocaleString()} objects)`);
+      lines.push(`- \`${t}\``);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

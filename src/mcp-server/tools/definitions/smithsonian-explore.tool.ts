@@ -29,12 +29,12 @@ export const smithsonianExplore = tool('smithsonian_explore', {
     mode: z
       .enum(['museum', 'culture', 'period', 'medium'])
       .describe(
-        'Browse dimension: "museum" (by unit code/name), "culture" (by culture term), "period" (by decade like "1940s"), "medium" (by object type like "Painting").',
+        'Browse dimension: "museum" (by unit code/name), "culture" (by culture term), "period" (by decade like "1940s"), "medium" (by object type like "Paintings").',
       ),
     value: z
       .string()
       .describe(
-        'Category value appropriate to the mode. museum: unit code ("NMNH") or full name ("National Museum of Natural History"). culture: term ("Aztec", "Sioux"). period: decade ("1940s", "1860s"). medium: object type ("Painting", "Aircraft", "Fossil").',
+        'Category value appropriate to the mode. museum: unit code ("NMNH") or full name ("National Museum of Natural History"). culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: decade ("1940s", "1860s"). medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for culture, place, or unit_code, call smithsonian_list_terms to find exact terms.',
       ),
     rows: z
       .number()
@@ -74,9 +74,12 @@ export const smithsonianExplore = tool('smithsonian_explore', {
   }),
 
   enrichment: {
-    truncated: z.boolean().describe('True when the sample was capped by the rows parameter.'),
-    shown: z.number().describe('Number of sample objects returned.'),
-    cap: z.number().describe('The rows cap that was applied.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the sample was capped by the rows parameter.'),
+    shown: z.number().optional().describe('Number of sample objects returned.'),
+    cap: z.number().optional().describe('The rows cap that was applied.'),
     truncationCeiling: z
       .number()
       .optional()
@@ -88,7 +91,8 @@ export const smithsonianExplore = tool('smithsonian_explore', {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
       when: 'No objects match the category value.',
-      recovery: 'Try a broader value, check spelling, or switch browse mode.',
+      recovery:
+        'Values must match Smithsonian\'s controlled vocabulary (often plural, e.g. "Paintings" not "Painting"). For culture, place, or unit_code, call smithsonian_list_terms to find exact terms; otherwise broaden the value or switch mode.',
     },
   ],
 

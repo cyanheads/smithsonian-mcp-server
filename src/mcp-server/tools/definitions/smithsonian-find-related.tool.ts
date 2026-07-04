@@ -71,9 +71,10 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
   enrichment: {
     truncated: z
       .boolean()
+      .optional()
       .describe('True when the related list was capped by the limit parameter.'),
-    shown: z.number().describe('Number of related objects returned.'),
-    cap: z.number().describe('The limit cap that was applied.'),
+    shown: z.number().optional().describe('Number of related objects returned.'),
+    cap: z.number().optional().describe('The limit cap that was applied.'),
   },
 
   errors: [

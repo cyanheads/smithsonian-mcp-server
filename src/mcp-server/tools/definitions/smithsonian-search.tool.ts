@@ -24,7 +24,7 @@ const ObjectSummarySchema = z
     object_type: z
       .string()
       .optional()
-      .describe('Object type term (e.g. "Aircraft", "Painting", "Fossil").'),
+      .describe('Object type term (e.g. "Aircraft", "Paintings", "Photographs").'),
     thumbnail_url: z
       .string()
       .optional()
@@ -62,7 +62,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .string()
           .optional()
           .describe(
-            'Object type term (e.g. "Aircraft", "Painting", "Fossil"). Use smithsonian_list_terms with field "object_type" to enumerate valid values.',
+            'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search results.',
           ),
         date_decade: z
           .string()
@@ -74,7 +74,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .string()
           .optional()
           .describe(
-            'Culture term (e.g. "Plains Indian", "Aztec"). Use smithsonian_list_terms with field "culture" to enumerate valid values.',
+            'Culture term from the controlled vocabulary — often plural or qualified (e.g. "Aztecs", "Plains Indian"). Use smithsonian_list_terms with field "culture" to enumerate valid values.',
           ),
         place: z
           .string()
@@ -116,9 +116,12 @@ export const smithsonianSearch = tool('smithsonian_search', {
   }),
 
   enrichment: {
-    truncated: z.boolean().describe('True when the result set was capped by the rows parameter.'),
-    shown: z.number().describe('Number of objects returned in this page.'),
-    cap: z.number().describe('The rows cap that was applied.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the result set was capped by the rows parameter.'),
+    shown: z.number().optional().describe('Number of objects returned in this page.'),
+    cap: z.number().optional().describe('The rows cap that was applied.'),
     truncationCeiling: z
       .number()
       .optional()
@@ -129,15 +132,15 @@ export const smithsonianSearch = tool('smithsonian_search', {
     {
       reason: 'no_results',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No objects matched the query and filters.',
-      recovery: 'Broaden the query, remove filters, or check spelling and try again.',
+      when: 'An unfiltered query matched no objects.',
+      recovery: 'Broaden the query or check spelling and try again.',
     },
     {
       reason: 'invalid_filter',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'An unknown or malformed filter value was provided.',
+      when: 'A filtered search matched nothing — most often a filter value outside the Smithsonian controlled vocabulary (e.g. a singular "Painting" instead of "Paintings").',
       recovery:
-        'Call smithsonian_list_terms with the relevant field name to get the valid vocabulary, then retry with an exact term from that list.',
+        'Call smithsonian_list_terms with the relevant field name (unit_code, culture, place, date) to get the valid vocabulary, then retry with an exact term. Note object_type is not enumerable — harvest its values from search results.',
     },
   ],
 
@@ -170,9 +173,18 @@ export const smithsonianSearch = tool('smithsonian_search', {
     );
 
     if (objects.length === 0) {
+      // A filtered zero-result is most often a filter value outside the
+      // controlled vocabulary — surface the actionable invalid_filter reason
+      // (recovery points at smithsonian_list_terms) rather than generic no_results.
+      if (filters.length > 0) {
+        throw ctx.fail(
+          'invalid_filter',
+          `No Smithsonian objects matched query "${input.query}" with the given filters. A filter value may not be an exact controlled-vocabulary term, or the query and filters may legitimately have no overlap.`,
+          { query: input.query, filters: input.filters },
+        );
+      }
       throw ctx.fail('no_results', `No Smithsonian objects matched query "${input.query}".`, {
         query: input.query,
-        filters: input.filters,
       });
     }
 

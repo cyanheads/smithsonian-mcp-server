@@ -56,7 +56,7 @@ describe('smithsonianSearch', () => {
     expect(searchFn.mock.calls[0]?.[0]).toMatchObject({ rows: 25 });
   });
 
-  it('throws no_results when the API returns zero rows', async () => {
+  it('throws no_results when an unfiltered query returns zero rows', async () => {
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
@@ -66,6 +66,39 @@ describe('smithsonianSearch', () => {
     await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_results' },
     });
+  });
+
+  it('throws invalid_filter when a filtered query returns zero rows', async () => {
+    // A filtered zero-result is most often a filter value outside the controlled
+    // vocabulary — the actionable invalid_filter reason (recovery → list_terms).
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({
+      query: 'quilt',
+      filters: { culture: 'Aztec' },
+    });
+    await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_filter' },
+    });
+  });
+
+  it('non-truncated result validates against the effective output schema (issue #13)', async () => {
+    // Narrow result: objects.length === rowCount, so no truncation enrichment is
+    // written. The framework validates output.extend(enrichment); required-but-
+    // unpopulated enrichment fields (the pre-fix contract) threw on this path.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'phlogiston', rows: 100 });
+    const result = await smithsonianSearch.handler(input, ctx);
+
+    const effectiveOutput = smithsonianSearch.output.extend(smithsonianSearch.enrichment!);
+    expect(() => effectiveOutput.parse(result)).not.toThrow();
   });
 
   it('builds filter queries embedded in q for all filter fields', async () => {

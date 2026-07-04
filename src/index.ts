@@ -29,7 +29,7 @@ await createApp({
   instructions:
     'Smithsonian Open Access API — 19.4M objects across 20+ museums.\n' +
     '- Start with smithsonian_search or smithsonian_explore for discovery.\n' +
-    '- Use smithsonian_list_terms to enumerate valid filter values before filtering (unit_code, object_type, culture, place, date).\n' +
+    '- Use smithsonian_list_terms to enumerate valid filter values before filtering (unit_code, culture, place, date, online_media_type). Smithsonian terms are a controlled vocabulary — often plural (e.g. "Paintings", not "Painting").\n' +
     '- Use smithsonian_get_object for full provenance metadata.\n' +
     '- Use smithsonian_get_media for CC0 image URLs.\n' +
     '- Use smithsonian_find_related for cross-collection discovery.\n' +

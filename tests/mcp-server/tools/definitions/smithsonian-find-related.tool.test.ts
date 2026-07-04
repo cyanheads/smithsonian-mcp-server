@@ -254,6 +254,35 @@ describe('smithsonianFindRelated', () => {
     expect(result.search_signals_used.length).toBeGreaterThan(0);
   });
 
+  it('non-truncated result validates against the effective output schema (issue #13)', async () => {
+    // Few related, high limit → related.length >= totalCandidates, so no
+    // truncation enrichment is written. The framework validates
+    // output.extend(enrichment); required-but-unpopulated enrichment fields
+    // (the pre-fix contract) threw on this path.
+    const anchorRaw = makeAnchorRaw();
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor Object',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: vi.fn().mockResolvedValue({ rows: makeRelatedRows(), rowCount: 2 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const input = smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20 });
+    const result = await smithsonianFindRelated.handler(input, ctx);
+
+    const effectiveOutput = smithsonianFindRelated.output.extend(
+      smithsonianFindRelated.enrichment!,
+    );
+    expect(() => effectiveOutput.parse(result)).not.toThrow();
+  });
+
   it('format renders anchor, related record_ids, and similarity signals', () => {
     const output = {
       anchor: { record_id: 'nasm_TEST001', title: 'Anchor Object', unit_code: 'NASM' },
