@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-07-04 · 🛡️ Security
+
+Fix output-schema crash on non-truncated results, list_terms upstream shape and filter vocabulary guidance; patch js-yaml DoS advisory GHSA-h67p-54hq-rp68; adopt mcp-ts-core 0.10.10
+
 ## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-06-20
 
 Adopt @cyanheads/mcp-ts-core 0.10.9 — ctx.content media collector, Canvas SQL invalid_sql classification, fresh-scaffold devcheck guards, plugin-manifest + floating-specifier lint; re-sync scripts and skills

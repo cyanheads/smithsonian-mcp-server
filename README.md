@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.9-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -42,7 +42,7 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 | Tool | Description |
 |:---|:---|
 | `smithsonian_search` | Search across 19.4M objects by text query with optional filters (museum, type, decade, culture, place, online-only, CC0). Returns curated summaries with total count. |
-| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, object_type, culture, place, date). Call before filtering to avoid empty results from invalid values. |
+| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values. |
 | `smithsonian_get_object` | Fetch the full catalog record for an object by ID: title, dates, materials, dimensions, provenance, exhibition history, credit line, and identifiers. |
 | `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned — throws when none exist. |
 | `smithsonian_explore` | Browse collections by category (museum, culture, period, medium) with total count, sample objects, and museum breakdown. Entry point for open-ended research. |
@@ -63,10 +63,11 @@ Full-text search with structured filters across the entire Smithsonian catalog.
 
 Enumerate the valid term vocabulary for an indexed filter field before applying filters.
 
-- Supported fields: `unit_code`, `object_type`, `culture`, `place`, `date`, `media_usage`, `online_media_type`
-- Returns terms sorted by object count descending — most-populated terms first
-- Call this once per field to ground filter values; passing an invalid term to `smithsonian_search` produces empty results with no error
-- Paginate with `start` + `rows` (default 50 per page, max 100)
+- Supported fields: `unit_code`, `culture`, `place`, `date`, `online_media_type`
+- Returns the field's distinct term values as a page of the full vocabulary — no per-term object counts are available upstream
+- Smithsonian uses a controlled vocabulary (terms are often plural, e.g. `Paintings` not `Painting`) — grounding filter values here avoids empty results
+- Paginate with `start` + `rows` (default 50 per page, max 100); large vocabularies like `place` have 100k+ terms
+- `object_type` is not enumerable upstream — discover object-type values from the `object_type` field in `smithsonian_search` results
 
 ---
 
@@ -94,7 +95,7 @@ CC0-gated image access at multiple resolutions.
 
 Category-constrained browse for open-ended collection discovery.
 
-- Four modes: `museum` (by unit code or full name), `culture` (e.g. `"Aztec"`), `period` (decade, e.g. `"1940s"`), `medium` (object type, e.g. `"Painting"`)
+- Four modes: `museum` (by unit code or full name), `culture` (e.g. `"Aztecs"`), `period` (decade, e.g. `"1940s"`), `medium` (object type, e.g. `"Paintings"`)
 - Returns total count, representative sample objects, and a museum breakdown showing which institutions hold matching items
 - Ideal entry point when the user wants to understand what the Smithsonian has about a topic
 
@@ -132,7 +133,7 @@ Smithsonian-specific:
 Agent-friendly output:
 
 - CC0 flags on every object summary — agents can gate image download calls without an extra lookup
-- Typed error reasons (`no_results`, `not_found`, `not_cc0`, `no_media`, `invalid_id`) with recovery hints for each case
+- Typed error reasons (`no_results`, `invalid_filter`, `not_found`, `not_cc0`, `no_media`, `invalid_id`) with recovery hints for each case
 - `similarity_signals` on related-object results let agents explain why objects were surfaced
 - `total_count` on all search responses enables agents to communicate result scope before paginating
 

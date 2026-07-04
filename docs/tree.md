@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 18:10:44
+Generated on: 2026-07-04 19:22:23
 
 ```text
 smithsonian-mcp-server/
@@ -170,6 +170,7 @@ smithsonian-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
