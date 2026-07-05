@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** smithsonian-mcp-server
-**Version:** 0.1.10
+**Version:** 0.1.11
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.10`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -126,7 +126,6 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 const ServerConfigSchema = z.object({
   apiKey: z.string().min(1).describe('API key from https://api.data.gov/signup. Required.'),
   baseUrl: z.string().default('https://api.si.edu/openaccess/api/v1.0'),
-  maxRows: z.coerce.number().int().min(1).max(100).default(20),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -134,7 +133,6 @@ export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     apiKey: 'SMITHSONIAN_API_KEY',
     baseUrl: 'SMITHSONIAN_BASE_URL',
-    maxRows: 'SMITHSONIAN_MAX_ROWS',
   });
   return _config;
 }
@@ -142,9 +140,22 @@ export function getServerConfig() {
 
 `parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`SMITHSONIAN_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
-### Server instructions
+### Server identity and instructions
 
-`createApp({ instructions })` — optional server-level orientation, sent to clients on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
+
+```ts
+await createApp({
+  name: 'my-mcp-server',
+  title: 'My Server',                         // human-readable display name
+  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
+  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
+  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
+  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+});
+```
+
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
 
 ---
 
@@ -156,7 +167,7 @@ Handlers receive a unified `ctx` object. Key properties:
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
+| `ctx.elicit` | Ask user for structured input — form call `(message, schema)` or `.url(message, url)` for an external link. **Check for presence first:** `if (ctx.elicit) { ... }` |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
 | `ctx.requestId` | Unique request ID. |
@@ -214,7 +225,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 src/
   index.ts                              # createApp() entry point
   config/
-    server-config.ts                    # SMITHSONIAN_API_KEY, SMITHSONIAN_BASE_URL, SMITHSONIAN_MAX_ROWS
+    server-config.ts                    # SMITHSONIAN_API_KEY, SMITHSONIAN_BASE_URL
   services/
     smithsonian/
       smithsonian-service.ts            # Smithsonian API client (init/accessor pattern)

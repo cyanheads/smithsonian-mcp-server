@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-07-04
+
+Fix materials/dimensions duplication and missing not_found reason data; remove non-functional SMITHSONIAN_MAX_ROWS env var; reword tool descriptions and reconcile docs to as-built
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-07-04 · 🛡️ Security
 
 Fix output-schema crash on non-truncated results, list_terms upstream shape and filter vocabulary guidance; patch js-yaml DoS advisory GHSA-h67p-54hq-rp68; adopt mcp-ts-core 0.10.10

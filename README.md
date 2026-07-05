@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.10-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.11-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -106,7 +106,7 @@ Category-constrained browse for open-ended collection discovery.
 Cross-collection discovery via parallel metadata fan-out.
 
 - Fetches anchor object metadata, then fans out up to 4 parallel searches using culture, maker, topic, and period+type signals
-- Deduplicates against the anchor and merges results ranked by number of matching signals
+- Deduplicates against the anchor and interleaves results so each fan-out signal contributes
 - Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
 - `similarity_signals` on each result show which metadata terms connected it to the anchor
 
@@ -264,7 +264,6 @@ cp .env.example .env
 |:---------|:------------|:--------|
 | `SMITHSONIAN_API_KEY` | **Required.** Free API key from [api.data.gov/signup](https://api.data.gov/signup). | — |
 | `SMITHSONIAN_BASE_URL` | Smithsonian Open Access API base URL. | `https://api.si.edu/openaccess/api/v1.0` |
-| `SMITHSONIAN_MAX_ROWS` | Default page size for search results (1–100). | `20` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
@@ -317,7 +316,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | Directory | Purpose |
 |:----------|:--------|
 | `src/index.ts` | `createApp()` entry point — registers tools and initializes the Smithsonian service. |
-| `src/config` | Server-specific environment variable parsing (`SMITHSONIAN_API_KEY`, `SMITHSONIAN_BASE_URL`, `SMITHSONIAN_MAX_ROWS`). |
+| `src/config` | Server-specific environment variable parsing (`SMITHSONIAN_API_KEY`, `SMITHSONIAN_BASE_URL`). |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). |
 | `src/services/smithsonian` | Smithsonian Open Access API client, normalization, and type definitions. |
 | `tests/` | Unit and integration tests. |
