@@ -32,7 +32,7 @@ const RelatedObjectSchema = z
 export const smithsonianFindRelated = tool('smithsonian_find_related', {
   title: 'Find Related Smithsonian Objects',
   description:
-    "Discover objects across Smithsonian collections related to a given anchor object. Fetches the anchor object's metadata (culture, period, object type, maker names, topic terms), then fans out up to 4 parallel searches using different metadata signals as queries. Deduplicates against the anchor and merges results into a ranked list. Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH.",
+    "Discover objects across Smithsonian collections related to a given anchor object. Fetches the anchor object's metadata (culture, period, object type, maker names, topic terms), then fans out up to 4 parallel searches using different metadata signals as queries. Deduplicates against the anchor and interleaves results across the fan-out signals so each signal contributes. Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH.",
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({

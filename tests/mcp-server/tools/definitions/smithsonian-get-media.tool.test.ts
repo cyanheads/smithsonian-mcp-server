@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-get-media.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetMedia } from '@/mcp-server/tools/definitions/smithsonian-get-media.tool.js';
@@ -150,11 +150,14 @@ describe('smithsonianGetMedia', () => {
     expect(result.images[0]?.is_cc0).toBe(true);
   });
 
-  it('propagates not_found when getContent throws for an unknown ID', async () => {
+  it('propagates not_found with reason from the service (issue #10)', async () => {
+    // Service throws the real notFound() factory with { recordId, reason }; the tool
+    // must propagate data.reason to the wire (the service test proves reason is real).
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       getContent: vi.fn().mockRejectedValue(
-        Object.assign(new Error('No Smithsonian object found for ID "nasm_GONE".'), {
-          code: JsonRpcErrorCode.NotFound,
+        notFound('No Smithsonian object found for ID "nasm_GONE".', {
+          recordId: 'nasm_GONE',
+          reason: 'not_found',
         }),
       ),
       isCC0: vi.fn(),
@@ -163,7 +166,10 @@ describe('smithsonianGetMedia', () => {
 
     const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
     const input = smithsonianGetMedia.input.parse({ id: 'nasm_GONE' });
-    await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toThrow(/No Smithsonian object/i);
+    await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
+    });
   });
 
   it('image URLs use IDS (ids.si.edu) not IIIF — per design decision', () => {

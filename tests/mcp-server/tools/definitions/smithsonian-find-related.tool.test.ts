@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-find-related.tool.test
  */
 
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
@@ -94,6 +95,28 @@ describe('smithsonianFindRelated', () => {
     const input = smithsonianFindRelated.input.parse({ id: '   ' });
     await expect(smithsonianFindRelated.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_id' },
+    });
+  });
+
+  it('propagates not_found with reason from the service (issue #10)', async () => {
+    // find_related fetches the anchor via getContent; an unknown anchor surfaces the
+    // service's real notFound() factory. The tool must propagate data.reason.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockRejectedValue(
+        notFound('No Smithsonian object found for ID "nasm_GONE".', {
+          recordId: 'nasm_GONE',
+          reason: 'not_found',
+        }),
+      ),
+      toSummary: vi.fn(),
+      search: vi.fn(),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const input = smithsonianFindRelated.input.parse({ id: 'nasm_GONE' });
+    await expect(smithsonianFindRelated.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
     });
   });
 

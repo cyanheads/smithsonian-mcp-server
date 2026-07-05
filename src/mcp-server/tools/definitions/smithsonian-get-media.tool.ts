@@ -18,7 +18,7 @@ const ImageResolutionSchema = z
 export const smithsonianGetMedia = tool('smithsonian_get_media', {
   title: 'Get Smithsonian Object Media',
   description:
-    'Return all available CC0 images for a Smithsonian object at multiple resolutions. Only CC0 (open access) images are returned — throws Forbidden when an object has media but none of it is CC0. Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions. Use smithsonian_search with filters.cc0_only to find CC0 objects before calling this tool.',
+    'Return all available CC0 images for a Smithsonian object at multiple resolutions. Only CC0 (open access) images are returned; an object whose media is entirely non-CC0 yields no downloadable images. Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions. The cc0_only filter on smithsonian_search surfaces objects that have downloadable CC0 images.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({

@@ -16,11 +16,12 @@
 
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
-| `smithsonian_search` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, media_type, online_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (InvalidParams) |
-| `smithsonian_get_object` | Full record by ID: title, description, dates, materials, dimensions, provenance, exhibition, credit, media URLs. Returns all media items with per-image CC0 status. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (InvalidParams) |
+| `smithsonian_search` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
+| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms. | `field` (unit_code, culture, place, date, online_media_type), `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
+| `smithsonian_get_object` | Full record by ID: title, description, dates, materials, dimensions, provenance, exhibition, credit, media URLs. Returns all media items with per-image CC0 status. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Searches a constrained query internally and returns category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. | `mode`, `value`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound) |
-| `smithsonian_find_related` | Given an object ID, finds related items across collections. Fetches the anchor object's metadata (culture, period, object_type, maker topics), then fan-searches the API to surface cross-collection connections. Returns up to 20 related objects with similarity rationale. | `id`, `limit` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (InvalidParams) |
-| `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `not_cc0` (NotFound), `invalid_id` (InvalidParams) |
+| `smithsonian_find_related` | Given an object ID, finds related items across collections. Fetches the anchor object's metadata (culture, period, object_type, maker topics), then fan-searches the API to surface cross-collection connections. Returns up to 20 related objects with similarity rationale. | `id`, `limit` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
 ### Resources
 
@@ -57,7 +58,7 @@ The server earns standalone status: single-source, but with massive cross-collec
 
 The `smithsonian_explore` tool is a workflow over the `search` operation: it constructs a category-constrained search and returns an enriched overview rather than exposing a separate browse API endpoint (which doesn't exist in the open API).
 
-`smithsonian_find_related` is a multi-step workflow: fetch anchor object → extract metadata signals → fan-out searches → deduplicate and rank.
+`smithsonian_find_related` is a multi-step workflow: fetch anchor object → extract metadata signals → fan-out searches → deduplicate and interleave.
 
 ## Services
 
@@ -73,11 +74,10 @@ Single service — one API, one base URL, one auth pattern. Two primary methods 
 |:--------|:---------|:------------|
 | `SMITHSONIAN_API_KEY` | **Yes** | API key from https://api.data.gov/signup. Server fails to start without it. |
 | `SMITHSONIAN_BASE_URL` | No | Override the API base URL (default: `https://api.si.edu/openaccess/api/v1.0`). |
-| `SMITHSONIAN_MAX_ROWS` | No | Default page size for search results (default: 20, max: 100 per API spec). |
 
 ## Implementation Order
 
-1. Config (`src/config/server-config.ts`) — `SMITHSONIAN_API_KEY`, base URL, max rows. Hard-fail on missing key.
+1. Config (`src/config/server-config.ts`) — `SMITHSONIAN_API_KEY`, base URL. Hard-fail on missing key.
 2. `SmithsonianService` — `search()` + `getContent()` with retry/backoff, URL construction, API key injection, response normalization helpers (flatten `freetext[]` label-content arrays, extract media, check CC0).
 3. `smithsonian_search` — search returning up to `rows` (≤100) curated summaries with offset pagination.
 4. `smithsonian_get_object` — single content fetch with full field normalization.
@@ -99,13 +99,12 @@ Each step is independently testable.
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`).
 - `filters?: object` — Optional structured filters:
   - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"NMNH"`, `"SAAM"`). See unit code table in API Reference.
-  - `object_type?: string` — object type term from `indexedStructured.object_type` (e.g. `"Aircraft"`, `"Painting"`, `"Fossil"`).
+  - `object_type?: string` — object type term from `indexedStructured.object_type` (e.g. `"Paintings"`, `"Photographs"`, `"Aircraft"`).
   - `date_decade?: string` — decade string from `indexedStructured.date` (e.g. `"1920s"`, `"1960s"`).
   - `culture?: string` — culture term from `indexedStructured.culture` (e.g. `"Plains Indian"`).
   - `place?: string` — geographic place from `indexedStructured.place` (e.g. `"United States of America"`).
-  - `online_media_type?: "Images" | "Videos" | "Audio" | "3D Images"` — restrict to objects with specific media types.
-  - `online_only?: boolean` — when true, adds `fq=online_media_type:*` to restrict to objects with any online media.
-  - `cc0_only?: boolean` — when true, adds `fq=media_usage:CC0` to restrict to CC0 objects. Useful before calling `smithsonian_get_media`.
+  - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to objects with any online media.
+  - `cc0_only?: boolean` — when true, ANDs the Lucene term `media_usage:CC0` into `q` to restrict to CC0 objects. Useful before calling `smithsonian_get_media`.
 - `rows?: number` — page size (default 20, max 100).
 - `start?: number` — offset for pagination (default 0).
 
@@ -115,7 +114,7 @@ Each step is independently testable.
 
 **Errors:**
 - `no_results` (NotFound) — no objects matched the query and filters. Recovery: broaden the query, remove filters, or check spelling.
-- `invalid_filter` (InvalidParams) — an unknown filter key was provided. Recovery: use only documented filter fields.
+- `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: call `smithsonian_list_terms` for the field's valid vocabulary, then retry with an exact term.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -148,7 +147,7 @@ Each step is independently testable.
 
 **Errors:**
 - `not_found` (NotFound) — no object with that ID in the catalog. Recovery: verify the ID via `smithsonian_search`.
-- `invalid_id` (InvalidParams) — ID format is clearly malformed. Recovery: use `record_id` values from `smithsonian_search` results directly.
+- `invalid_id` (ValidationError) — ID format is clearly malformed. Recovery: use `record_id` values from `smithsonian_search` results directly.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -164,7 +163,7 @@ Each step is independently testable.
   - `museum`: unit code (`"NMNH"`) or full museum name (`"National Museum of Natural History"`)
   - `culture`: culture term (`"Aztec"`, `"Sioux"`, `"Japanese"`)
   - `period`: decade string (`"1940s"`, `"1860s"`)
-  - `medium`: object type (`"Painting"`, `"Aircraft"`, `"Fossil"`, `"Photograph"`)
+  - `medium`: object type, usually plural (`"Paintings"`, `"Aircraft"`)
 - `rows?: number` — sample objects to return (default 10).
 
 **Output:**
@@ -181,7 +180,7 @@ Each step is independently testable.
 
 ### `smithsonian_find_related`
 
-**Description:** Discover objects across Smithsonian collections related to a given object. Fetches the anchor object's metadata (culture, period, object type, maker names, topic terms), then fans out up to 4 parallel searches using different metadata signals as queries. Deduplicates against the anchor and merges results into a ranked list with the similarity signals that connected each related object. Cross-museum discovery is the differentiator — the anchor may be NASM aerospace, but related objects span NMNH, SAAM, and NMAH.
+**Description:** Discover objects across Smithsonian collections related to a given object. Fetches the anchor object's metadata (culture, period, object type, maker names, topic terms), then fans out up to 4 parallel searches using different metadata signals as queries. Deduplicates against the anchor and interleaves results across the fan-out signals so each contributes, tagging each related object with the signal that connected it. Cross-museum discovery is the differentiator — the anchor may be NASM aerospace, but related objects span NMNH, SAAM, and NMAH.
 
 **Input:**
 - `id: string` — `record_id` of the anchor object (from `smithsonian_search` or `smithsonian_get_object`).
@@ -194,7 +193,7 @@ Each step is independently testable.
 
 **Errors:**
 - `not_found` (NotFound) — anchor object not found. Recovery: verify the ID via `smithsonian_search`.
-- `invalid_id` (InvalidParams) — ID format is clearly malformed.
+- `invalid_id` (ValidationError) — ID format is clearly malformed.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -224,7 +223,7 @@ Each step is independently testable.
 - `not_found` (NotFound) — object not in catalog. Recovery: verify via `smithsonian_search`.
 - `no_media` (NotFound) — object found but has no online media. Recovery: the physical object may not have been digitized.
 - `not_cc0` (Forbidden) — object found with media, but none of the media is CC0. Recovery: use `smithsonian_search` with `filters.cc0_only: true` to find CC0 objects.
-- `invalid_id` (InvalidParams) — ID format is clearly malformed.
+- `invalid_id` (ValidationError) — ID format is clearly malformed.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -237,12 +236,12 @@ Each step is independently testable.
 | # | Call | Purpose | Condition |
 |:--|:-----|:--------|:----------|
 | 1 | `GET /content/edanmdm:{id}` | Fetch anchor object metadata | always |
-| 2 | `GET /search?q={culture}&fq=unit_code:*` | Fan-out search by culture | if `indexedStructured.culture` non-empty |
+| 2 | `GET /search?q=culture:{culture}` | Fan-out search by culture | if `indexedStructured.culture` non-empty |
 | 3 | `GET /search?q={maker}&rows=10` | Fan-out search by maker name | if maker names present |
-| 4 | `GET /search?q={topic}&fq=type:edanmdm` | Fan-out search by topic term | if topics non-empty |
+| 4 | `GET /search?q={topic}` | Fan-out search by topic term | if topics non-empty |
 | 5 | `GET /search?q={period}+{object_type}` | Fan-out search by period + type | always |
 
-Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully. Results are deduped against the anchor ID and ranked by signal count.
+Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully. Results are deduped against the anchor ID and interleaved round-robin so each fan-out signal contributes.
 
 ---
 
@@ -308,7 +307,7 @@ In practice they agree, but the design checks both. `smithsonian_get_media` surf
 | `q` | string | Full-text query |
 | `rows` | number | Page size (max 100) |
 | `start` | number | Offset (0-indexed) |
-| `fq` | string | Filter query, e.g. `fq=unit_code:NASM`, `fq=media_usage:CC0`, `fq=online_media_type:Images` |
+| `fq` | — | Not a working EDAN parameter. Structured filters are ANDed into `q` as Lucene `field:value` terms instead (e.g. `q=(quilt) AND unit_code:NASM`). |
 | `api_key` | string | Required — from api.data.gov |
 
 ### Search response shape

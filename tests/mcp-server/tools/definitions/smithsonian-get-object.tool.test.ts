@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-get-object.tool.test
  */
 
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
@@ -69,19 +70,26 @@ describe('smithsonianGetObject', () => {
     });
   });
 
-  it('propagates not_found when service throws', async () => {
+  it('propagates not_found with reason from the service (issue #10)', async () => {
+    // The service throws the real notFound() factory carrying { recordId, reason }.
+    // The tool must propagate that data untouched so structuredContent.error.data.reason
+    // reaches the wire; the service test verifies the factory populates reason for real.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi
-        .fn()
-        .mockRejectedValue(
-          Object.assign(new Error('No Smithsonian object found'), { code: -32001 }),
-        ),
+      getContent: vi.fn().mockRejectedValue(
+        notFound('No Smithsonian object found for ID "nasm_MISSING".', {
+          recordId: 'nasm_MISSING',
+          reason: 'not_found',
+        }),
+      ),
       toFullObject: vi.fn(),
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianGetObject.errors });
     const input = smithsonianGetObject.input.parse({ id: 'nasm_MISSING' });
-    await expect(smithsonianGetObject.handler(input, ctx)).rejects.toThrow();
+    await expect(smithsonianGetObject.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
+    });
   });
 
   it('format renders all key fields including record_id, title, dates, and media count', () => {

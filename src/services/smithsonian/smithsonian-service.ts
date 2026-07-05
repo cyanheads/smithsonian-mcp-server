@@ -72,6 +72,17 @@ function collectContent(entries: RawFreetextEntry[] | undefined, labelFilter?: s
     .filter((c): c is string => Boolean(c));
 }
 
+/**
+ * True when a physicalDescription label marks a measurement rather than material
+ * prose. `Dimensions` and `Measurements` are the only dimension labels the live
+ * vocabulary uses; both match here. Used to route an entry into `dimensions` and
+ * to exclude it from `materials` so a measurement never renders under both headings.
+ */
+function isDimensionLabel(label: string | undefined): boolean {
+  const l = (label ?? '').toLowerCase();
+  return l.includes('dim') || l.includes('size') || l.includes('measure');
+}
+
 /** Return true when the object-level metadata_usage.access is CC0. */
 function isObjectCC0(raw: RawEDAN): boolean {
   return raw.content?.descriptiveNonRepeating?.metadata_usage?.access === 'CC0';
@@ -135,16 +146,19 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     if (entry.content) makers.push({ role: entry.label ?? 'Name', name: entry.content });
   }
 
-  // Materials
-  const materials = collectContent(freetext?.physicalDescription);
+  // Materials — physicalDescription entries that are NOT dimension-labeled, so a
+  // measurement string (claimed by `dimensions` below) never also renders as a
+  // material. A generic "Physical Description" label carries no signal to separate
+  // material prose from measurement prose, so those entries fall through here as-is
+  // — an inherent limit of label-based routing, not resolvable without content parsing.
+  const materials = collectContent(
+    freetext?.physicalDescription?.filter((entry) => !isDimensionLabel(entry.label)),
+  );
 
-  // Dimensions — from physicalDescription entries containing 'dim'
+  // Dimensions — physicalDescription entries whose label marks a measurement.
   const dimensions: string[] = [];
   for (const entry of freetext?.physicalDescription ?? []) {
-    const label = (entry.label ?? '').toLowerCase();
-    if (label.includes('dim') || label.includes('size') || label.includes('measure')) {
-      if (entry.content) dimensions.push(entry.content);
-    }
+    if (isDimensionLabel(entry.label) && entry.content) dimensions.push(entry.content);
   }
 
   // Place
@@ -401,13 +415,19 @@ export class SmithsonianService {
       raw = await this.get<RawContentResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
     } catch (err: unknown) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-        throw notFound(`No Smithsonian object found for ID "${recordId}".`, { recordId });
+        throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
+          recordId,
+          reason: 'not_found',
+        });
       }
       throw err;
     }
 
     if (!raw.response) {
-      throw notFound(`No Smithsonian object found for ID "${recordId}".`, { recordId });
+      throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
+        recordId,
+        reason: 'not_found',
+      });
     }
     return raw.response;
   }

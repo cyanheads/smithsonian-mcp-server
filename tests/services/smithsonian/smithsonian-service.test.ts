@@ -334,11 +334,16 @@ describe('SmithsonianService', () => {
       expect(calledUrl).toContain('edanmdm%3Anasm_TEST001');
     });
 
-    it('throws notFound when response is absent', async () => {
+    it('throws notFound with reason "not_found" when response is absent', async () => {
       mockFetch({ status: 200, responseCode: 1, response: null });
       const svc = makeService();
       const ctx = createMockContext();
-      await expect(svc.getContent('nasm_MISSING', ctx)).rejects.toThrow(/No Smithsonian object/i);
+      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
+      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err.message).toMatch(/No Smithsonian object/i);
+      // The declared not_found contract must be carried in data (issue #10).
+      expect(err.data?.reason).toBe('not_found');
+      expect(err.data?.recordId).toBe('nasm_MISSING');
     });
 
     it('HTTP 404 from content endpoint surfaces as notFound — not retried', async () => {
@@ -358,6 +363,8 @@ describe('SmithsonianService', () => {
       const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
       expect(err.code).toBe(JsonRpcErrorCode.NotFound);
       expect(err.message).toMatch(/nasm_MISSING/i);
+      // Live-exercised path (real HTTP 404 → real notFound factory): reason must be present.
+      expect(err.data?.reason).toBe('not_found');
     });
 
     it('reads object from response directly — not response.rows[0] (content endpoint shape)', async () => {
@@ -456,6 +463,88 @@ describe('SmithsonianService', () => {
       expect(full.media_summary.count).toBe(1);
       expect(full.media_summary.cc0_image_count).toBe(0);
       expect(full.media_summary.has_cc0_images).toBe(false);
+    });
+
+    it('excludes Dimensions-labeled physicalDescription entries from materials (issue #9)', () => {
+      // Real freetext shape of nasm_A19740798000: a "Materials" entry alongside a
+      // "Dimensions" entry. The measurement must land in `dimensions` only, never
+      // duplicated into `materials`.
+      const svc = makeService();
+      const raw: RawEDAN = {
+        title: 'Command Module',
+        unitCode: 'NASM',
+        content: {
+          descriptiveNonRepeating: { record_ID: 'nasm_A19740798000' },
+          freetext: {
+            physicalDescription: [
+              {
+                label: 'Materials',
+                content:
+                  'Command Module: Aluminum alloy, stainless steel, and titanium structures.',
+              },
+              {
+                label: 'Dimensions',
+                content: 'Overall: 12 ft. 10 in. wide x 34 ft. 2 in. deep (391.16 x 1041.4cm)',
+              },
+            ],
+          },
+        },
+      };
+      const full = svc.toFullObject(raw);
+      expect(full.materials).toEqual([
+        'Command Module: Aluminum alloy, stainless steel, and titanium structures.',
+      ]);
+      expect(full.dimensions).toEqual([
+        'Overall: 12 ft. 10 in. wide x 34 ft. 2 in. deep (391.16 x 1041.4cm)',
+      ]);
+    });
+
+    it('excludes Dimensions from materials with a Medium label; Measurements also routes to dimensions', () => {
+      // Real freetext shape of chndm_1901-39-3309: a "Medium" entry (material prose)
+      // alongside a "Dimensions" entry. "Measurements" is the other live dimension
+      // label observed in sampling — it must route to dimensions too.
+      const svc = makeService();
+      const raw: RawEDAN = {
+        title: 'Drawing',
+        unitCode: 'CHNDM',
+        content: {
+          descriptiveNonRepeating: { record_ID: 'chndm_1901-39-3309' },
+          freetext: {
+            physicalDescription: [
+              { label: 'Medium', content: 'Brush and gouache on paperboard' },
+              { label: 'Dimensions', content: '40.8 x 25.8 cm (16 1/16 x 10 3/16 in.)' },
+              { label: 'Measurements', content: 'Framed: 50 x 35 cm' },
+            ],
+          },
+        },
+      };
+      const full = svc.toFullObject(raw);
+      expect(full.materials).toEqual(['Brush and gouache on paperboard']);
+      expect(full.dimensions).toEqual([
+        '40.8 x 25.8 cm (16 1/16 x 10 3/16 in.)',
+        'Framed: 50 x 35 cm',
+      ]);
+    });
+
+    it('keeps a generic "Physical Description" entry in materials — no label signal to route it', () => {
+      // Inherent limit: a generic "Physical Description" label carries no signal to
+      // separate material prose from measurement prose, so it stays in materials.
+      const svc = makeService();
+      const raw: RawEDAN = {
+        title: 'Generic',
+        unitCode: 'NMAH',
+        content: {
+          descriptiveNonRepeating: { record_ID: 'nmah_GENERIC' },
+          freetext: {
+            physicalDescription: [
+              { label: 'Physical Description', content: 'Carved oak, 30 cm tall' },
+            ],
+          },
+        },
+      };
+      const full = svc.toFullObject(raw);
+      expect(full.materials).toEqual(['Carved oak, 30 cm tall']);
+      expect(full.dimensions).toEqual([]);
     });
   });
 

@@ -17,13 +17,6 @@ const ServerConfigSchema = z.object({
     .string()
     .default('https://api.si.edu/openaccess/api/v1.0')
     .describe('Smithsonian Open Access API base URL.'),
-  maxRows: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(100)
-    .default(20)
-    .describe('Default page size for search results (default 20, max 100 per API spec).'),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -34,7 +27,6 @@ export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     apiKey: 'SMITHSONIAN_API_KEY',
     baseUrl: 'SMITHSONIAN_BASE_URL',
-    maxRows: 'SMITHSONIAN_MAX_ROWS',
   });
   return _config;
 }

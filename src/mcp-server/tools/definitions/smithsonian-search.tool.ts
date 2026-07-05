@@ -56,7 +56,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .string()
           .optional()
           .describe(
-            'Museum unit code (e.g. "NASM", "NMNH", "SAAM", "NMAH", "NMAAHC", "NMAI", "NPG", "CHNDM", "SIL"). Use smithsonian_list_terms with field "unit_code" to enumerate valid values.',
+            'Museum unit code (e.g. "NASM", "NMNH", "SAAM", "NMAH", "NMAAHC", "NMAI", "NPG", "CHNDM", "SIL"). The full set is enumerable via smithsonian_list_terms (field "unit_code").',
           ),
         object_type: z
           .string()
@@ -68,19 +68,19 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .string()
           .optional()
           .describe(
-            'Decade filter (e.g. "1920s", "1960s"). Must match the "NNNNs" format exactly. Use smithsonian_list_terms with field "date" to see indexed decades.',
+            'Decade filter (e.g. "1920s", "1960s"). Must match the "NNNNs" format exactly. Indexed decades are enumerable via smithsonian_list_terms (field "date").',
           ),
         culture: z
           .string()
           .optional()
           .describe(
-            'Culture term from the controlled vocabulary — often plural or qualified (e.g. "Aztecs", "Plains Indian"). Use smithsonian_list_terms with field "culture" to enumerate valid values.',
+            'Culture term from the controlled vocabulary — often plural or qualified (e.g. "Aztecs", "Plains Indian"). The vocabulary is enumerable via smithsonian_list_terms (field "culture").',
           ),
         place: z
           .string()
           .optional()
           .describe(
-            'Geographic place (e.g. "United States of America"). Use smithsonian_list_terms with field "place" to enumerate valid values.',
+            'Geographic place (e.g. "United States of America"). The full set is enumerable via smithsonian_list_terms (field "place").',
           ),
         online_only: z
           .boolean()
