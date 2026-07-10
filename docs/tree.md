@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-07-10 20:02:07
+Generated on: 2026-07-10 22:19:54
 
 ```text
 smithsonian-mcp-server/
@@ -15,6 +15,7 @@ smithsonian-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
