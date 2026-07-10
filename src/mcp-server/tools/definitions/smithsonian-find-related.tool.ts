@@ -7,6 +7,14 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
 
+/**
+ * Per-signal upstream fetch cap. Each fan-out fetches from the top (start:0) up to
+ * `min(start + limit, MAX_FETCH_PER_SIGNAL)` rows, so `start` can offset the merged
+ * interleave without skipping candidates. Beyond this many matches per signal, deeper
+ * pages aren't reachable (100 mirrors the max `rows` smithsonian_search accepts).
+ */
+const MAX_FETCH_PER_SIGNAL = 100;
+
 const RelatedObjectSchema = z
   .object({
     record_id: z
@@ -48,6 +56,14 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .max(20)
       .default(10)
       .describe('Maximum number of related objects to return (default 10, max 20).'),
+    start: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        `Pagination offset into the interleaved related-object sequence — 0-indexed. Page contiguously with start = page × limit: page N+1 continues where page N ended, within the first ${MAX_FETCH_PER_SIGNAL} related objects per signal. Near a page seam a small, bounded number of objects (up to the active-signal count) can shift by one page when a deeper page surfaces an object that ranks very differently across signals. Beyond the cap, truncated stays true but deeper pages aren't reachable.`,
+      ),
   }),
 
   output: z.object({
@@ -72,9 +88,17 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the related list was capped by the limit parameter.'),
+      .describe(
+        'True when the related list is incomplete — either capped by the limit or more results exist upstream past the current page (advance start to retrieve them).',
+      ),
     shown: z.number().optional().describe('Number of related objects returned.'),
     cap: z.number().optional().describe('The limit cap that was applied.'),
+    truncationCeiling: z
+      .number()
+      .optional()
+      .describe(
+        'Upper bound on total related objects across the contributing signals (sum of each fan-out signal’s upstream match count; cross-signal overlaps are not subtracted).',
+      ),
   },
 
   errors: [
@@ -167,51 +191,87 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const searchSignalsUsed = fanOuts.map((f) => f.signal);
     ctx.log.info('Fan-out searches', { signals: searchSignalsUsed });
 
-    // Step 2: fan-out searches in parallel (graceful degradation)
+    // Step 2: fan-out searches in parallel (graceful degradation). Each signal fetches
+    // from the top (start:0) enough rows to cover the requested page — the start offset
+    // is applied to the MERGED interleave below, not the upstream query. Offsetting the
+    // upstream query instead would fetch a disjoint window per page and permanently drop
+    // the fetched-but-unshown candidates the round-robin merge didn't reach. rowCount is
+    // the signal's upstream total, used for the ceiling and truncation below.
+    const fetchedRows = Math.min(input.start + input.limit, MAX_FETCH_PER_SIGNAL);
     const fanOutResults = await Promise.allSettled(
       fanOuts.map((fo) =>
         svc
-          .search({ query: fo.query, rows: 10, start: 0, filters: fo.filters }, ctx)
-          .then((res) => ({ items: res.rows, signal: fo.signal })),
+          .search({ query: fo.query, rows: fetchedRows, start: 0, filters: fo.filters }, ctx)
+          .then((res) => ({ items: res.rows, signal: fo.signal, rowCount: res.rowCount })),
       ),
     );
 
-    // Step 3: collect, deduplicate, then interleave round-robin so every
-    // fan-out signal contributes before any one backfills.
-    const seen = new Set<string>([anchorSummary.record_id]);
-    const buckets: Array<{ item: typeof anchorSummary; signal: string }[]> = [];
+    // Step 3: accumulate every signal per record_id, bucket by first-discovery
+    // order for round-robin fairness, then interleave so each signal contributes
+    // before any one backfills.
+    const anchorId = anchorSummary.record_id;
+    // record_id → every distinct signal that surfaced it. The array reference is
+    // shared into each bucket entry, so a later fan-out that re-surfaces an id
+    // accumulates onto the same array the merge step reads — preserving every
+    // signal even across fan-outs (issue #19).
+    const signalsById = new Map<string, string[]>();
+    // First fan-out to see an id claims it for bucket membership (round-robin
+    // fairness); the anchor is pre-claimed so it can never surface as related.
+    const claimed = new Set<string>([anchorId]);
+    // Each contributing fan-out becomes one bucket; rowCount drives the truncation
+    // ceiling and the "more upstream" disclosure (issue #18).
+    const buckets: Array<{
+      entries: { item: typeof anchorSummary; signals: string[] }[];
+      rowCount: number;
+    }> = [];
 
     for (const result of fanOutResults) {
       if (result.status === 'rejected') continue;
-      const { items, signal } = result.value;
-      const bucket: { item: typeof anchorSummary; signal: string }[] = [];
+      const { items, signal, rowCount } = result.value;
+      const entries: { item: typeof anchorSummary; signals: string[] }[] = [];
       for (const item of items) {
-        if (seen.has(item.record_id)) continue;
-        seen.add(item.record_id);
-        bucket.push({ item, signal });
+        if (item.record_id === anchorId) continue;
+        let signals = signalsById.get(item.record_id);
+        if (signals) {
+          if (!signals.includes(signal)) signals.push(signal);
+        } else {
+          signals = [signal];
+          signalsById.set(item.record_id, signals);
+        }
+        // Claim the id for exactly one bucket (first-discovery); later fan-outs
+        // still accumulate the signal above, they just don't re-add the item.
+        if (!claimed.has(item.record_id)) {
+          claimed.add(item.record_id);
+          entries.push({ item, signals });
+        }
       }
-      if (bucket.length > 0) buckets.push(bucket);
+      if (entries.length > 0) buckets.push({ entries, rowCount });
     }
 
-    // Round-robin interleave: take one item from each bucket per round so every
-    // signal contributes before any one backfills. Buckets are deduplicated
-    // against each other above, so each item carries exactly one signal.
-    const merged: Array<{ item: typeof anchorSummary; signals: string[] }> = [];
+    // Round-robin interleave the FULL candidate pool: take one item from each bucket
+    // per round so every signal contributes before any one backfills. Each entry's
+    // signals array is the live accumulator, so it already carries every signal that
+    // surfaced the id. The whole sequence is built (not capped at one page) so `start`
+    // can offset into it — page N+1 (start = N × limit) continues exactly where page N
+    // ended, with no gap or overlap within the fetched window.
+    const merged: { item: typeof anchorSummary; signals: string[] }[] = [];
     let round = 0;
-    while (merged.length < input.limit) {
-      let advanced = false;
+    let advanced = true;
+    while (advanced) {
+      advanced = false;
       for (const bucket of buckets) {
-        const entry = bucket[round];
+        const entry = bucket.entries[round];
         if (!entry) continue;
-        merged.push({ item: entry.item, signals: [entry.signal] });
+        merged.push(entry);
         advanced = true;
-        if (merged.length >= input.limit) break;
       }
-      if (!advanced) break;
       round++;
     }
 
-    const related = merged.map(({ item, signals }) => ({
+    // Offset into the interleaved sequence and take one page.
+    const page = merged.slice(input.start, input.start + input.limit);
+
+    const related = page.map(({ item, signals }) => ({
       record_id: item.record_id,
       title: item.title,
       unit_code: item.unit_code,
@@ -226,10 +286,21 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       related_count: related.length,
     });
 
-    // Disclose cap when the fan-out produced more candidates than the limit allowed.
-    const totalCandidates = buckets.reduce((sum, b) => sum + b.length, 0);
-    if (related.length < totalCandidates) {
-      ctx.enrich.truncated({ shown: related.length, cap: input.limit });
+    // Disclose truncation when related objects were omitted — either the interleaved
+    // sequence extends past this page, or a contributing signal has more matches
+    // upstream than the fetch reached (retrievable by advancing start, up to the cap).
+    // The ceiling is an upper bound on the related pool across contributing signals
+    // (summed upstream match counts; cross-signal overlap is not subtracted).
+    const ceiling = buckets.reduce((sum, b) => sum + b.rowCount, 0);
+    // moreInMerged: distinct candidates beyond this page already sit in the merge.
+    // moreUpstream: a signal reported more matches than we fetched, so deeper pages
+    // exist upstream. Comparing rowCount to the requested fetch size (not the
+    // page-local count) avoids false-positiving on a trailing page that lands on the
+    // exact end of a signal — there rowCount never exceeds fetchedRows.
+    const moreInMerged = merged.length > input.start + input.limit;
+    const moreUpstream = buckets.some((b) => b.rowCount > fetchedRows);
+    if (moreInMerged || moreUpstream) {
+      ctx.enrich.truncated({ shown: related.length, cap: input.limit, ceiling });
     }
 
     return {

@@ -20,7 +20,7 @@
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms. | `field` (unit_code, culture, place, date, online_media_type), `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
 | `smithsonian_get_object` | Full record by ID: title, description, dates, materials, dimensions, provenance, exhibition, credit, media URLs. Returns all media items with per-image CC0 status. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Searches a constrained query internally and returns category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. | `mode`, `value`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound) |
-| `smithsonian_find_related` | Given an object ID, finds related items across collections. Fetches the anchor object's metadata (culture, period, object_type, maker topics), then fan-searches the API to surface cross-collection connections. Returns up to 20 related objects with similarity rationale. | `id`, `limit` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_find_related` | Given an object ID, finds related items across collections. Fetches the anchor object's metadata (culture, period, object_type, maker topics), then fan-searches the API to surface cross-collection connections. Returns up to 20 related objects with similarity rationale. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
 ### Resources
@@ -185,11 +185,13 @@ Each step is independently testable.
 **Input:**
 - `id: string` — `record_id` of the anchor object (from `smithsonian_search` or `smithsonian_get_object`).
 - `limit?: number` — max related objects to return (default 10, max 20).
+- `start?: number` — pagination offset into the interleaved related-object sequence (default 0). Page contiguously with `start = page × limit`: page N+1 continues where page N ended, within the first 100 related objects per signal. Near a seam a bounded number of objects (up to the active-signal count) can shift by one page, since a deeper page fetches more per signal and may reallocate an object that ranks very differently across signals. Beyond that cap, `truncated` stays true but deeper pages aren't reachable.
 
 **Output:**
 - `anchor` — summary of the anchor object (`{ record_id, title, unit_code }`)
-- `related[]` — `{ record_id, title, date, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of the metadata terms that connected this object (e.g. `["culture: Plains Indian", "period: 1880s"]`)
+- `related[]` — `{ record_id, title, date, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
 - `search_signals_used[]` — which metadata fields drove the fan-out searches
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the related pool across contributing signals
 
 **Errors:**
 - `not_found` (NotFound) — anchor object not found. Recovery: verify the ID via `smithsonian_search`.
@@ -236,12 +238,12 @@ Each step is independently testable.
 | # | Call | Purpose | Condition |
 |:--|:-----|:--------|:----------|
 | 1 | `GET /content/edanmdm:{id}` | Fetch anchor object metadata | always |
-| 2 | `GET /search?q=culture:{culture}` | Fan-out search by culture | if `indexedStructured.culture` non-empty |
-| 3 | `GET /search?q={maker}&rows=10` | Fan-out search by maker name | if maker names present |
-| 4 | `GET /search?q={topic}` | Fan-out search by topic term | if topics non-empty |
-| 5 | `GET /search?q={period}+{object_type}` | Fan-out search by period + type | always |
+| 2 | `GET /search?q=culture:{culture}&rows={min(start+limit,100)}&start=0` | Fan-out search by culture | if `indexedStructured.culture` non-empty |
+| 3 | `GET /search?q={maker}&rows={min(start+limit,100)}&start=0` | Fan-out search by maker name | if maker names present |
+| 4 | `GET /search?q={topic}&rows={min(start+limit,100)}&start=0` | Fan-out search by topic term | if topics non-empty |
+| 5 | `GET /search?q={period}+{object_type}&rows={min(start+limit,100)}&start=0` | Fan-out search by period + type | always |
 
-Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully. Results are deduped against the anchor ID and interleaved round-robin so each fan-out signal contributes.
+Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully. Each fetches from the top (`start=0`) with `rows = min(start + limit, 100)` — enough to cover the requested page. Results are deduped against the anchor ID and interleaved round-robin so each fan-out signal contributes, accumulating every signal that surfaced an object. The `start` offset is then applied to the merged interleave (not the upstream query), so pages are contiguous — page N+1 continues where page N ended. (Because a deeper page fetches more rows per signal, an object that ranks very differently across signals can be reallocated to a different bucket, shifting a bounded number of objects — up to the active-signal count — by one page near a seam.) When the interleave extends past the page or a signal reports more matches than were fetched, the response discloses `truncated` with a `truncationCeiling`; advancing `start` retrieves the next window (up to the 100-per-signal cap).
 
 ---
 
