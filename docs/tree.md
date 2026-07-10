@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-07-04 19:22:23
+Generated on: 2026-07-10 20:02:07
 
 ```text
 smithsonian-mcp-server/
@@ -11,10 +11,11 @@ smithsonian-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -164,11 +165,13 @@ smithsonian-mcp-server/
 │   └── tools/
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock
+├── bunfig.toml
 ├── CHANGELOG.md
 ├── CITATION.cff
 ├── CLAUDE.md

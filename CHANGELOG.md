@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.12](changelog/0.1.x/0.1.12.md) — 2026-07-10
+
+Add ctx.fail() recovery hints and filtered-search term suggestions across all tools, plus a date field on search summaries; fix list_terms past-end pagination; adopt mcp-ts-core 0.10.14 with Socket supply-chain scanning and Dockerfile hardening
+
 ## [0.1.11](changelog/0.1.x/0.1.11.md) — 2026-07-04
 
 Fix materials/dimensions duplication and missing not_found reason data; remove non-functional SMITHSONIAN_MAX_ROWS env var; reword tool descriptions and reconcile docs to as-built
