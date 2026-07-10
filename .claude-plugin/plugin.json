@@ -1,7 +1,7 @@
 {
   "name": "smithsonian-mcp-server",
   "version": "0.1.12",
-  "description": "Search and explore 19.4 million Smithsonian Open Access museum objects, retrieve CC0 media, and discover cross-collection connections via MCP.",
+  "description": "Search, explore, and retrieve CC0 media from 19.4 million Smithsonian Open Access objects across 20+ museums via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "Casey Hand"
   },
