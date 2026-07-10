@@ -198,7 +198,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       lines.push(`**Culture:** ${result.culture.join(', ')}`);
     }
     if (result.topics.length > 0) {
-      lines.push(`**Topics:** ${result.topics.slice(0, 10).join(', ')}`);
+      lines.push(`**Topics:** ${result.topics.join(', ')}`);
     }
     if (result.place.length > 0) {
       lines.push(`**Places:** ${result.place.map((p) => `${p.label}: ${p.value}`).join('; ')}`);

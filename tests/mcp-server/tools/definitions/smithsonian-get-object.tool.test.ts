@@ -110,6 +110,24 @@ describe('smithsonianGetObject', () => {
     expect(text).toContain('http://n2t.net');
   });
 
+  it('format renders every topic — no cap — for content/structuredContent parity (issue #17)', () => {
+    // 15 topics exceeds the old slice(0, 10); every one must appear in content[]
+    // so the text surface matches structuredContent.topics exactly.
+    const manyTopics = Array.from(
+      { length: 15 },
+      (_, i) => `Topic ${String(i + 1).padStart(2, '0')}`,
+    );
+    const obj: FullObject = { ...makeFullObject(), topics: manyTopics };
+    const blocks = smithsonianGetObject.format!(obj);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    for (const topic of manyTopics) {
+      expect(text).toContain(topic);
+    }
+    // Guard the specific regression: topics past the old 10-item boundary render.
+    expect(text).toContain('Topic 11');
+    expect(text).toContain('Topic 15');
+  });
+
   it('format handles sparse object without throwing', () => {
     const sparse: FullObject = {
       record_id: 'nmnh_SPARSE',
