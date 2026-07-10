@@ -7,6 +7,38 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
 
+/**
+ * Collect distinct, defined string values in first-seen order, capped so the
+ * harvested recovery hint stays bounded. Used on the filtered-zero error path
+ * to gather controlled-vocabulary values from an unfiltered re-query.
+ */
+function distinctValues(values: Array<string | undefined>, cap = 12): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+/**
+ * Compose the filtered-zero recovery hint from the controlled-vocabulary values
+ * that co-occur with the query, naming exact terms the caller can retry with.
+ */
+function composeFilterHint(objectTypes: string[], unitCodes: string[]): string {
+  const parts: string[] = [];
+  if (objectTypes.length > 0) parts.push(`object_type: ${objectTypes.join(', ')}`);
+  if (unitCodes.length > 0) parts.push(`unit_code: ${unitCodes.join(', ')}`);
+  return (
+    `Values present for this query — ${parts.join('; ')}. ` +
+    `Retry with one of these exact terms (object_type is commonly plural, e.g. "Paintings"), ` +
+    `or call smithsonian_list_terms for the full unit_code, culture, place, or date vocabulary.`
+  );
+}
+
 const ObjectSummarySchema = z
   .object({
     record_id: z
@@ -25,6 +57,12 @@ const ObjectSummarySchema = z
       .string()
       .optional()
       .describe('Object type term (e.g. "Aircraft", "Paintings", "Photographs").'),
+    date: z
+      .string()
+      .optional()
+      .describe(
+        'Decade-level date the catalog indexes for the object (e.g. "1960s"). Sparse — omitted when the record has no indexed date.',
+      ),
     thumbnail_url: z
       .string()
       .optional()
@@ -177,13 +215,34 @@ export const smithsonianSearch = tool('smithsonian_search', {
       // controlled vocabulary — surface the actionable invalid_filter reason
       // (recovery points at smithsonian_list_terms) rather than generic no_results.
       if (filters.length > 0) {
+        // Harvest the controlled-vocabulary values (object_type, unit_code) that
+        // co-occur with the query via one unfiltered re-query, and name them in
+        // the recovery hint so the caller can retry with an exact term instead of
+        // making a second list_terms hop. Best-effort and failure-path only: any
+        // error or an empty re-query keeps the static contract hint, so the
+        // harvest never turns a clean invalid_filter into a crash.
+        let recovery: Record<string, unknown> = ctx.recoveryFor('invalid_filter');
+        try {
+          const { rows: sample } = await svc.search(
+            { query: input.query, rows: 100, start: 0, filters: [] },
+            ctx,
+          );
+          const objectTypes = distinctValues(sample.map((o) => o.object_type));
+          const unitCodes = distinctValues(sample.map((o) => o.unit_code));
+          if (objectTypes.length > 0 || unitCodes.length > 0) {
+            recovery = { recovery: { hint: composeFilterHint(objectTypes, unitCodes) } };
+          }
+        } catch {
+          // Harvesting is best-effort — fall back to the static contract hint.
+        }
         throw ctx.fail(
           'invalid_filter',
           `No Smithsonian objects matched query "${input.query}" with the given filters. A filter value may not be an exact controlled-vocabulary term, or the query and filters may legitimately have no overlap.`,
-          { query: input.query, filters: input.filters },
+          { ...recovery, query: input.query, filters: input.filters },
         );
       }
       throw ctx.fail('no_results', `No Smithsonian objects matched query "${input.query}".`, {
+        ...ctx.recoveryFor('no_results'),
         query: input.query,
       });
     }
@@ -205,6 +264,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
       lines.push(`### ${obj.title}`);
       lines.push(`**ID:** ${obj.record_id} | **Museum:** ${obj.museum_name} (${obj.unit_code})`);
       if (obj.object_type) lines.push(`**Type:** ${obj.object_type}`);
+      if (obj.date) lines.push(`**Date:** ${obj.date}`);
       lines.push(
         `**CC0:** ${obj.is_cc0 ? 'Yes' : 'No'} | **Has media:** ${obj.has_media ? 'Yes' : 'No'}`,
       );

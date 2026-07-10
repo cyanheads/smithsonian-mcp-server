@@ -131,6 +131,7 @@ export interface RawTermsResponse {
 // ---------------------------------------------------------------------------
 
 export interface ObjectSummary {
+  date?: string;
   has_media: boolean;
   is_cc0: boolean;
   museum_name: string;

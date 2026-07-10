@@ -65,8 +65,11 @@ describe('smithsonianGetObject', () => {
   it('throws invalid_id for empty ID', async () => {
     const ctx = createMockContext({ errors: smithsonianGetObject.errors });
     const input = smithsonianGetObject.input.parse({ id: '   ' });
+    const expectedHint = smithsonianGetObject.errors?.find(
+      (e) => e.reason === 'invalid_id',
+    )?.recovery;
     await expect(smithsonianGetObject.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
+      data: { reason: 'invalid_id', recovery: { hint: expectedHint } },
     });
   });
 

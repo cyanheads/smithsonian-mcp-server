@@ -140,7 +140,11 @@ export const smithsonianExplore = tool('smithsonian_explore', {
       throw ctx.fail(
         'no_results',
         `No Smithsonian objects found for ${input.mode} "${input.value}".`,
-        { mode: input.mode, value: input.value },
+        {
+          ...ctx.recoveryFor('no_results'),
+          mode: input.mode,
+          value: input.value,
+        },
       );
     }
 

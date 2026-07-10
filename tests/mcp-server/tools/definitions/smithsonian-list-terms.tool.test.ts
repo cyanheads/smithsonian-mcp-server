@@ -47,16 +47,37 @@ describe('smithsonianListTerms', () => {
     expect(listTermsFn).toHaveBeenCalledWith({ field: 'culture', start: 10, rows: 25 }, ctx);
   });
 
-  it('throws no_terms when the service returns an empty list', async () => {
+  it('throws no_terms only when the vocabulary is empty (total 0), carrying the declared recovery hint (issues #14, #16)', async () => {
+    // total === 0 is the sole no_terms trigger: the field genuinely has no
+    // indexed vocabulary. The declared contract recovery rides data.recovery.hint.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 0)),
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianListTerms.errors });
     const input = smithsonianListTerms.input.parse({ field: 'culture' });
+    const expectedHint = smithsonianListTerms.errors?.find(
+      (e) => e.reason === 'no_terms',
+    )?.recovery;
     await expect(smithsonianListTerms.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_terms' },
+      data: { reason: 'no_terms', recovery: { hint: expectedHint } },
     });
+  });
+
+  it('returns an empty terminal page (not no_terms) when start is past the end (issue #16)', async () => {
+    // A past-the-end page has an empty slice but a non-zero total — normal
+    // pagination completion, not an empty-vocabulary error.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 48)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'unit_code', start: 9999, rows: 3 });
+    const result = await smithsonianListTerms.handler(input, ctx);
+
+    expect(result.field).toBe('unit_code');
+    expect(result.terms).toEqual([]);
+    expect(result.total).toBe(48);
   });
 
   it('defaults start to 0 and rows to 50', async () => {

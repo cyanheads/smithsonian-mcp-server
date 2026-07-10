@@ -73,8 +73,11 @@ describe('smithsonianGetMedia', () => {
   it('throws invalid_id for empty ID', async () => {
     const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
     const input = smithsonianGetMedia.input.parse({ id: '  ' });
+    const expectedHint = smithsonianGetMedia.errors?.find(
+      (e) => e.reason === 'invalid_id',
+    )?.recovery;
     await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id' },
+      data: { reason: 'invalid_id', recovery: { hint: expectedHint } },
     });
   });
 
@@ -87,8 +90,9 @@ describe('smithsonianGetMedia', () => {
 
     const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
     const input = smithsonianGetMedia.input.parse({ id: 'nmnh_NOMEDIA' });
+    const expectedHint = smithsonianGetMedia.errors?.find((e) => e.reason === 'no_media')?.recovery;
     await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_media' },
+      data: { reason: 'no_media', recovery: { hint: expectedHint } },
     });
   });
 
@@ -105,8 +109,9 @@ describe('smithsonianGetMedia', () => {
 
     const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
     const input = smithsonianGetMedia.input.parse({ id: 'nasm_RESTRICTED' });
+    const expectedHint = smithsonianGetMedia.errors?.find((e) => e.reason === 'not_cc0')?.recovery;
     await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_cc0' },
+      data: { reason: 'not_cc0', recovery: { hint: expectedHint } },
     });
   });
 

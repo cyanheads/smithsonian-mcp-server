@@ -91,7 +91,10 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
 
   async handler(input, ctx) {
     if (!input.id.trim()) {
-      throw ctx.fail('invalid_id', 'Object ID must not be empty.', { id: input.id });
+      throw ctx.fail('invalid_id', 'Object ID must not be empty.', {
+        ...ctx.recoveryFor('invalid_id'),
+        id: input.id,
+      });
     }
 
     const svc = getSmithsonianService();
@@ -109,6 +112,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
 
     if (mediaCount === 0) {
       throw ctx.fail('no_media', `Object "${input.id}" has no digitized online media.`, {
+        ...ctx.recoveryFor('no_media'),
         record_id: recordId,
         title,
       });
@@ -123,7 +127,12 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
       throw ctx.fail(
         'not_cc0',
         `Object "${input.id}" has ${allImages.length} image(s) but none are CC0 open access.`,
-        { record_id: recordId, title, image_count: allImages.length },
+        {
+          ...ctx.recoveryFor('not_cc0'),
+          record_id: recordId,
+          title,
+          image_count: allImages.length,
+        },
       );
     }
 

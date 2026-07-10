@@ -144,7 +144,10 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
 
   async handler(input, ctx) {
     if (!input.id.trim()) {
-      throw ctx.fail('invalid_id', 'Object ID must not be empty.', { id: input.id });
+      throw ctx.fail('invalid_id', 'Object ID must not be empty.', {
+        ...ctx.recoveryFor('invalid_id'),
+        id: input.id,
+      });
     }
 
     const svc = getSmithsonianService();

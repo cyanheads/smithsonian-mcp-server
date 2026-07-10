@@ -101,6 +101,7 @@ function normalizeToSummary(raw: RawEDAN): ObjectSummary {
   const unitCode = dnr?.unit_code ?? raw.unitCode ?? '';
   const mediaCount = dnr?.online_media?.mediaCount ?? dnr?.online_media?.media?.length ?? 0;
   const objectType = indexed?.object_type?.[0];
+  const date = indexed?.date?.[0];
   const thumbnailUrl = firstThumbnail(raw);
   return {
     record_id: recordId,
@@ -108,6 +109,7 @@ function normalizeToSummary(raw: RawEDAN): ObjectSummary {
     unit_code: unitCode,
     museum_name: museumName(unitCode),
     ...(objectType !== undefined && { object_type: objectType }),
+    ...(date !== undefined && { date }),
     ...(thumbnailUrl !== undefined && { thumbnail_url: thumbnailUrl }),
     is_cc0: isObjectCC0(raw),
     has_media: mediaCount > 0,

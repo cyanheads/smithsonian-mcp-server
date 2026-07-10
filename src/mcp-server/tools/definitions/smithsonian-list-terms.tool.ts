@@ -91,8 +91,9 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       ctx,
     );
 
-    if (terms.length === 0) {
+    if (total === 0) {
       throw ctx.fail('no_terms', `No terms indexed for field "${input.field}".`, {
+        ...ctx.recoveryFor('no_terms'),
         field: input.field,
       });
     }

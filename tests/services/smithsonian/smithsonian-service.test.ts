@@ -193,6 +193,8 @@ describe('SmithsonianService', () => {
       expect(result.rows[0]?.unit_code).toBe('NASM');
       expect(result.rows[0]?.is_cc0).toBe(true);
       expect(result.rows[0]?.has_media).toBe(true);
+      // date is normalized from indexedStructured.date[0], like object_type (issue #20).
+      expect(result.rows[0]?.date).toBe('1960s');
     });
 
     it('sends api key as X-Api-Key header — not in the URL', async () => {
@@ -306,6 +308,8 @@ describe('SmithsonianService', () => {
       expect(result.rows[0]?.record_id).toBe('ld1-sparse');
       expect(result.rows[0]?.is_cc0).toBe(false);
       expect(result.rows[0]?.has_media).toBe(false);
+      // No indexedStructured on the sparse row → date stays undefined (issue #20).
+      expect(result.rows[0]?.date).toBeUndefined();
     });
   });
 

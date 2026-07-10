@@ -16,6 +16,7 @@ function makeObjectSummary(id = 'nasm_TEST001'): ObjectSummary {
     unit_code: 'NASM',
     museum_name: 'National Air and Space Museum',
     object_type: 'Aircraft',
+    date: '1960s',
     thumbnail_url: 'https://ids.si.edu/thumb',
     is_cc0: true,
     has_media: true,
@@ -56,32 +57,115 @@ describe('smithsonianSearch', () => {
     expect(searchFn.mock.calls[0]?.[0]).toMatchObject({ rows: 25 });
   });
 
-  it('throws no_results when an unfiltered query returns zero rows', async () => {
+  it('throws no_results with the declared recovery hint on the wire (issue #14)', async () => {
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianSearch.errors });
     const input = smithsonianSearch.input.parse({ query: 'xyzzy_no_results_ever' });
+    // The declared contract recovery must reach the wire as data.recovery.hint.
+    const expectedHint = smithsonianSearch.errors?.find((e) => e.reason === 'no_results')?.recovery;
     await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_results' },
+      data: { reason: 'no_results', recovery: { hint: expectedHint } },
     });
   });
 
-  it('throws invalid_filter when a filtered query returns zero rows', async () => {
-    // A filtered zero-result is most often a filter value outside the controlled
-    // vocabulary — the actionable invalid_filter reason (recovery → list_terms).
+  it('harvests valid object_type/unit_code terms into the recovery hint on a filtered-zero (issue #15)', async () => {
+    // First (filtered) search returns nothing; the unfiltered harvest re-query
+    // returns rows whose distinct object_type/unit_code values are named in the hint,
+    // turning a 2-hop "call list_terms" recovery into "retry with one of these".
+    const harvestRows: ObjectSummary[] = [
+      {
+        record_id: 'a',
+        title: 'A',
+        unit_code: 'SIL',
+        museum_name: 'Smithsonian Libraries and Archives',
+        object_type: 'Books',
+        is_cc0: true,
+        has_media: false,
+      },
+      {
+        record_id: 'b',
+        title: 'B',
+        unit_code: 'SIL',
+        museum_name: 'Smithsonian Libraries and Archives',
+        object_type: 'Manuscripts',
+        is_cc0: true,
+        has_media: false,
+      },
+      {
+        record_id: 'c',
+        title: 'C',
+        unit_code: 'NMNH',
+        museum_name: 'National Museum of Natural History',
+        object_type: 'Books',
+        is_cc0: false,
+        has_media: false,
+      },
+    ];
+    const searchFn = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: harvestRows, rowCount: harvestRows.length });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({
+      query: 'Greek',
+      filters: { object_type: 'Painting' },
+    });
+    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+
+    expect(err.data?.reason).toBe('invalid_filter');
+    const hint = err.data?.recovery?.hint as string;
+    // Distinct harvested values (deduped) appear in the hint, not just the count.
+    expect(hint).toContain('Books');
+    expect(hint).toContain('Manuscripts');
+    expect(hint).toContain('SIL');
+    expect(hint).toContain('NMNH');
+    // Exactly one extra re-query, and it drops the failing filters.
+    expect(searchFn).toHaveBeenCalledTimes(2);
+    expect(searchFn.mock.calls[1]?.[0]).toMatchObject({ query: 'Greek', filters: [] });
+  });
+
+  it('falls back to the static contract hint when the harvest re-query is empty (issue #15)', async () => {
+    // Both the filtered search and the unfiltered harvest return nothing — the hint
+    // degrades to the declared contract recovery, no crash and no empty term list.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
-      query: 'quilt',
-      filters: { culture: 'Aztec' },
-    });
+    const input = smithsonianSearch.input.parse({ query: 'quilt', filters: { culture: 'Aztec' } });
+    const expectedHint = smithsonianSearch.errors?.find(
+      (e) => e.reason === 'invalid_filter',
+    )?.recovery;
     await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_filter' },
+      data: { reason: 'invalid_filter', recovery: { hint: expectedHint } },
+    });
+  });
+
+  it('falls back to the static contract hint when the harvest re-query throws (issue #15)', async () => {
+    // The unfiltered harvest re-query errors — harvesting is best-effort and must
+    // not turn the invalid_filter error into a crash; the static hint stands.
+    const searchFn = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockRejectedValueOnce(new Error('upstream 503'));
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'quilt', filters: { culture: 'Aztec' } });
+    const expectedHint = smithsonianSearch.errors?.find(
+      (e) => e.reason === 'invalid_filter',
+    )?.recovery;
+    await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'invalid_filter', recovery: { hint: expectedHint } },
     });
   });
 
@@ -179,5 +263,30 @@ describe('smithsonianSearch', () => {
     expect(text).toContain('NASM');
     expect(text).toContain('100');
     expect(text).toContain('CC0');
+  });
+
+  it('format renders the object date when present (issue #20)', () => {
+    const output = { objects: [makeObjectSummary()], total_count: 1 };
+    const blocks = smithsonianSearch.format!(output);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).toContain('**Date:** 1960s');
+  });
+
+  it('format omits the date line for a date-less object (issue #20)', () => {
+    // Sparse upstream row with no indexed date — the Date line must be absent,
+    // not rendered as an empty or fabricated value.
+    const dateless: ObjectSummary = {
+      record_id: 'nmnh_NODATE',
+      title: 'Undated Object',
+      unit_code: 'NMNH',
+      museum_name: 'National Museum of Natural History',
+      is_cc0: false,
+      has_media: false,
+    };
+    const output = { objects: [dateless], total_count: 1 };
+    const blocks = smithsonianSearch.format!(output);
+    const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+    expect(text).not.toContain('**Date:**');
+    expect(text).toContain('nmnh_NODATE');
   });
 });

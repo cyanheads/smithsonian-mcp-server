@@ -67,8 +67,11 @@ describe('smithsonianExplore', () => {
 
     const ctx = createMockContext({ errors: smithsonianExplore.errors });
     const input = smithsonianExplore.input.parse({ mode: 'medium', value: 'NonexistentMedium' });
+    const expectedHint = smithsonianExplore.errors?.find(
+      (e) => e.reason === 'no_results',
+    )?.recovery;
     await expect(smithsonianExplore.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_results' },
+      data: { reason: 'no_results', recovery: { hint: expectedHint } },
     });
   });
 
