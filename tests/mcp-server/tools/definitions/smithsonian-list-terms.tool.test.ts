@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-list-terms.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
@@ -122,6 +122,42 @@ describe('smithsonianListTerms', () => {
 
     const effectiveOutput = smithsonianListTerms.output.extend(smithsonianListTerms.enrichment!);
     expect(() => effectiveOutput.parse(result)).not.toThrow();
+  });
+
+  it('threads the contains filter through to the service (issue #21)', async () => {
+    const listTermsFn = vi.fn().mockResolvedValue(makeTermsResult(['Greek, Attic'], 1));
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: listTermsFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'culture', contains: 'greek' });
+    const result = await smithsonianListTerms.handler(input, ctx);
+
+    expect(listTermsFn).toHaveBeenCalledWith(
+      { field: 'culture', start: 0, rows: 50, contains: 'greek' },
+      ctx,
+    );
+    expect(result.terms).toEqual(['Greek, Attic']);
+    expect(result.total).toBe(1);
+  });
+
+  it('returns an empty page with a notice (not no_terms) when contains matches nothing (issue #21)', async () => {
+    // A contains filter that resolves to nothing is a successful "no term matches" —
+    // an empty page confirming absence plus a notice, not the empty-field error.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 0)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'culture', contains: 'zzznope' });
+    const result = await smithsonianListTerms.handler(input, ctx);
+
+    expect(result.terms).toEqual([]);
+    expect(result.total).toBe(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('zzznope');
+    expect(enrichment.notice).toContain('culture');
   });
 
   it('format renders field name, total, and term values', () => {

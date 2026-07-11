@@ -17,10 +17,10 @@
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
 | `smithsonian_search` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
-| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms. | `field` (unit_code, culture, place, date, online_media_type), `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
-| `smithsonian_get_object` | Full record by ID: title, description, dates, materials, dimensions, provenance, exhibition, credit, media URLs. Returns all media items with per-image CC0 status. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms; `contains` narrows the vocabulary by a case-insensitive substring. | `field` (unit_code, culture, place, date, online_media_type), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
+| `smithsonian_get_object` | Normalized metadata projection by ID: title, description, dates, materials, dimensions, exhibition, credit, and a media summary (count + CC0 image count). | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Searches a constrained query internally and returns category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. | `mode`, `value`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound) |
-| `smithsonian_find_related` | Given an object ID, finds related items across collections. Fetches the anchor object's metadata (culture, period, object_type, maker topics), then fan-searches the API to surface cross-collection connections. Returns up to 20 related objects with similarity rationale. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, maker, topics). Returns up to 20 related objects, each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
 ### Resources
@@ -37,7 +37,7 @@ None. This is a pure data-access server.
 
 Smithsonian Open Access MCP server wrapping the Smithsonian Institution's EDAN (Enterprise Digital Asset Network) Open Access API. Exposes 19.4 million objects across 20+ museums and research centers — art, natural history specimens, aerospace artifacts, American history, African American culture, Indigenous collections, scientific instruments, photography, and library materials.
 
-The server earns standalone status: single-source, but with massive cross-collection coverage, deep provenance metadata, high-resolution CC0 imagery, and a query surface that rewards LLM-driven discovery.
+The server earns standalone status: single-source, but with massive cross-collection coverage, deep catalog metadata, high-resolution CC0 imagery, and a query surface that rewards LLM-driven discovery.
 
 ## Requirements
 
@@ -114,7 +114,7 @@ Each step is independently testable.
 
 **Errors:**
 - `no_results` (NotFound) — no objects matched the query and filters. Recovery: broaden the query, remove filters, or check spelling.
-- `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: call `smithsonian_list_terms` for the field's valid vocabulary, then retry with an exact term.
+- `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: for a culture/place/date_decade value, resolve it to an exact term with `smithsonian_list_terms { field, contains: <value> }`; for object_type/unit_code, exact co-occurring values are harvested into the hint. Then retry with an exact term.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -122,7 +122,7 @@ Each step is independently testable.
 
 ### `smithsonian_get_object`
 
-**Description:** Fetch the full catalog record for a Smithsonian object by its `record_id` (from `smithsonian_search` results). Returns all available metadata: title, dates, materials, dimensions, provenance, exhibition history, credit line, accession identifiers, and a curated media summary (count, CC0 status, thumbnail). The `record_id` uses the format returned by search — do not manually construct IDs.
+**Description:** Fetch a normalized catalog metadata projection for a Smithsonian object by its `record_id` (from `smithsonian_search` results). Returns the exposed catalog fields: title, dates, description, makers, materials, dimensions, place and culture associations, topics, exhibition history, credit line, accession identifiers, rights statement, and a curated media summary (count, CC0 status, thumbnail). The `record_id` uses the format returned by search — do not manually construct IDs.
 
 **Input:**
 - `id: string` — Object `record_id` as returned by `smithsonian_search` (e.g. `"nasm_A19670093000"`). The service prepends `edanmdm:` automatically.
@@ -180,7 +180,7 @@ Each step is independently testable.
 
 ### `smithsonian_find_related`
 
-**Description:** Discover objects across Smithsonian collections related to a given object. Fetches the anchor object's metadata (culture, period, object type, maker names, topic terms), then fans out up to 4 parallel searches using different metadata signals as queries. Deduplicates against the anchor and interleaves results across the fan-out signals so each contributes, tagging each related object with the signal that connected it. Cross-museum discovery is the differentiator — the anchor may be NASM aerospace, but related objects span NMNH, SAAM, and NMAH.
+**Description:** Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, maker names, and topic terms. Each related object is tagged with the signals that connected it to the anchor. Cross-museum discovery is the differentiator — the anchor may be NASM aerospace, but related objects span NMNH, SAAM, and NMAH.
 
 **Input:**
 - `id: string` — `record_id` of the anchor object (from `smithsonian_search` or `smithsonian_get_object`).
@@ -259,7 +259,7 @@ The idea doc assumed a category browse endpoint. Live probing confirmed the `/te
 
 ### `smithsonian_get_media` is a separate tool, not merged into `smithsonian_get_object`
 
-The object endpoint returns a `media_summary` (count, cc0_image_count, has_cc0_images, thumbnail). Full image arrays can be 15–20 images per object, each with 4 resolution variants — 300–500 lines of data in a typical object like the Amelia Earhart Vega. Separating media retrieval keeps `smithsonian_get_object` focused on provenance/catalog data and lets agents skip the image fetch for text-only research workflows.
+The object endpoint returns a `media_summary` (count, cc0_image_count, has_cc0_images, thumbnail). Full image arrays can be 15–20 images per object, each with 4 resolution variants — 300–500 lines of data in a typical object like the Amelia Earhart Vega. Separating media retrieval keeps `smithsonian_get_object` focused on catalog metadata and lets agents skip the image fetch for text-only research workflows.
 
 ### Rename from `smithsonian_get_image` to `smithsonian_get_media`
 

@@ -132,14 +132,18 @@ describe('smithsonianSearch', () => {
   });
 
   it('falls back to the static contract hint when the harvest re-query is empty (issue #15)', async () => {
-    // Both the filtered search and the unfiltered harvest return nothing — the hint
-    // degrades to the declared contract recovery, no crash and no empty term list.
+    // object_type is harvest-relevant, so the unfiltered re-query runs; when it also
+    // returns nothing, the hint degrades to the declared contract recovery — no crash,
+    // no empty term list.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'quilt', filters: { culture: 'Aztec' } });
+    const input = smithsonianSearch.input.parse({
+      query: 'quilt',
+      filters: { object_type: 'Painting' },
+    });
     const expectedHint = smithsonianSearch.errors?.find(
       (e) => e.reason === 'invalid_filter',
     )?.recovery;
@@ -160,13 +164,116 @@ describe('smithsonianSearch', () => {
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'quilt', filters: { culture: 'Aztec' } });
+    const input = smithsonianSearch.input.parse({
+      query: 'quilt',
+      filters: { object_type: 'Painting' },
+    });
     const expectedHint = smithsonianSearch.errors?.find(
       (e) => e.reason === 'invalid_filter',
     )?.recovery;
     await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_filter', recovery: { hint: expectedHint } },
     });
+  });
+
+  it('routes a bad culture filter to smithsonian_list_terms with contains, no harvest re-query (issue #21)', async () => {
+    // culture is absent from ObjectSummary, so a result harvest can't resolve it — the
+    // hint routes to the vocabulary endpoint with a contains substring, and no
+    // unfiltered harvest re-query runs for a routable-only filter.
+    const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({
+      query: 'sculpture',
+      filters: { culture: 'Ancient Greek' },
+    });
+    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+
+    expect(err.data?.reason).toBe('invalid_filter');
+    const hint = err.data?.recovery?.hint as string;
+    expect(hint).toContain('culture filter "Ancient Greek"');
+    expect(hint).toContain(
+      'smithsonian_list_terms { field: "culture", contains: "Ancient Greek" }',
+    );
+    // Only the filtered search runs — no object_type/unit_code harvest for a
+    // routable-only filter.
+    expect(searchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes a bad place filter to smithsonian_list_terms field "place" (issue #21)', async () => {
+    const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'mask', filters: { place: 'Nigeria' } });
+    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+
+    expect(err.data?.reason).toBe('invalid_filter');
+    const hint = err.data?.recovery?.hint as string;
+    expect(hint).toContain('place filter "Nigeria"');
+    expect(hint).toContain('field: "place", contains: "Nigeria"');
+    expect(searchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes a bad date_decade filter to the list_terms "date" field (issue #21)', async () => {
+    // date_decade maps to the list_terms `date` field — not a literal "date_decade" field.
+    const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({
+      query: 'car',
+      filters: { date_decade: '1820s' },
+    });
+    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+
+    expect(err.data?.reason).toBe('invalid_filter');
+    const hint = err.data?.recovery?.hint as string;
+    expect(hint).toContain('date_decade filter "1820s"');
+    expect(hint).toContain('field: "date", contains: "1820s"');
+  });
+
+  it('routes culture and still harvests object_type when both filters are set (issue #21)', async () => {
+    // culture routes to list_terms; object_type (harvest-relevant) triggers the
+    // unfiltered re-query, so the hint carries BOTH the routing and the harvest.
+    const harvestRows: ObjectSummary[] = [
+      {
+        record_id: 'a',
+        title: 'A',
+        unit_code: 'SAAM',
+        museum_name: 'Smithsonian American Art Museum',
+        object_type: 'Paintings',
+        is_cc0: true,
+        has_media: false,
+      },
+    ];
+    const searchFn = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: harvestRows, rowCount: harvestRows.length });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({
+      query: 'portrait',
+      filters: { culture: 'Ancient Greek', object_type: 'Painting' },
+    });
+    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+
+    const hint = err.data?.recovery?.hint as string;
+    expect(hint).toContain('field: "culture", contains: "Ancient Greek"');
+    expect(hint).toContain('object_type: Paintings');
+    // The harvest re-query runs because object_type is set.
+    expect(searchFn).toHaveBeenCalledTimes(2);
   });
 
   it('non-truncated result validates against the effective output schema (issue #13)', async () => {

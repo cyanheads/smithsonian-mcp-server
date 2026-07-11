@@ -642,5 +642,66 @@ describe('SmithsonianService', () => {
       expect(result.total).toBe(0);
       expect(result.terms).toEqual([]);
     });
+
+    it('filters the vocabulary by a case-insensitive contains substring (issue #21)', async () => {
+      // Upstream returns the full vocabulary; contains narrows it in-process. "greek"
+      // must match every term containing it in any case, and nothing else.
+      const fullVocab = [
+        'Abyssinian',
+        'Greek, Attic',
+        'African American',
+        'Greek, Hellenistic',
+        'ANCIENT GREEK',
+        'Roman',
+      ];
+      mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
+      const svc = makeService();
+      const ctx = createMockContext();
+      const result = await svc.listTerms(
+        { field: 'culture', start: 0, rows: 50, contains: 'greek' },
+        ctx,
+      );
+      // total is the post-filter match count, not the full vocabulary size.
+      expect(result.total).toBe(3);
+      expect(result.terms).toEqual(['Greek, Attic', 'Greek, Hellenistic', 'ANCIENT GREEK']);
+    });
+
+    it('paginates over the filtered set when contains is set (issue #21)', async () => {
+      const fullVocab = ['Greek A', 'Greek B', 'Greek C', 'Roman', 'Greek D'];
+      mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
+      const svc = makeService();
+      const ctx = createMockContext();
+      const result = await svc.listTerms(
+        { field: 'culture', start: 1, rows: 2, contains: 'greek' },
+        ctx,
+      );
+      // 4 terms match "greek"; start/rows slice the FILTERED set, not the raw vocab.
+      expect(result.total).toBe(4);
+      expect(result.terms).toEqual(['Greek B', 'Greek C']);
+    });
+
+    it('returns an empty page with total 0 when contains matches nothing (issue #21)', async () => {
+      const fullVocab = ['Aztec', 'Roman', 'Egyptian'];
+      mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
+      const svc = makeService();
+      const ctx = createMockContext();
+      const result = await svc.listTerms(
+        { field: 'culture', start: 0, rows: 50, contains: 'greek' },
+        ctx,
+      );
+      // An empty result confirms absence — no term in the vocabulary contains "greek".
+      expect(result.total).toBe(0);
+      expect(result.terms).toEqual([]);
+    });
+
+    it('leaves the full vocabulary unchanged when contains is absent (issue #21)', async () => {
+      const fullVocab = ['AAA', 'AAG', 'ACAH', 'ACM'];
+      mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
+      const svc = makeService();
+      const ctx = createMockContext();
+      const result = await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      expect(result.total).toBe(4);
+      expect(result.terms).toEqual(fullVocab);
+    });
   });
 });

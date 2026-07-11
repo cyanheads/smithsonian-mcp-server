@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.13-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.14-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -42,11 +42,11 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 | Tool | Description |
 |:---|:---|
 | `smithsonian_search` | Search across 19.4M objects by text query with optional filters (museum, type, decade, culture, place, online-only, CC0). Returns curated summaries with total count. |
-| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values. |
-| `smithsonian_get_object` | Fetch the full catalog record for an object by ID: title, dates, materials, dimensions, provenance, exhibition history, credit line, and identifiers. |
+| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). |
+| `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
 | `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned — throws when none exist. |
 | `smithsonian_explore` | Browse collections by category (museum, culture, period, medium) with total count, sample objects, and museum breakdown. Entry point for open-ended research. |
-| `smithsonian_find_related` | Discover cross-collection objects related to an anchor via parallel fan-out searches across culture, maker, topic, and period signals. |
+| `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, maker, topic, and period signals. |
 
 ### `smithsonian_search`
 
@@ -66,6 +66,7 @@ Enumerate the valid term vocabulary for an indexed filter field before applying 
 - Supported fields: `unit_code`, `culture`, `place`, `date`, `online_media_type`
 - Returns the field's distinct term values as a page of the full vocabulary — no per-term object counts are available upstream
 - Smithsonian uses a controlled vocabulary (terms are often plural, e.g. `Paintings` not `Painting`) — grounding filter values here avoids empty results
+- Pass `contains` to filter the vocabulary by a case-insensitive substring — resolve a guessed value (e.g. `greek` → `Greek, Attic`) to its exact term(s) in one call, or confirm absence with an empty result
 - Paginate with `start` + `rows` (default 50 per page, max 100); large vocabularies like `place` have 100k+ terms
 - `object_type` is not enumerable upstream — discover object-type values from the `object_type` field in `smithsonian_search` results
 
@@ -73,10 +74,10 @@ Enumerate the valid term vocabulary for an indexed filter field before applying 
 
 ### `smithsonian_get_object`
 
-Full provenance metadata for a single object.
+Normalized catalog metadata for a single object.
 
 - Input: `record_id` from `smithsonian_search` — do not construct IDs manually
-- Returns all available catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, exhibition history, accession identifiers, credit line, rights statement
+- Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, exhibition history, accession identifiers, credit line, rights statement
 - Media summary included — call `smithsonian_get_media` for full image URLs
 
 ---
@@ -103,10 +104,10 @@ Category-constrained browse for open-ended collection discovery.
 
 ### `smithsonian_find_related`
 
-Cross-collection discovery via parallel metadata fan-out.
+Cross-collection discovery via shared metadata signals.
 
-- Fetches anchor object metadata, then fans out up to 4 parallel searches using culture, maker, topic, and period+type signals
-- Deduplicates against the anchor and interleaves results so each fan-out signal contributes
+- Matches the anchor's culture, maker, topic, and period+type metadata signals against the wider catalog
+- Surfaces related objects from across collections, each tagged with the metadata signals that connected it to the anchor
 - Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
 - `similarity_signals` on each result show every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
 - Page past a truncated result with `start` — a 0-indexed offset into the interleaved related set; page contiguously with `start = page × limit` (within the first 100 per signal; a deeper page can shift an object by a bounded amount near a seam). A truncated response reports `truncationCeiling` as an upper bound on the related pool
@@ -128,7 +129,7 @@ Smithsonian-specific:
 
 - Wraps the [Smithsonian Open Access API](https://edan.si.edu/openaccess/apidocs/) (19.4M objects across 20+ museums) with a free `api.data.gov` key
 - CC0 gating on `smithsonian_get_media` — only open-access images returned, never restricted content
-- Parallel fan-out in `smithsonian_find_related` with graceful degradation (partial failures don't abort)
+- Graceful degradation in `smithsonian_find_related` — a failure in one metadata signal doesn't abort the rest
 - Response normalization across heterogeneous museum metadata schemas
 
 Agent-friendly output:

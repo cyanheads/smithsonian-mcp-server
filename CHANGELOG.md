@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-07-10
+
+Add a contains substring filter to smithsonian_list_terms, route smithsonian_search's filtered-zero recovery through it, and align get_object/find_related descriptions with their actual output contract
+
 ## [0.1.13](changelog/0.1.x/0.1.13.md) — 2026-07-10
 
 Add start-paged continuation and truncationCeiling to smithsonian_find_related; fix get_object topic truncation and find_related signal accumulation; refine package/manifest metadata

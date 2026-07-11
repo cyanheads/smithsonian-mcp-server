@@ -455,16 +455,22 @@ export class SmithsonianService {
   }
 
   /**
-   * Enumerate the valid term vocabulary for an indexed field.
+   * Enumerate the valid term vocabulary for an indexed field, optionally narrowed
+   * by a case-insensitive substring.
    *
    * The upstream `/terms/{field}` endpoint returns `response.terms` as a bare
    * `string[]` (no per-term counts) and ignores `rows`/`start`, always returning
    * the full vocabulary — `place` alone is ~114k terms (~3.2 MB). Pagination is
    * therefore done client-side: fetch once, then slice. Only the requested page
    * is returned, so a full vocabulary never reaches the tool output.
+   *
+   * `contains` filters that already-fetched vocabulary in memory, before pagination,
+   * so it costs no extra upstream call. When set, `total` is the post-filter match
+   * count and the page is sliced from the matching terms; an empty result confirms
+   * no such term exists.
    */
   async listTerms(
-    params: { field: string; start: number; rows: number },
+    params: { field: string; start: number; rows: number; contains?: string },
     ctx: RequestContextLike,
   ): Promise<{ terms: string[]; total: number }> {
     const cfg = getServerConfig();
@@ -472,8 +478,12 @@ export class SmithsonianService {
 
     const raw = await this.get<RawTermsResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
     const all = raw.response?.terms ?? [];
-    const page = all.slice(params.start, params.start + params.rows);
-    return { terms: page, total: all.length };
+    // Case-insensitive substring filter over the full vocabulary already in hand,
+    // applied before pagination so both `total` and the page reflect the match set.
+    const needle = params.contains?.toLowerCase();
+    const matched = needle ? all.filter((term) => term.toLowerCase().includes(needle)) : all;
+    const page = matched.slice(params.start, params.start + params.rows);
+    return { terms: page, total: matched.length };
   }
 }
 

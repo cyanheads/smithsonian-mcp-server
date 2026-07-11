@@ -32,6 +32,12 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .max(100)
       .default(50)
       .describe('Number of terms to return per page (default 50, max 100).'),
+    contains: z
+      .string()
+      .optional()
+      .describe(
+        'Case-insensitive substring filter on the term vocabulary — resolve a filter value (e.g. "greek") to its exact controlled-vocabulary term(s).',
+      ),
   }),
 
   output: z.object({
@@ -64,7 +70,15 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
     truncationCeiling: z
       .number()
       .optional()
-      .describe('Total distinct terms for the field (upper bound for omitted items).'),
+      .describe(
+        'Distinct terms available for this query (the full vocabulary, or the contains-match count) — upper bound for omitted items.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when a contains filter matched no terms — how to broaden or drop the filter.',
+      ),
   },
 
   errors: [
@@ -87,11 +101,19 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
     });
 
     const { terms, total } = await svc.listTerms(
-      { field: input.field, start: input.start, rows: input.rows },
+      {
+        field: input.field,
+        start: input.start,
+        rows: input.rows,
+        ...(input.contains !== undefined && { contains: input.contains }),
+      },
       ctx,
     );
 
-    if (total === 0) {
+    // no_terms means the field itself has no indexed vocabulary — only meaningful
+    // when enumerating unfiltered. With a contains filter, a zero result is a
+    // successful "no term matches" (absence confirmation), surfaced as a notice below.
+    if (total === 0 && !input.contains) {
       throw ctx.fail('no_terms', `No terms indexed for field "${input.field}".`, {
         ...ctx.recoveryFor('no_terms'),
         field: input.field,
@@ -99,6 +121,13 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
     }
 
     ctx.log.info('Terms listed', { field: input.field, count: terms.length, total });
+
+    if (input.contains && total === 0) {
+      ctx.enrich.notice(
+        `No term in the "${input.field}" vocabulary contains "${input.contains}". ` +
+          'Broaden or re-spell the substring, or omit contains to browse the full vocabulary.',
+      );
+    }
 
     if (terms.length < total) {
       ctx.enrich.truncated({ shown: terms.length, cap: input.rows, ceiling: total });
@@ -109,7 +138,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
 
   format: (result) => {
     const lines: string[] = [
-      `**Field:** \`${result.field}\` — ${result.total.toLocaleString()} total distinct terms, showing ${result.terms.length}\n`,
+      `**Field:** \`${result.field}\` — ${result.total.toLocaleString()} distinct terms, showing ${result.terms.length}\n`,
     ];
     for (const t of result.terms) {
       lines.push(`- \`${t}\``);

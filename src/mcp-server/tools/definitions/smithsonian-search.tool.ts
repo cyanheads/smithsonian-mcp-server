@@ -25,18 +25,42 @@ function distinctValues(values: Array<string | undefined>, cap = 12): string[] {
 }
 
 /**
- * Compose the filtered-zero recovery hint from the controlled-vocabulary values
- * that co-occur with the query, naming exact terms the caller can retry with.
+ * Search-filter field → the smithsonian_list_terms field that enumerates its
+ * vocabulary. These three are absent from ObjectSummary, so a filtered-zero can't
+ * harvest them from result summaries — they route to list_terms with a `contains`
+ * substring instead. `date_decade` maps to the list_terms `date` field.
  */
-function composeFilterHint(objectTypes: string[], unitCodes: string[]): string {
+const LIST_TERMS_FIELD = { culture: 'culture', place: 'place', date_decade: 'date' } as const;
+
+/**
+ * Compose the filtered-zero recovery hint. culture/place/date_decade values route to
+ * smithsonian_list_terms with a `contains` substring (their vocabulary isn't in result
+ * summaries); object_type/unit_code values ARE in summaries, so they're named from the
+ * unfiltered harvest. Returns '' when neither applies, so the caller keeps the static
+ * contract hint.
+ */
+function composeFilterHint(
+  routableFilters: Array<{ filter: string; field: string; value: string }>,
+  objectTypes: string[],
+  unitCodes: string[],
+): string {
   const parts: string[] = [];
-  if (objectTypes.length > 0) parts.push(`object_type: ${objectTypes.join(', ')}`);
-  if (unitCodes.length > 0) parts.push(`unit_code: ${unitCodes.join(', ')}`);
-  return (
-    `Values present for this query — ${parts.join('; ')}. ` +
-    `Retry with one of these exact terms (object_type is commonly plural, e.g. "Paintings"), ` +
-    `or call smithsonian_list_terms for the full unit_code, culture, place, or date vocabulary.`
-  );
+  for (const { filter, field, value } of routableFilters) {
+    parts.push(
+      `Your ${filter} filter "${value}" matched nothing — resolve it to an exact term with ` +
+        `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`,
+    );
+  }
+  const harvested: string[] = [];
+  if (objectTypes.length > 0) harvested.push(`object_type: ${objectTypes.join(', ')}`);
+  if (unitCodes.length > 0) harvested.push(`unit_code: ${unitCodes.join(', ')}`);
+  if (harvested.length > 0) {
+    parts.push(
+      `Values present for this query — ${harvested.join('; ')}. ` +
+        `Retry with one of these exact terms (object_type is commonly plural, e.g. "Paintings").`,
+    );
+  }
+  return parts.join(' ');
 }
 
 const ObjectSummarySchema = z
@@ -178,7 +202,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'A filtered search matched nothing — most often a filter value outside the Smithsonian controlled vocabulary (e.g. a singular "Painting" instead of "Paintings").',
       recovery:
-        'Call smithsonian_list_terms with the relevant field name (unit_code, culture, place, date) to get the valid vocabulary, then retry with an exact term. Note object_type is not enumerable — harvest its values from search results.',
+        'Call smithsonian_list_terms with the relevant field (unit_code, culture, place, date) and a contains substring to resolve a filter value to an exact vocabulary term, then retry. Note object_type is not enumerable — harvest its values from search results.',
     },
   ],
 
@@ -215,26 +239,51 @@ export const smithsonianSearch = tool('smithsonian_search', {
       // controlled vocabulary — surface the actionable invalid_filter reason
       // (recovery points at smithsonian_list_terms) rather than generic no_results.
       if (filters.length > 0) {
-        // Harvest the controlled-vocabulary values (object_type, unit_code) that
-        // co-occur with the query via one unfiltered re-query, and name them in
-        // the recovery hint so the caller can retry with an exact term instead of
-        // making a second list_terms hop. Best-effort and failure-path only: any
-        // error or an empty re-query keeps the static contract hint, so the
-        // harvest never turns a clean invalid_filter into a crash.
-        let recovery: Record<string, unknown> = ctx.recoveryFor('invalid_filter');
-        try {
-          const { rows: sample } = await svc.search(
-            { query: input.query, rows: 100, start: 0, filters: [] },
-            ctx,
-          );
-          const objectTypes = distinctValues(sample.map((o) => o.object_type));
-          const unitCodes = distinctValues(sample.map((o) => o.unit_code));
-          if (objectTypes.length > 0 || unitCodes.length > 0) {
-            recovery = { recovery: { hint: composeFilterHint(objectTypes, unitCodes) } };
+        // culture/place/date_decade values aren't present in ObjectSummary, so a
+        // result harvest can't resolve them — route each to smithsonian_list_terms
+        // with a `contains` substring instead. object_type/unit_code ARE in summaries,
+        // so those are harvested from one unfiltered re-query and named in the hint.
+        // Harvesting is best-effort and failure-path only: any error or an empty
+        // re-query keeps the static contract hint, so it never turns a clean
+        // invalid_filter into a crash.
+        const routableFilters: Array<{ filter: string; field: string; value: string }> = [];
+        if (f?.culture)
+          routableFilters.push({
+            filter: 'culture',
+            field: LIST_TERMS_FIELD.culture,
+            value: f.culture,
+          });
+        if (f?.place)
+          routableFilters.push({ filter: 'place', field: LIST_TERMS_FIELD.place, value: f.place });
+        if (f?.date_decade)
+          routableFilters.push({
+            filter: 'date_decade',
+            field: LIST_TERMS_FIELD.date_decade,
+            value: f.date_decade,
+          });
+
+        // Harvest only when object_type/unit_code is the culprit — those are the only
+        // filters whose exact values an unfiltered re-query can surface.
+        let objectTypes: string[] = [];
+        let unitCodes: string[] = [];
+        if (f?.object_type || f?.unit_code) {
+          try {
+            const { rows: sample } = await svc.search(
+              { query: input.query, rows: 100, start: 0, filters: [] },
+              ctx,
+            );
+            objectTypes = distinctValues(sample.map((o) => o.object_type));
+            unitCodes = distinctValues(sample.map((o) => o.unit_code));
+          } catch {
+            // Harvesting is best-effort — fall back to the static contract hint.
           }
-        } catch {
-          // Harvesting is best-effort — fall back to the static contract hint.
         }
+
+        const hint = composeFilterHint(routableFilters, objectTypes, unitCodes);
+        const recovery: Record<string, unknown> = hint
+          ? { recovery: { hint } }
+          : ctx.recoveryFor('invalid_filter');
+
         throw ctx.fail(
           'invalid_filter',
           `No Smithsonian objects matched query "${input.query}" with the given filters. A filter value may not be an exact controlled-vocabulary term, or the query and filters may legitimately have no overlap.`,
