@@ -1,6 +1,6 @@
 {
   "name": "smithsonian-mcp-server",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Search, explore, and retrieve CC0 media from 19.4 million Smithsonian Open Access objects across 20+ museums via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "Casey Hand",
@@ -24,7 +24,7 @@
   "interface": {
     "displayName": "smithsonian-mcp-server",
     "shortDescription": "Search, explore, and retrieve CC0 media from 19.4 million Smithsonian Open Access objects across 20+ museums via MCP. STDIO or Streamable HTTP.",
-    "longDescription": "Six tools covering the full Smithsonian Open Access workflow: search 19.4M objects from 20+ museums with rich filters, discover valid filter vocabulary terms, fetch full provenance metadata, retrieve CC0-licensed images at multiple resolutions, browse by category (museum/culture/period/medium), and discover related objects via cross-collection fan-out. Requires a free api.data.gov API key.",
+    "longDescription": "Six tools covering the full Smithsonian Open Access workflow: search 19.4M objects from 20+ museums with rich filters, discover valid filter vocabulary terms, fetch normalized object metadata, retrieve CC0-licensed images at multiple resolutions, browse by category (museum/culture/period/medium), and discover related objects across collections. Requires a free api.data.gov API key.",
     "developerName": "Casey Hand",
     "category": "Research",
     "capabilities": ["Read"],
