@@ -110,7 +110,7 @@ Cross-collection discovery via shared metadata signals.
 - Surfaces related objects from across collections, each tagged with the metadata signals that connected it to the anchor
 - Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
 - `similarity_signals` on each result show every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
-- Page past a truncated result with `start` — a 0-indexed offset into the interleaved related set; page contiguously with `start = page × limit` (within the first 100 per signal; a deeper page can shift an object by a bounded amount near a seam). A truncated response reports `truncationCeiling` as an upper bound on the related pool
+- Page past a truncated result with `start` — a 0-indexed offset into the interleaved related set; page contiguously with `start = page × limit` (each signal is reachable to a depth of 5,000, fetched in ≤1,000-row chunks; a deeper page can shift an object by a bounded amount near a seam). A truncated response reports `truncationCeiling` as an upper bound on the reachable related pool
 
 ---
 

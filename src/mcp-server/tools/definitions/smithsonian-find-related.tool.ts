@@ -8,12 +8,23 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
 
 /**
- * Per-signal upstream fetch cap. Each fan-out fetches from the top (start:0) up to
- * `min(start + limit, MAX_FETCH_PER_SIGNAL)` rows, so `start` can offset the merged
- * interleave without skipping candidates. Beyond this many matches per signal, deeper
- * pages aren't reachable (100 mirrors the max `rows` smithsonian_search accepts).
+ * Per-signal fetch depth cap. Each fan-out signal is fetched from the top
+ * (upstream start:0) up to `min(start + limit, MAX_FETCH_PER_SIGNAL)` rows, so
+ * `start` can offset the merged interleave without skipping candidates. The depth
+ * is fetched in chunks of at most `MAX_ROWS_PER_UPSTREAM_CALL` and concatenated,
+ * so a page well past a single upstream call stays reachable. A signal with more
+ * matches than this cap is still disclosed via `truncationCeiling`, but its rows
+ * beyond the cap aren't reachable through this tool.
  */
-const MAX_FETCH_PER_SIGNAL = 100;
+const MAX_FETCH_PER_SIGNAL = 5000;
+
+/**
+ * Hard upstream ceiling on `rows` for a single `/search` call. The EDAN API
+ * silently returns a 10-row default page (HTTP 200, no error) when `rows` exceeds
+ * 1000 rather than clamping, so a deeper per-signal fetch must be split into
+ * chunks of at most this many rows.
+ */
+const MAX_ROWS_PER_UPSTREAM_CALL = 1000;
 
 const RelatedObjectSchema = z
   .object({
@@ -62,7 +73,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .min(0)
       .default(0)
       .describe(
-        `Pagination offset into the interleaved related-object sequence — 0-indexed. Page contiguously with start = page × limit: page N+1 continues where page N ended, within the first ${MAX_FETCH_PER_SIGNAL} related objects per signal. Near a page seam a small, bounded number of objects (up to the active-signal count) can shift by one page when a deeper page surfaces an object that ranks very differently across signals. Beyond the cap, truncated stays true but deeper pages aren't reachable.`,
+        `Pagination offset into the interleaved related-object sequence — 0-indexed. Page contiguously with start = page × limit: page N+1 continues where page N ended. Each contributing signal is reachable to a depth of ${MAX_FETCH_PER_SIGNAL} objects (fetched in chunks upstream), so deep pages of a broad signal are retrievable. Near a page seam a small, bounded number of objects (up to the active-signal count) can shift by one page when a deeper page surfaces an object that ranks very differently across signals. Beyond ${MAX_FETCH_PER_SIGNAL} matches for a signal, truncated stays true but deeper pages aren't reachable.`,
       ),
   }),
 
@@ -97,7 +108,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .number()
       .optional()
       .describe(
-        'Upper bound on total related objects across the contributing signals (sum of each fan-out signal’s upstream match count; cross-signal overlaps are not subtracted).',
+        'Upper bound on the reachable related objects across the contributing signals — each signal’s upstream match count is capped at its per-signal reach before summing, so the ceiling never exceeds what paging with start can actually retrieve. Cross-signal overlaps are not subtracted.',
       ),
   },
 
@@ -192,19 +203,54 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     ctx.log.info('Fan-out searches', { signals: searchSignalsUsed });
 
     // Step 2: fan-out searches in parallel (graceful degradation). Each signal fetches
-    // from the top (start:0) enough rows to cover the requested page — the start offset
-    // is applied to the MERGED interleave below, not the upstream query. Offsetting the
-    // upstream query instead would fetch a disjoint window per page and permanently drop
-    // the fetched-but-unshown candidates the round-robin merge didn't reach. rowCount is
-    // the signal's upstream total, used for the ceiling and truncation below.
-    const fetchedRows = Math.min(input.start + input.limit, MAX_FETCH_PER_SIGNAL);
-    const fanOutResults = await Promise.allSettled(
-      fanOuts.map((fo) =>
-        svc
-          .search({ query: fo.query, rows: fetchedRows, start: 0, filters: fo.filters }, ctx)
-          .then((res) => ({ items: res.rows, signal: fo.signal, rowCount: res.rowCount })),
-      ),
-    );
+    // from the top (upstream start:0) enough rows to cover the requested page — the
+    // start offset is applied to the MERGED interleave below, not the upstream query.
+    // Offsetting the upstream query instead would fetch a disjoint window per page and
+    // permanently drop the fetched-but-unshown candidates the round-robin merge didn't
+    // reach. The depth is fetched in chunks of at most MAX_ROWS_PER_UPSTREAM_CALL: wave 1
+    // is a single call — covering the common depth ≤ one chunk case at the same cost as
+    // an un-chunked fetch — that also reveals the signal's real upstream rowCount; wave 2
+    // fetches the remaining start:1000, 2000, … chunks in parallel, and only when both
+    // the requested depth and the real total exceed one chunk. rowCount is the signal's
+    // upstream total, used for the ceiling and truncation below. A chunk rejection
+    // bubbles to the outer allSettled, dropping the whole signal rather than leaving a
+    // gap in the middle of its contiguous range.
+    const neededDepth = Math.min(input.start + input.limit, MAX_FETCH_PER_SIGNAL);
+    const fetchSignal = async (fo: FanOut) => {
+      const wave1 = await svc.search(
+        {
+          query: fo.query,
+          rows: Math.min(neededDepth, MAX_ROWS_PER_UPSTREAM_CALL),
+          start: 0,
+          filters: fo.filters,
+        },
+        ctx,
+      );
+      const items = [...wave1.rows];
+      const reachable = Math.min(neededDepth, wave1.rowCount);
+      if (reachable > MAX_ROWS_PER_UPSTREAM_CALL) {
+        const starts: number[] = [];
+        for (let s = MAX_ROWS_PER_UPSTREAM_CALL; s < reachable; s += MAX_ROWS_PER_UPSTREAM_CALL) {
+          starts.push(s);
+        }
+        const laterChunks = await Promise.all(
+          starts.map((start) =>
+            svc.search(
+              {
+                query: fo.query,
+                rows: Math.min(MAX_ROWS_PER_UPSTREAM_CALL, reachable - start),
+                start,
+                filters: fo.filters,
+              },
+              ctx,
+            ),
+          ),
+        );
+        for (const chunk of laterChunks) items.push(...chunk.rows);
+      }
+      return { items, signal: fo.signal, rowCount: wave1.rowCount };
+    };
+    const fanOutResults = await Promise.allSettled(fanOuts.map(fetchSignal));
 
     // Step 3: accumulate every signal per record_id, bucket by first-discovery
     // order for round-robin fairness, then interleave so each signal contributes
@@ -289,16 +335,18 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     // Disclose truncation when related objects were omitted — either the interleaved
     // sequence extends past this page, or a contributing signal has more matches
     // upstream than the fetch reached (retrievable by advancing start, up to the cap).
-    // The ceiling is an upper bound on the related pool across contributing signals
-    // (summed upstream match counts; cross-signal overlap is not subtracted).
-    const ceiling = buckets.reduce((sum, b) => sum + b.rowCount, 0);
+    // The ceiling is an upper bound on the reachable related pool: each signal's
+    // upstream match count is capped at MAX_FETCH_PER_SIGNAL (its reach) before summing,
+    // so the disclosed ceiling never exceeds what start can actually reach. Cross-signal
+    // overlap is not subtracted.
+    const ceiling = buckets.reduce((sum, b) => sum + Math.min(b.rowCount, MAX_FETCH_PER_SIGNAL), 0);
     // moreInMerged: distinct candidates beyond this page already sit in the merge.
     // moreUpstream: a signal reported more matches than we fetched, so deeper pages
-    // exist upstream. Comparing rowCount to the requested fetch size (not the
+    // exist upstream. Comparing rowCount to the targeted fetch depth (not the
     // page-local count) avoids false-positiving on a trailing page that lands on the
-    // exact end of a signal — there rowCount never exceeds fetchedRows.
+    // exact end of a signal — there rowCount never exceeds neededDepth.
     const moreInMerged = merged.length > input.start + input.limit;
-    const moreUpstream = buckets.some((b) => b.rowCount > fetchedRows);
+    const moreUpstream = buckets.some((b) => b.rowCount > neededDepth);
     if (moreInMerged || moreUpstream) {
       ctx.enrich.truncated({ shown: related.length, cap: input.limit, ceiling });
     }

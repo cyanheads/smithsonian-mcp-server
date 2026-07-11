@@ -354,8 +354,8 @@ describe('smithsonianFindRelated', () => {
 
   it('fetches each fan-out from the top with a page-covering row count, not the raw start (issue #18)', async () => {
     // start offsets the MERGED interleave, not the upstream query. Every fan-out must
-    // fetch from row 0 with enough rows to cover start+limit (capped at 100), so the
-    // fetched-but-unshown candidates the merge skips are never permanently dropped.
+    // fetch from row 0 with enough rows to cover start+limit (capped at MAX_FETCH_PER_SIGNAL),
+    // so the fetched-but-unshown candidates the merge skips are never permanently dropped.
     const anchorRaw = makeAnchorRaw();
     const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
@@ -376,10 +376,213 @@ describe('smithsonianFindRelated', () => {
     await smithsonianFindRelated.handler(input, ctx);
 
     expect(searchFn).toHaveBeenCalled();
-    // start:0 with rows = start + limit = 30 (below the 100 cap).
+    // start:0 with rows = start + limit = 30 (one chunk, below the 1000 per-call ceiling).
     for (const call of searchFn.mock.calls) {
       expect(call[0]).toMatchObject({ start: 0, rows: 30 });
     }
+  });
+
+  it('issues a single chunk-of-one call per signal for a shallow default request (issue #18)', async () => {
+    // The default (start:0, limit:10) targets a depth of 10 — well under one upstream
+    // chunk — so the chunked fetch must collapse to exactly the prior single call per
+    // signal: rows:10, start:0, no wave-2. This pins the common path byte-identical to
+    // the pre-fix behavior.
+    const anchorRaw = makeAnchorRaw();
+    const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    // makeAnchorRaw drives four fan-outs (culture, maker, topic, period+type).
+    const input = smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' });
+    await smithsonianFindRelated.handler(input, ctx);
+
+    // Exactly one call per fan-out — no chunking round-trips on a shallow request.
+    expect(searchFn).toHaveBeenCalledTimes(4);
+    for (const call of searchFn.mock.calls) {
+      expect(call[0]).toMatchObject({ start: 0, rows: 10 });
+    }
+  });
+
+  it('reaches a deep page past the old 100-row per-signal wall (issue #18)', async () => {
+    // Regression for the reopened gap: with MAX_FETCH_PER_SIGNAL = 100 a single signal
+    // could reach at most ~100 candidates, so start:300 returned []. The chunked fetch
+    // targets start+limit rows from the top, so start:300 must return real, contiguous
+    // results.
+    const anchorRaw = makeAnchorRaw();
+    const fullSeq: ObjectSummary[] = Array.from({ length: 400 }, (_, i) => ({
+      record_id: `culture_${i + 1}`,
+      title: `Culture Object ${i + 1}`,
+      unit_code: 'NMAI',
+      museum_name: 'National Museum of the American Indian',
+      is_cc0: true,
+      has_media: false,
+    }));
+    // Only the culture fan-out yields rows; upstream returns a stable top-`rows` prefix
+    // from start:0 (the deep fetch never offsets the upstream query for depths ≤ 1 chunk).
+    const searchFn = vi
+      .fn()
+      .mockImplementation((params: { rows: number; start: number; filters?: string[] }) =>
+        Promise.resolve(
+          params.filters?.some((f) => f.startsWith('culture:'))
+            ? {
+                rows: fullSeq.slice(params.start, params.start + params.rows),
+                rowCount: fullSeq.length,
+              }
+            : { rows: [], rowCount: 0 },
+        ),
+      );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Museum of the American Indian',
+        is_cc0: true,
+        has_media: false,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const deep = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20, start: 300 }),
+      ctx,
+    );
+    const next = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20, start: 320 }),
+      ctx,
+    );
+
+    const deepIds = deep.related.map((r) => r.record_id);
+    const nextIds = next.related.map((r) => r.record_id);
+    // Real results past row 300 — not the pre-fix empty page.
+    expect(deepIds).toEqual(Array.from({ length: 20 }, (_, i) => `culture_${i + 301}`));
+    // Advancing continues contiguously, gap-free.
+    expect(nextIds).toEqual(Array.from({ length: 20 }, (_, i) => `culture_${i + 321}`));
+    expect([...deepIds, ...nextIds]).toEqual(
+      Array.from({ length: 40 }, (_, i) => `culture_${i + 301}`),
+    );
+  });
+
+  it('splits a deep fetch into ≤1000-row chunks and concatenates in order (issue #18)', async () => {
+    // A signal with more than 1000 upstream matches, paged deep enough that neededDepth
+    // exceeds one chunk (start:1000 + limit:20 = 1020 > 1000), must fetch wave 1 at
+    // start:0 and a parallel wave 2 at start:1000, concatenated in ascending order — a
+    // single call requesting >1000 rows would silently collapse upstream.
+    const anchorRaw = makeAnchorRaw();
+    const fullSeq: ObjectSummary[] = Array.from({ length: 1500 }, (_, i) => ({
+      record_id: `culture_${i + 1}`,
+      title: `Culture Object ${i + 1}`,
+      unit_code: 'NMAI',
+      museum_name: 'National Museum of the American Indian',
+      is_cc0: true,
+      has_media: false,
+    }));
+    // Slice by BOTH start and rows so wave 2 (start:1000) returns the correct window.
+    const searchFn = vi
+      .fn()
+      .mockImplementation((params: { rows: number; start: number; filters?: string[] }) =>
+        Promise.resolve(
+          params.filters?.some((f) => f.startsWith('culture:'))
+            ? {
+                rows: fullSeq.slice(params.start, params.start + params.rows),
+                rowCount: fullSeq.length,
+              }
+            : { rows: [], rowCount: 0 },
+        ),
+      );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Museum of the American Indian',
+        is_cc0: false,
+        has_media: false,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const result = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20, start: 1000 }),
+      ctx,
+    );
+
+    // The page at start:1000 is the deep window, concatenated in order across the chunk seam.
+    const ids = result.related.map((r) => r.record_id);
+    expect(ids).toEqual(Array.from({ length: 20 }, (_, i) => `culture_${i + 1001}`));
+
+    // The culture signal was fetched in two chunks: wave 1 (start:0, rows:1000) then
+    // wave 2 (start:1000, rows:20). Both start values were requested; the >1000-row
+    // single call was never issued.
+    const cultureCalls = searchFn.mock.calls
+      .map((c) => c[0] as { start: number; rows: number; filters?: string[] })
+      .filter((p) => p.filters?.some((f) => f.startsWith('culture:')));
+    expect(cultureCalls.map((p) => p.start)).toEqual([0, 1000]);
+    expect(cultureCalls.find((p) => p.start === 0)?.rows).toBe(1000);
+    expect(cultureCalls.find((p) => p.start === 1000)?.rows).toBe(20);
+    for (const p of cultureCalls) {
+      expect(p.rows).toBeLessThanOrEqual(1000);
+    }
+  });
+
+  it('caps truncationCeiling at the per-signal reach when a signal exceeds it (issue #18)', async () => {
+    // A signal reporting more upstream matches than MAX_FETCH_PER_SIGNAL (5000) can only
+    // ever surface the first 5000 through paging, so the disclosed ceiling must be the
+    // capped reach (5000), not the raw upstream count — the ceiling stays equal to a
+    // position start can actually reach. truncated stays true (more remains upstream).
+    const anchorRaw = makeAnchorRaw();
+    const cultureRows: ObjectSummary[] = Array.from({ length: 20 }, (_, i) => ({
+      record_id: `culture_${i + 1}`,
+      title: `Culture Object ${i + 1}`,
+      unit_code: 'NMAI',
+      museum_name: 'National Museum of the American Indian',
+      is_cc0: true,
+      has_media: false,
+    }));
+    const searchFn = vi.fn().mockImplementation((params: { filters?: string[] }) =>
+      Promise.resolve(
+        params.filters?.some((f) => f.startsWith('culture:'))
+          ? { rows: cultureRows, rowCount: 8000 } // far more upstream than the 5000 reach
+          : { rows: [], rowCount: 0 },
+      ),
+    );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Museum of the American Indian',
+        is_cc0: true,
+        has_media: false,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const input = smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20 });
+    const result = await smithsonianFindRelated.handler(input, ctx);
+
+    expect(result.related).toHaveLength(20);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    // Capped reach (5000), NOT the raw 8000 upstream count.
+    expect(enrichment.truncationCeiling).toBe(5000);
   });
 
   it('surfaces truncationCeiling from upstream rowCount when a signal has more upstream (issue #18)', async () => {
@@ -471,10 +674,12 @@ describe('smithsonianFindRelated', () => {
     expect(enrichment.truncated).toBeUndefined();
   });
 
-  it('pages the interleaved set contiguously — start=limit continues exactly where page 1 ended (issue #18)', async () => {
-    // A single signal exposes a stable ordered sequence upstream. Each fan-out fetches
-    // from start:0 (the offset is applied to the merged interleave), so page 2
-    // (start=limit) must be a gap-free, non-overlapping continuation of page 1.
+  it('reconstructs the full sequence — page(start:0) ++ page(start:L) equals page(start:0, limit:2L) (issue #18)', async () => {
+    // The load-bearing correctness proof: paging must be gap-free AND overlap-free, so
+    // concatenating two half-limit pages must equal one double-limit page fetched from
+    // the top — a "distinct next page" check alone passes even when a gap silently drops
+    // objects. A single signal exposes a stable ordered sequence upstream; each fan-out
+    // fetches from start:0 (the offset is applied to the merged interleave).
     const anchorRaw = makeAnchorRaw();
     const fullSeq: ObjectSummary[] = Array.from({ length: 30 }, (_, i) => ({
       record_id: `culture_${i + 1}`,
@@ -517,16 +722,20 @@ describe('smithsonianFindRelated', () => {
       smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 10, start: 10 }),
       ctx,
     );
+    const full = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20 }),
+      ctx,
+    );
 
     const firstIds = first.related.map((r) => r.record_id);
     const secondIds = second.related.map((r) => r.record_id);
+    const fullIds = full.related.map((r) => r.record_id);
     // Page 1 is the first 10 of the interleaved sequence; page 2 is the next 10.
     expect(firstIds).toEqual(Array.from({ length: 10 }, (_, i) => `culture_${i + 1}`));
     expect(secondIds).toEqual(Array.from({ length: 10 }, (_, i) => `culture_${i + 11}`));
-    // Concatenation is a gap-free, non-overlapping run — start is a contiguous cursor.
-    expect([...firstIds, ...secondIds]).toEqual(
-      Array.from({ length: 20 }, (_, i) => `culture_${i + 1}`),
-    );
+    // Reconstruction: the two half pages concatenate to exactly the one double page —
+    // proves no gap and no overlap at the seam, byte-identical by record_id sequence.
+    expect([...firstIds, ...secondIds]).toEqual(fullIds);
     // Every fan-out fetched from the top; start never leaked into the upstream query.
     for (const call of searchFn.mock.calls) {
       expect(call[0].start).toBe(0);

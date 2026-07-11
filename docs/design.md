@@ -185,13 +185,13 @@ Each step is independently testable.
 **Input:**
 - `id: string` — `record_id` of the anchor object (from `smithsonian_search` or `smithsonian_get_object`).
 - `limit?: number` — max related objects to return (default 10, max 20).
-- `start?: number` — pagination offset into the interleaved related-object sequence (default 0). Page contiguously with `start = page × limit`: page N+1 continues where page N ended, within the first 100 related objects per signal. Near a seam a bounded number of objects (up to the active-signal count) can shift by one page, since a deeper page fetches more per signal and may reallocate an object that ranks very differently across signals. Beyond that cap, `truncated` stays true but deeper pages aren't reachable.
+- `start?: number` — pagination offset into the interleaved related-object sequence (default 0). Page contiguously with `start = page × limit`: page N+1 continues where page N ended. Each contributing signal is reachable to a depth of 5,000 objects, fetched from upstream in ≤1,000-row chunks. Near a seam a bounded number of objects (up to the active-signal count) can shift by one page, since a deeper page fetches more per signal and may reallocate an object that ranks very differently across signals. Beyond 5,000 matches for a signal, `truncated` stays true but deeper pages aren't reachable.
 
 **Output:**
 - `anchor` — summary of the anchor object (`{ record_id, title, unit_code }`)
 - `related[]` — `{ record_id, title, date, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
 - `search_signals_used[]` — which metadata fields drove the fan-out searches
-- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the related pool across contributing signals
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the *reachable* related pool — each signal's upstream match count is capped at its per-signal reach (5,000) before summing, so the ceiling never exceeds what `start` can retrieve
 
 **Errors:**
 - `not_found` (NotFound) — anchor object not found. Recovery: verify the ID via `smithsonian_search`.
@@ -233,17 +233,17 @@ Each step is independently testable.
 
 ## Workflow Analysis
 
-### `smithsonian_find_related` (4–5 upstream calls)
+### `smithsonian_find_related` (5+ upstream calls)
 
 | # | Call | Purpose | Condition |
 |:--|:-----|:--------|:----------|
 | 1 | `GET /content/edanmdm:{id}` | Fetch anchor object metadata | always |
-| 2 | `GET /search?q=culture:{culture}&rows={min(start+limit,100)}&start=0` | Fan-out search by culture | if `indexedStructured.culture` non-empty |
-| 3 | `GET /search?q={maker}&rows={min(start+limit,100)}&start=0` | Fan-out search by maker name | if maker names present |
-| 4 | `GET /search?q={topic}&rows={min(start+limit,100)}&start=0` | Fan-out search by topic term | if topics non-empty |
-| 5 | `GET /search?q={period}+{object_type}&rows={min(start+limit,100)}&start=0` | Fan-out search by period + type | always |
+| 2 | `GET /search?q=culture:{culture}&start=0…` | Fan-out by culture, chunked to depth `min(start+limit, 5000)` | if `indexedStructured.culture` non-empty |
+| 3 | `GET /search?q={maker}&start=0…` | Fan-out by maker name, same chunked depth | if maker names present |
+| 4 | `GET /search?q={topic}&start=0…` | Fan-out by topic term, same chunked depth | if topics non-empty |
+| 5 | `GET /search?q={period}+{object_type}&start=0…` | Fan-out by period + type, same chunked depth | always |
 
-Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully. Each fetches from the top (`start=0`) with `rows = min(start + limit, 100)` — enough to cover the requested page. Results are deduped against the anchor ID and interleaved round-robin so each fan-out signal contributes, accumulating every signal that surfaced an object. The `start` offset is then applied to the merged interleave (not the upstream query), so pages are contiguous — page N+1 continues where page N ended. (Because a deeper page fetches more rows per signal, an object that ranks very differently across signals can be reallocated to a different bucket, shifting a bounded number of objects — up to the active-signal count — by one page near a seam.) When the interleave extends past the page or a signal reports more matches than were fetched, the response discloses `truncated` with a `truncationCeiling`; advancing `start` retrieves the next window (up to the 100-per-signal cap).
+Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully. Each signal is fetched from the top (`start=0`) to a depth of `min(start + limit, 5000)`, split into chunks of at most 1,000 rows (the hard upstream `rows` ceiling — a single call requesting more silently collapses to a 10-row page). The first chunk is a single call that also reveals the signal's real match count; deeper chunks (`start=1000, 2000, …`) fire in parallel and only when both the requested depth and the real total exceed one chunk, so a shallow page costs exactly one call per signal. Results are deduped against the anchor ID and interleaved round-robin so each fan-out signal contributes, accumulating every signal that surfaced an object. The `start` offset is then applied to the merged interleave (not the upstream query), so pages are contiguous — page N+1 continues where page N ended. (Because a deeper page fetches more rows per signal, an object that ranks very differently across signals can be reallocated to a different bucket, shifting a bounded number of objects — up to the active-signal count — by one page near a seam.) When the interleave extends past the page or a signal reports more matches than were fetched, the response discloses `truncated` with a `truncationCeiling` (each signal's count capped at the 5,000 reach before summing); advancing `start` retrieves the next window, up to the per-signal cap.
 
 ---
 
@@ -287,7 +287,7 @@ In practice they agree, but the design checks both. `smithsonian_get_media` surf
 
 - **No category browse endpoint**: The open API doesn't expose `/terms` or `/category/search`. `smithsonian_explore` works around this via constrained search but can't return true hierarchical category trees.
 - **Filter values require prior knowledge**: Filters like `unit_code`, `object_type`, `culture` accept arbitrary strings but there's no discovery endpoint to list valid values. The design notes this in parameter descriptions and points agents to search first to discover real values.
-- **Rate limits**: The free api.data.gov tier has ~1,000 req/hr. The `smithsonian_find_related` workflow makes 5 calls; a session of 50 related searches could hit the hourly limit. The service layer must implement backoff on 429.
+- **Rate limits**: The free api.data.gov tier has ~1,000 req/hr. The `smithsonian_find_related` workflow makes ~5 calls for a shallow page — more when paging a broad signal deep (each 1,000-row chunk is one call, capped per signal); a session of 50 related searches could hit the hourly limit. The service layer must implement backoff on 429.
 - **Objects without media**: A significant portion of catalog objects have no digitized media — `smithsonian_get_media` returns `no_media` for these.
 - **EDAN content type variety**: Not all records are `type: edanmdm`. The catalog also has `type: ead_component`, `edanmdm`, library records, etc. The design targets `edanmdm` type records (the museum objects), but some search results may be library records with different field structures. The service normalizer should handle sparse/absent fields gracefully.
 
