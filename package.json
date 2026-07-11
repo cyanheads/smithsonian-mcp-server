@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/smithsonian-mcp-server",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Search, explore, and retrieve CC0 media from 19.4 million Smithsonian Open Access objects across 20+ museums via MCP. STDIO or Streamable HTTP.",
   "type": "module",
   "main": "dist/index.js",
@@ -83,9 +83,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.2",
+    "@biomejs/biome": "^2.5.3",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.1.1",
     "depcheck": "^1.4.7",
     "ignore": "^7.0.5",
     "tsc-alias": "^1.9.0",

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-07-11
+
+Raise smithsonian_find_related's per-signal reach to 5,000 via chunked upstream fetches so deep pages past the old 100-row wall are reachable and truncationCeiling stays honest; align the Codex plugin description with the tool contract
+
 ## [0.1.14](changelog/0.1.x/0.1.14.md) — 2026-07-10
 
 Add a contains substring filter to smithsonian_list_terms, route smithsonian_search's filtered-zero recovery through it, and align get_object/find_related descriptions with their actual output contract
