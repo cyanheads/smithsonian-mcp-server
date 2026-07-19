@@ -10,7 +10,7 @@ import { getSmithsonianService } from '@/services/smithsonian/smithsonian-servic
 export const smithsonianListTerms = tool('smithsonian_list_terms', {
   title: 'List Valid Filter Terms',
   description:
-    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field (unit_code, culture, place, date, online_media_type). Smithsonian uses a controlled vocabulary where terms are often plural or qualified (e.g. "Paintings", not "Painting"), so filter values guessed rather than drawn from this vocabulary tend to return empty results. Returns a page of the field\'s distinct term values; large vocabularies (place has 100k+ terms) page via start and rows.',
+    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field (unit_code, culture, place, date, online_media_type). Terms are a controlled vocabulary — often plural or qualified (e.g. "Paintings", not "Painting") — so guessed filter values tend to return nothing. Returns a page of the field\'s distinct term values; large vocabularies (place has 100k+ terms) page via start and rows.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({

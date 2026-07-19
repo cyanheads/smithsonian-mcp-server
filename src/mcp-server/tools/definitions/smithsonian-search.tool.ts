@@ -74,7 +74,7 @@ const ObjectSummarySchema = z
     unit_code: z
       .string()
       .describe(
-        'Museum unit code (e.g. "NASM", "NMNH", "SAAM"). Use as a filter in future searches.',
+        'Museum unit code (e.g. "NASM", "SAAM", "NMNHBIRDS"). Use as a filter in future searches.',
       ),
     museum_name: z.string().describe('Full museum name for the unit code.'),
     object_type: z
@@ -118,7 +118,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .string()
           .optional()
           .describe(
-            'Museum unit code (e.g. "NASM", "NMNH", "SAAM", "NMAH", "NMAAHC", "NMAI", "NPG", "CHNDM", "SIL"). The full set is enumerable via smithsonian_list_terms (field "unit_code").',
+            'Museum unit code (e.g. "NASM", "SAAM", "NMAH", "NMAAHC", "NMAI", "NPG", "CHNDM", "SIL"); the National Museum of Natural History is indexed under discipline sub-units like "NMNHBIRDS" and "NMNHPALEO", not a bare "NMNH". The full set is enumerable via smithsonian_list_terms (field "unit_code").',
           ),
         object_type: z
           .string()
@@ -128,6 +128,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
           ),
         date_decade: z
           .string()
+          .regex(/^\d{4}s$/, 'Decade must be in "NNNNs" format, e.g. "1920s".')
           .optional()
           .describe(
             'Decade filter (e.g. "1920s", "1960s"). Must match the "NNNNs" format exactly. Indexed decades are enumerable via smithsonian_list_terms (field "date").',

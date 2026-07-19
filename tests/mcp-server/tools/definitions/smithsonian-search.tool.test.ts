@@ -358,6 +358,19 @@ describe('smithsonianSearch', () => {
     expect(() => smithsonianSearch.input.parse({ query: 'test', rows: 101 })).toThrow();
   });
 
+  it('rejects a date_decade outside the "NNNNs" format at the schema boundary', () => {
+    // The decade format is advertised as a JSON Schema pattern, so a bare year or a
+    // decade word is refused before it reaches upstream as a zero-result query.
+    for (const date_decade of ['1920', '20s', '1920S', 'nineteen-twenties']) {
+      expect(() =>
+        smithsonianSearch.input.parse({ query: 'test', filters: { date_decade } }),
+      ).toThrow();
+    }
+    expect(() =>
+      smithsonianSearch.input.parse({ query: 'test', filters: { date_decade: '1920s' } }),
+    ).not.toThrow();
+  });
+
   it('format renders record_id, title, museum, and CC0 status', () => {
     const output = {
       objects: [makeObjectSummary()],

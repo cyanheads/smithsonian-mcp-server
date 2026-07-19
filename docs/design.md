@@ -93,12 +93,12 @@ Each step is independently testable.
 
 ### `smithsonian_search`
 
-**Description:** Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, media type, and online-only availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
+**Description:** Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
 
 **Input:**
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`).
 - `filters?: object` — Optional structured filters:
-  - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"NMNH"`, `"SAAM"`). See unit code table in API Reference.
+  - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. See unit code table in API Reference.
   - `object_type?: string` — object type term from `indexedStructured.object_type` (e.g. `"Paintings"`, `"Photographs"`, `"Aircraft"`).
   - `date_decade?: string` — decade string from `indexedStructured.date` (e.g. `"1920s"`, `"1960s"`).
   - `culture?: string` — culture term from `indexedStructured.culture` (e.g. `"Plains Indian"`).
@@ -155,12 +155,12 @@ Each step is independently testable.
 
 ### `smithsonian_explore`
 
-**Description:** Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Constructs and executes a category-constrained search, then returns an overview: a curated set of sample objects and counts. Four browse modes: `museum` (by unit code or museum name), `culture` (by culture term), `period` (by decade, e.g. "1920s"), `medium` (by object type). Use as the entry point for open-ended research rather than a specific query.
+**Description:** Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Returns an overview: total count, the first page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes: `museum` (by unit code or museum name), `culture` (by culture term), `period` (by decade, e.g. "1920s"), `medium` (by object type). Use as the entry point for open-ended research rather than a specific query.
 
 **Input:**
 - `mode: "museum" | "culture" | "period" | "medium"` — browse dimension.
 - `value: string` — category value appropriate to the mode:
-  - `museum`: unit code (`"NMNH"`) or full museum name (`"National Museum of Natural History"`)
+  - `museum`: unit code (`"NASM"`) or full museum name (`"National Museum of Natural History"`)
   - `culture`: culture term (`"Aztec"`, `"Sioux"`, `"Japanese"`)
   - `period`: decade string (`"1940s"`, `"1860s"`)
   - `medium`: object type, usually plural (`"Paintings"`, `"Aircraft"`)

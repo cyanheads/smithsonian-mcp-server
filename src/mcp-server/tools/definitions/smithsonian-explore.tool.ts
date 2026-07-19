@@ -17,24 +17,24 @@ const SampleObjectSchema = z
     thumbnail_url: z.string().optional().describe('Thumbnail image URL if available.'),
     is_cc0: z.boolean().describe('True when the object is CC0 open access.'),
   })
-  .describe('A representative sample object from the category.');
+  .describe('A sample object from the first page of category matches.');
 
 export const smithsonianExplore = tool('smithsonian_explore', {
   title: 'Explore Smithsonian by Category',
   description:
-    'Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Constructs and executes a category-constrained search, then returns an overview: total count, a curated set of sample objects, and a breakdown of which museums hold matching objects. Four browse modes: museum (by unit code or name), culture (by culture term), period (by decade), medium (by object type). Use as the entry point for open-ended research.',
+    'Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Returns an overview: total count, the first page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes — museum, culture, period, medium. Use as the entry point for open-ended research.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
     mode: z
       .enum(['museum', 'culture', 'period', 'medium'])
       .describe(
-        'Browse dimension: "museum" (by unit code/name), "culture" (by culture term), "period" (by decade like "1940s"), "medium" (by object type like "Paintings").',
+        'Browse dimension: "museum" (by unit code), "culture" (by culture term), "period" (by decade like "1940s"), "medium" (by object type like "Paintings").',
       ),
     value: z
       .string()
       .describe(
-        'Category value appropriate to the mode. museum: unit code ("NMNH") or full name ("National Museum of Natural History"). culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: decade ("1940s", "1860s"). medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for culture, place, or unit_code, call smithsonian_list_terms to find exact terms.',
+        'Category value appropriate to the mode. museum: a short unit code like "NASM" or "SAAM". culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: decade ("1940s", "1860s"). medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for culture, place, or unit_code, call smithsonian_list_terms to find exact terms.',
       ),
     rows: z
       .number()
@@ -55,14 +55,14 @@ export const smithsonianExplore = tool('smithsonian_explore', {
     total_count: z.number().describe('Total number of Smithsonian objects matching this category.'),
     sample_objects: z
       .array(SampleObjectSchema)
-      .describe('Representative objects from the category.'),
+      .describe('The first page of objects matching the category, in upstream order.'),
     museum_breakdown: z
       .array(
         z
           .object({
             unit_code: z
               .string()
-              .describe('Smithsonian unit code for this museum (e.g. "NMNH", "SAAM").'),
+              .describe('Smithsonian unit code for this museum (e.g. "NMNHPALEO", "SAAM").'),
             museum_name: z.string().describe('Full name of the museum.'),
             count: z.number().describe('Estimated object count from sample (not exact).'),
           })
@@ -106,7 +106,7 @@ export const smithsonianExplore = tool('smithsonian_explore', {
 
     switch (input.mode) {
       case 'museum':
-        // Short alphanumeric codes are unit_code values (e.g. "NASM", "NMNH").
+        // Short alphanumeric codes are unit_code values (e.g. "NASM", "SAAM").
         // Long values are museum names — use as free-text query only.
         if (input.value.length <= 8 && /^[A-Za-z]+$/.test(input.value)) {
           filters.push(`unit_code:${input.value.toUpperCase()}`);

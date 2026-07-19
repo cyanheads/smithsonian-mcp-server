@@ -51,7 +51,7 @@ const RelatedObjectSchema = z
 export const smithsonianFindRelated = tool('smithsonian_find_related', {
   title: 'Find Related Smithsonian Objects',
   description:
-    'Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, maker names, and topic terms. Each related object is tagged with the signals that connected it to the anchor. Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH.',
+    'Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, maker names, and topic terms. Each related object is tagged with the signals that connected it to the anchor. Matches surface across museums — an NASM aerospace anchor can pull related objects from NMNHPALEO, SAAM, and NMAH.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -73,7 +73,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .min(0)
       .default(0)
       .describe(
-        `Pagination offset into the interleaved related-object sequence — 0-indexed. Page contiguously with start = page × limit: page N+1 continues where page N ended. Each contributing signal is reachable to a depth of ${MAX_FETCH_PER_SIGNAL} objects (fetched in chunks upstream), so deep pages of a broad signal are retrievable. Near a page seam a small, bounded number of objects (up to the active-signal count) can shift by one page when a deeper page surfaces an object that ranks very differently across signals. Beyond ${MAX_FETCH_PER_SIGNAL} matches for a signal, truncated stays true but deeper pages aren't reachable.`,
+        `Pagination offset — 0-indexed. Page contiguously with start = page × limit; each signal is reachable to a depth of ${MAX_FETCH_PER_SIGNAL} objects, beyond which truncated stays true but deeper pages aren't retrievable.`,
       ),
   }),
 
@@ -108,7 +108,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .number()
       .optional()
       .describe(
-        'Upper bound on the reachable related objects across the contributing signals — each signal’s upstream match count is capped at its per-signal reach before summing, so the ceiling never exceeds what paging with start can actually retrieve. Cross-signal overlaps are not subtracted.',
+        'Upper bound on the related objects reachable by paging with start. Cross-signal overlaps are not subtracted, so it can overcount.',
       ),
   },
 

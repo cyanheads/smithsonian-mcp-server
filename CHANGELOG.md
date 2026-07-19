@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-07-19
+
+Correct smithsonian_explore's curated/representative language to match its first-page behavior, tighten tool-definition prose across the surface, fix NMNH unit-code examples, and enforce the date_decade format at the schema boundary
+
 ## [0.1.15](changelog/0.1.x/0.1.15.md) — 2026-07-11
 
 Raise smithsonian_find_related's per-signal reach to 5,000 via chunked upstream fetches so deep pages past the old 100-row wall are reachable and truncationCeiling stays honest; align the Codex plugin description with the tool contract

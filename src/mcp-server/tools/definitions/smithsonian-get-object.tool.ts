@@ -10,7 +10,7 @@ import { getSmithsonianService } from '@/services/smithsonian/smithsonian-servic
 export const smithsonianGetObject = tool('smithsonian_get_object', {
   title: 'Get Smithsonian Object',
   description:
-    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search results). Returns the exposed catalog fields — title, dates, description, makers, materials, dimensions, place and culture associations, topics, exhibition history, credit line, accession identifiers, rights statement, and a media summary. The media summary is a count; full image URLs come from smithsonian_get_media.',
+    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search results). Returns the exposed catalog fields — title, dates, description, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. The media summary is a count; full image URLs come from smithsonian_get_media.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
