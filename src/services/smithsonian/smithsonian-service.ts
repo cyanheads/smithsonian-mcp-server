@@ -3,6 +3,7 @@
  * @module services/smithsonian/smithsonian-service
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
   JsonRpcErrorCode,
@@ -31,25 +32,75 @@ import type {
 // Unit code → museum name map
 // ---------------------------------------------------------------------------
 
+/**
+ * Unit code → museum name, covering 44 of the 48 codes EDAN indexes under
+ * `unit_code`. Names come from the Smithsonian's own published data dictionary
+ * (github.com/Smithsonian/OpenAccess) and each record's self-reported
+ * `descriptiveNonRepeating.data_source`, cross-checked against the owning unit's
+ * si.edu site where neither covers the code.
+ *
+ * Four indexed codes — `FSA`, `NASMAC`, `NMAIA`, `SAAMPAIK` — are deliberately
+ * absent: no primary source ties those literal strings to a named unit, and their
+ * shape only suggests an archive under NASM/NMAI/SAAM. Expanding them from that
+ * pattern would ship a guess as a sourced fact on a public field, so they take the
+ * raw-code fallback below instead.
+ *
+ * Keys are matched exactly, including case (`NMAfA` carries a lowercase f upstream)
+ * and separators (`OFEO-SG`, `SLA_SRO`, `OCIO_DPO3D`). Two codes that earlier
+ * versions mapped are gone: bare `NMNH`, superseded by the eleven `NMNH*` discipline
+ * sub-units, and `FSG`, retired when the Freer/Sackler became the National Museum of
+ * Asian Art (`NMAA`) in 2019. Neither can match a live record, and `FSG` would have
+ * echoed a name the institution no longer uses.
+ */
 const MUSEUM_NAMES: Record<string, string> = {
+  AAA: 'Archives of American Art',
+  AAG: 'Archives of American Gardens',
+  ACAH: 'Archives Center, National Museum of American History',
+  ACM: 'Anacostia Community Museum',
+  ACMA: 'Anacostia Community Museum Archives',
+  CFCHFOLKLIFE: 'Ralph Rinzler Folklife Archives and Collections',
+  CHNDM: 'Cooper Hewitt, Smithsonian Design Museum',
+  CHSDM: 'Cooper Hewitt, Smithsonian Design Museum',
+  EEPA: 'Eliot Elisofon Photographic Archives',
+  FBR: 'Smithsonian Field Book Project',
+  HAC: 'Smithsonian Gardens',
+  HMSG: 'Hirshhorn Museum and Sculpture Garden',
+  HSFA: 'Human Studies Film Archives',
+  NAA: 'National Anthropological Archives',
   NASM: 'National Air and Space Museum',
-  NMNH: 'National Museum of Natural History',
-  SAAM: 'Smithsonian American Art Museum',
-  NMAH: 'National Museum of American History',
+  NMAA: 'National Museum of Asian Art',
   NMAAHC: 'National Museum of African American History and Culture',
+  NMAH: 'National Museum of American History',
   NMAI: 'National Museum of the American Indian',
   NMAfA: 'National Museum of African Art',
+  NMNHANTHRO: 'NMNH - Anthropology Dept.',
+  NMNHBIRDS: 'NMNH - Vertebrate Zoology - Birds Division',
+  NMNHBOTANY: 'NMNH - Botany Dept.',
+  NMNHEDUCATION: 'NMNH - Education & Outreach',
+  NMNHENTO: 'NMNH - Entomology Dept.',
+  NMNHFISHES: 'NMNH - Vertebrate Zoology - Fishes Division',
+  NMNHHERPS: 'NMNH - Vertebrate Zoology - Herpetology Division',
+  NMNHINV: 'NMNH - Invertebrate Zoology Dept.',
+  NMNHMAMMALS: 'NMNH - Vertebrate Zoology - Mammals Division',
+  NMNHMINSCI: 'NMNH - Mineral Sciences Dept.',
+  NMNHPALEO: 'NMNH - Paleobiology Dept.',
   NPG: 'National Portrait Gallery',
-  CHNDM: 'Cooper Hewitt, Smithsonian Design Museum',
-  HMSG: 'Hirshhorn Museum and Sculpture Garden',
-  FSG: 'Freer Gallery of Art and Arthur M. Sackler Gallery',
   NPM: 'National Postal Museum',
-  ACM: 'Anacostia Community Museum',
-  NZP: 'National Zoo & Conservation Biology Institute',
-  SIL: 'Smithsonian Libraries and Archives',
-  AAA: 'Archives of American Art',
+  NPMA: 'National Postal Museum Archives',
+  NZP: "Smithsonian's National Zoo & Conservation Biology Institute",
+  OCIO_DPO3D:
+    'Office of the Chief Information Officer - Digitization Program Office (3D digitization)',
+  'OFEO-SG': 'Smithsonian Gardens',
+  SAAM: 'Smithsonian American Art Museum',
+  SI: 'Smithsonian Institution',
+  SIA: 'Smithsonian Institution Archives',
+  SIL: 'Smithsonian Libraries',
+  SILAF: 'Smithsonian Libraries',
+  SILNMAHTL: 'Smithsonian Libraries',
+  SLA_SRO: 'Smithsonian Libraries and Archives',
 };
 
+/** Resolve a unit code to its museum name, echoing the raw code when unmapped. */
 function museumName(unitCode: string | undefined): string {
   return (unitCode && MUSEUM_NAMES[unitCode]) ?? unitCode ?? 'Smithsonian Institution';
 }
@@ -405,8 +456,16 @@ export class SmithsonianService {
   /**
    * Fetch a single object by record_id.
    * The content endpoint returns the object directly at `response` (not `response.rows[0]`).
+   *
+   * Takes the full `Context` rather than the `RequestContextLike` projection the other
+   * methods use, because both not-found throw sites resolve the calling tool's declared
+   * `not_found` recovery hint via `ctx.recoveryFor` — a member only `Context` carries.
+   * `Context` is still assignable to `RequestContextLike`, so the internal `this.get`
+   * call is unaffected. Every caller (`smithsonian_get_object`, `smithsonian_get_media`,
+   * `smithsonian_find_related`) declares a `not_found` entry, so the resolver returns
+   * that tool's own hint; a caller without one gets `{}` and the pre-existing shape.
    */
-  async getContent(recordId: string, ctx: RequestContextLike): Promise<RawEDAN> {
+  async getContent(recordId: string, ctx: Context): Promise<RawEDAN> {
     const cfg = getServerConfig();
     const prefixed = recordId.startsWith('edanmdm:') ? recordId : `edanmdm:${recordId}`;
     const url = `${cfg.baseUrl}/content/${encodeURIComponent(prefixed)}`;
@@ -420,6 +479,7 @@ export class SmithsonianService {
         throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
           recordId,
           reason: 'not_found',
+          ...ctx.recoveryFor('not_found'),
         });
       }
       throw err;
@@ -429,6 +489,7 @@ export class SmithsonianService {
       throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
         recordId,
         reason: 'not_found',
+        ...ctx.recoveryFor('not_found'),
       });
     }
     return raw.response;

@@ -76,7 +76,11 @@ const ObjectSummarySchema = z
       .describe(
         'Museum unit code (e.g. "NASM", "SAAM", "NMNHBIRDS"). Use as a filter in future searches.',
       ),
-    museum_name: z.string().describe('Full museum name for the unit code.'),
+    museum_name: z
+      .string()
+      .describe(
+        'Full museum name for the unit code. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
+      ),
     object_type: z
       .string()
       .optional()
@@ -96,7 +100,11 @@ const ObjectSummarySchema = z
       .describe(
         'True when the object metadata is CC0 (open access). Use smithsonian_get_media for CC0 image downloads.',
       ),
-    has_media: z.boolean().describe('True when the object has any digitized online media.'),
+    has_media: z
+      .boolean()
+      .describe(
+        'True when the object carries deliverable online media items. This is the signal smithsonian_get_media reads, so it — not the online_only filter — predicts whether that call returns anything.',
+      ),
   })
   .describe('Curated summary of a single Smithsonian catalog object.');
 
@@ -148,7 +156,9 @@ export const smithsonianSearch = tool('smithsonian_search', {
         online_only: z
           .boolean()
           .optional()
-          .describe('When true, restrict to objects that have any online media.'),
+          .describe(
+            'When true, restrict to records carrying an indexed online_media_type value. That vocabulary covers digitized surrogates — finding aids, catalog cards, scanned books, full text, electronic resources — alongside images, 3D models, and video, and the surrogate types often have no deliverable media attached, so a match can still report has_media: false. Read has_media on each result to decide whether smithsonian_get_media will return anything.',
+          ),
         cc0_only: z
           .boolean()
           .optional()

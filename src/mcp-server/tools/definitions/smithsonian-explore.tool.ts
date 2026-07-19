@@ -34,7 +34,7 @@ export const smithsonianExplore = tool('smithsonian_explore', {
     value: z
       .string()
       .describe(
-        'Category value appropriate to the mode. museum: a short unit code like "NASM" or "SAAM". culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: decade ("1940s", "1860s"). medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for culture, place, or unit_code, call smithsonian_list_terms to find exact terms.',
+        'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: decade ("1940s", "1860s"). medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for culture, place, or unit_code, call smithsonian_list_terms to find exact terms.',
       ),
     rows: z
       .number()
@@ -63,7 +63,11 @@ export const smithsonianExplore = tool('smithsonian_explore', {
             unit_code: z
               .string()
               .describe('Smithsonian unit code for this museum (e.g. "NMNHPALEO", "SAAM").'),
-            museum_name: z.string().describe('Full name of the museum.'),
+            museum_name: z
+              .string()
+              .describe(
+                'Full name of the museum. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
+              ),
             count: z.number().describe('Estimated object count from sample (not exact).'),
           })
           .describe('A single museum contribution entry.'),
@@ -106,14 +110,16 @@ export const smithsonianExplore = tool('smithsonian_explore', {
 
     switch (input.mode) {
       case 'museum':
-        // Short alphanumeric codes are unit_code values (e.g. "NASM", "SAAM").
-        // Long values are museum names — use as free-text query only.
-        if (input.value.length <= 8 && /^[A-Za-z]+$/.test(input.value)) {
-          filters.push(`unit_code:${input.value.toUpperCase()}`);
-          query = '';
-        } else {
-          query = input.value;
-        }
+        // A literal unit_code term, exactly like the sibling modes below — no shape gate
+        // and no case folding. Codes run from "SI" to "CFCHFOLKLIFE" and carry separators
+        // ("OCIO_DPO3D", "OFEO-SG"), so length and character class can't tell a code from
+        // a name, and EDAN matches the term case-sensitively ("NMAfA" is real, "NMAFA"
+        // matches nothing). An unusable value now reaches the no_results error and its
+        // smithsonian_list_terms recovery instead of becoming a free-text search whose hit
+        // count was reported as a museum total. luceneField's quoting is load-bearing: an
+        // unquoted museum name leaks its trailing words back out as free text.
+        filters.push(luceneField('unit_code', input.value));
+        query = '';
         break;
       case 'culture':
         filters.push(luceneField('culture', input.value));

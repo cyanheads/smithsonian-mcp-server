@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-get-media.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -155,15 +156,19 @@ describe('smithsonianGetMedia', () => {
     expect(result.images[0]?.is_cc0).toBe(true);
   });
 
-  it('propagates not_found with reason from the service (issue #10)', async () => {
-    // Service throws the real notFound() factory with { recordId, reason }; the tool
-    // must propagate data.reason to the wire (the service test proves reason is real).
+  it('propagates not_found with reason and recovery from the service (issues #10, #25)', async () => {
+    // The stand-in mirrors the real service throw site, resolving the recovery from the
+    // ctx the tool handed it — so this asserts the tool passes a contract-bound ctx down
+    // and propagates the resulting data to the wire.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockRejectedValue(
-        notFound('No Smithsonian object found for ID "nasm_GONE".', {
-          recordId: 'nasm_GONE',
-          reason: 'not_found',
-        }),
+      getContent: vi.fn((_id: string, svcCtx: Context) =>
+        Promise.reject(
+          notFound('No Smithsonian object found for ID "nasm_GONE".', {
+            recordId: 'nasm_GONE',
+            reason: 'not_found',
+            ...svcCtx.recoveryFor('not_found'),
+          }),
+        ),
       ),
       isCC0: vi.fn(),
       toImageItems: vi.fn(),
@@ -171,9 +176,12 @@ describe('smithsonianGetMedia', () => {
 
     const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
     const input = smithsonianGetMedia.input.parse({ id: 'nasm_GONE' });
+    const expectedHint = smithsonianGetMedia.errors?.find(
+      (e) => e.reason === 'not_found',
+    )?.recovery;
     await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found' },
+      data: { reason: 'not_found', recovery: { hint: expectedHint } },
     });
   });
 

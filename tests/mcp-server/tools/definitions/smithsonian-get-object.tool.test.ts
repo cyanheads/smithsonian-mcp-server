@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-get-object.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -73,25 +74,32 @@ describe('smithsonianGetObject', () => {
     });
   });
 
-  it('propagates not_found with reason from the service (issue #10)', async () => {
-    // The service throws the real notFound() factory carrying { recordId, reason }.
-    // The tool must propagate that data untouched so structuredContent.error.data.reason
-    // reaches the wire; the service test verifies the factory populates reason for real.
+  it('propagates not_found with reason and recovery from the service (issues #10, #25)', async () => {
+    // The stand-in mirrors the real service throw site: it resolves the recovery from
+    // the ctx the tool handed it. That proves the tool passes a contract-bound ctx down
+    // and propagates the resulting data untouched onto both wire surfaces — the service
+    // test verifies the real factory populates reason and hint for real.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockRejectedValue(
-        notFound('No Smithsonian object found for ID "nasm_MISSING".', {
-          recordId: 'nasm_MISSING',
-          reason: 'not_found',
-        }),
+      getContent: vi.fn((_id: string, svcCtx: Context) =>
+        Promise.reject(
+          notFound('No Smithsonian object found for ID "nasm_MISSING".', {
+            recordId: 'nasm_MISSING',
+            reason: 'not_found',
+            ...svcCtx.recoveryFor('not_found'),
+          }),
+        ),
       ),
       toFullObject: vi.fn(),
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianGetObject.errors });
     const input = smithsonianGetObject.input.parse({ id: 'nasm_MISSING' });
+    const expectedHint = smithsonianGetObject.errors?.find(
+      (e) => e.reason === 'not_found',
+    )?.recovery;
     await expect(smithsonianGetObject.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found' },
+      data: { reason: 'not_found', recovery: { hint: expectedHint } },
     });
   });
 
@@ -132,8 +140,8 @@ describe('smithsonianGetObject', () => {
     const sparse: FullObject = {
       record_id: 'nmnh_SPARSE',
       title: 'Sparse Object',
-      unit_code: 'NMNH',
-      museum_name: 'National Museum of Natural History',
+      unit_code: 'NMNHPALEO',
+      museum_name: 'NMNH - Paleobiology Dept.',
       dates: [],
       makers: [],
       materials: [],

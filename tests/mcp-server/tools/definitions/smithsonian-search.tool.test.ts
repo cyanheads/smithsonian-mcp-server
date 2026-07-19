@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-search.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianSearch } from '@/mcp-server/tools/definitions/smithsonian-search.tool.js';
@@ -316,6 +317,50 @@ describe('smithsonianSearch', () => {
     expect(calledParams.filters).toContain('object_type:Aircraft');
     expect(calledParams.filters).toContain('media_usage:CC0');
     expect(calledParams.filters).toContain('online_media_type:*');
+  });
+
+  it('online_only matches the index field, so a result may report has_media false (issue #28)', async () => {
+    // online_media_type (what the filter matches) and descriptiveNonRepeating.online_media
+    // (what has_media reports) are two distinct upstream signals: a scanned book carries
+    // an online_media_type with no deliverable media. The two are allowed to disagree —
+    // has_media stays the accurate predictor of a smithsonian_get_media outcome, and
+    // re-deriving it from the filter's signal would make it lie about that call.
+    const surrogate: ObjectSummary = {
+      ...makeObjectSummary('siris_sil_813668'),
+      unit_code: 'SIL',
+      museum_name: 'Smithsonian Libraries',
+      has_media: false,
+    };
+    const searchFn = vi.fn().mockResolvedValue({ rows: [surrogate], rowCount: 1 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({
+      query: 'dinosaur',
+      filters: { online_only: true },
+    });
+    const result = await smithsonianSearch.handler(input, ctx);
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    expect(calledParams.filters).toEqual(['online_media_type:*']);
+    expect(result.objects[0]?.record_id).toBe('siris_sil_813668');
+    expect(result.objects[0]?.has_media).toBe(false);
+  });
+
+  it('online_only names the index field it matches rather than promising media (issue #28)', () => {
+    // The advertised description is the whole fix here — no code path changed. Assert
+    // the substantive claim, not the exact prose: it must name online_media_type and
+    // must not restate the old "objects that have any online media" promise.
+    const jsonSchema = z.toJSONSchema(smithsonianSearch.input) as {
+      properties: {
+        filters: { properties: { online_only: { description?: string } } };
+      };
+    };
+    const description = jsonSchema.properties.filters.properties.online_only.description ?? '';
+    expect(description).toContain('online_media_type');
+    expect(description).not.toMatch(/objects that have any online media/i);
   });
 
   it('quotes multi-word filter values in Lucene terms', async () => {

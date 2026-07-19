@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-find-related.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -101,15 +102,18 @@ describe('smithsonianFindRelated', () => {
     });
   });
 
-  it('propagates not_found with reason from the service (issue #10)', async () => {
-    // find_related fetches the anchor via getContent; an unknown anchor surfaces the
-    // service's real notFound() factory. The tool must propagate data.reason.
+  it('propagates not_found with reason and recovery from the service (issues #10, #25)', async () => {
+    // find_related fetches the anchor via getContent; the stand-in mirrors the real
+    // service throw site, resolving the recovery from the ctx the tool handed it.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockRejectedValue(
-        notFound('No Smithsonian object found for ID "nasm_GONE".', {
-          recordId: 'nasm_GONE',
-          reason: 'not_found',
-        }),
+      getContent: vi.fn((_id: string, svcCtx: Context) =>
+        Promise.reject(
+          notFound('No Smithsonian object found for ID "nasm_GONE".', {
+            recordId: 'nasm_GONE',
+            reason: 'not_found',
+            ...svcCtx.recoveryFor('not_found'),
+          }),
+        ),
       ),
       toSummary: vi.fn(),
       search: vi.fn(),
@@ -117,9 +121,12 @@ describe('smithsonianFindRelated', () => {
 
     const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
     const input = smithsonianFindRelated.input.parse({ id: 'nasm_GONE' });
+    const expectedHint = smithsonianFindRelated.errors?.find(
+      (e) => e.reason === 'not_found',
+    )?.recovery;
     await expect(smithsonianFindRelated.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found' },
+      data: { reason: 'not_found', recovery: { hint: expectedHint } },
     });
   });
 

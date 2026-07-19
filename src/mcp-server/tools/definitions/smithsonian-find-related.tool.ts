@@ -33,7 +33,11 @@ const RelatedObjectSchema = z
       .describe('Object identifier — pass to smithsonian_get_object or smithsonian_get_media.'),
     title: z.string().describe('Object title.'),
     unit_code: z.string().describe('Museum unit code.'),
-    museum_name: z.string().describe('Full museum name.'),
+    museum_name: z
+      .string()
+      .describe(
+        'Full museum name. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
+      ),
     thumbnail_url: z.string().optional().describe('Thumbnail URL if available.'),
     is_cc0: z.boolean().describe('True when the object is CC0 open access.'),
     similarity_signals: z

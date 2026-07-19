@@ -23,7 +23,11 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     record_id: z.string().describe('Unique object identifier.'),
     title: z.string().describe('Object title.'),
     unit_code: z.string().describe('Museum unit code.'),
-    museum_name: z.string().describe('Full museum name.'),
+    museum_name: z
+      .string()
+      .describe(
+        'Full museum name. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
+      ),
     dates: z
       .array(
         z

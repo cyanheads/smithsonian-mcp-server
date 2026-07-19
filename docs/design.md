@@ -98,12 +98,12 @@ Each step is independently testable.
 **Input:**
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`).
 - `filters?: object` — Optional structured filters:
-  - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. See unit code table in API Reference.
+  - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. Matched exactly and case-sensitively (`"NMAfA"` carries a lowercase f); `smithsonian_list_terms` with `field: "unit_code"` enumerates the live vocabulary.
   - `object_type?: string` — object type term from `indexedStructured.object_type` (e.g. `"Paintings"`, `"Photographs"`, `"Aircraft"`).
   - `date_decade?: string` — decade string from `indexedStructured.date` (e.g. `"1920s"`, `"1960s"`).
   - `culture?: string` — culture term from `indexedStructured.culture` (e.g. `"Plains Indian"`).
   - `place?: string` — geographic place from `indexedStructured.place` (e.g. `"United States of America"`).
-  - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to objects with any online media.
+  - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to records carrying an indexed `online_media_type` value. That vocabulary covers digitized surrogates (finding aids, catalog cards, scanned books, full text, electronic resources) alongside images, 3D models, and video; the surrogate types often have no deliverable media attached, so a match can still report `has_media: false`. `has_media` reads `descriptiveNonRepeating.online_media` — a separate upstream signal — and is what predicts a `smithsonian_get_media` outcome.
   - `cc0_only?: boolean` — when true, ANDs the Lucene term `media_usage:CC0` into `q` to restrict to CC0 objects. Useful before calling `smithsonian_get_media`.
 - `rows?: number` — page size (default 20, max 100).
 - `start?: number` — offset for pagination (default 0).
@@ -155,12 +155,12 @@ Each step is independently testable.
 
 ### `smithsonian_explore`
 
-**Description:** Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Returns an overview: total count, the first page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes: `museum` (by unit code or museum name), `culture` (by culture term), `period` (by decade, e.g. "1920s"), `medium` (by object type). Use as the entry point for open-ended research rather than a specific query.
+**Description:** Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Returns an overview: total count, the first page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes: `museum` (by unit code), `culture` (by culture term), `period` (by decade, e.g. "1920s"), `medium` (by object type). Use as the entry point for open-ended research rather than a specific query.
 
 **Input:**
 - `mode: "museum" | "culture" | "period" | "medium"` — browse dimension.
 - `value: string` — category value appropriate to the mode:
-  - `museum`: unit code (`"NASM"`) or full museum name (`"National Museum of Natural History"`)
+  - `museum`: unit code (`"NASM"`, `"NMNHBIRDS"`), applied verbatim as a `unit_code` filter — matched exactly and case-sensitively, never as a museum name
   - `culture`: culture term (`"Aztec"`, `"Sioux"`, `"Japanese"`)
   - `period`: decade string (`"1940s"`, `"1860s"`)
   - `medium`: object type, usually plural (`"Paintings"`, `"Aircraft"`)

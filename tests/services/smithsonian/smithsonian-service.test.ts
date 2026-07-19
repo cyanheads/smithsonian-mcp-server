@@ -6,6 +6,7 @@
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import { SmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
 import type {
   RawContentResponse,
@@ -20,6 +21,15 @@ import type {
 function makeService(): SmithsonianService {
   return new SmithsonianService();
 }
+
+/**
+ * The recovery text `smithsonian_get_object` declares for `not_found`. All three
+ * ID tools declare the same entry, and `ctx.recoveryFor` resolves against whichever
+ * one is executing, so asserting through one contract covers the shared service path.
+ */
+const NOT_FOUND_RECOVERY = smithsonianGetObject.errors?.find(
+  (e) => e.reason === 'not_found',
+)?.recovery;
 
 /** Build a minimal search response with one row. */
 function makeSearchResponse(
@@ -348,6 +358,20 @@ describe('SmithsonianService', () => {
       // The declared not_found contract must be carried in data (issue #10).
       expect(err.data?.reason).toBe('not_found');
       expect(err.data?.recordId).toBe('nasm_MISSING');
+      // No contract on this ctx, so the recovery resolver yields {} and the payload
+      // keeps its pre-contract shape — the spread must stay safe either way.
+      expect(err.data?.recovery).toBeUndefined();
+    });
+
+    it("carries the calling tool's declared recovery hint when response is absent (issue #25)", async () => {
+      // Resolved from the real tool contract, not a copied string — so a contract
+      // reword can't silently drift away from what reaches the wire.
+      mockFetch({ status: 200, responseCode: 1, response: null });
+      const svc = makeService();
+      const ctx = createMockContext({ errors: smithsonianGetObject.errors });
+      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
+      expect(err.data?.reason).toBe('not_found');
+      expect(err.data?.recovery?.hint).toBe(NOT_FOUND_RECOVERY);
     });
 
     it('HTTP 404 from content endpoint surfaces as notFound — not retried', async () => {
@@ -369,6 +393,25 @@ describe('SmithsonianService', () => {
       expect(err.message).toMatch(/nasm_MISSING/i);
       // Live-exercised path (real HTTP 404 → real notFound factory): reason must be present.
       expect(err.data?.reason).toBe('not_found');
+    });
+
+    it('carries the declared recovery hint on the HTTP 404 rewrap path too (issue #25)', async () => {
+      // The 404 catch/rewrap is a second, independent throw site — both must resolve.
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          statusText: 'Not Found',
+          headers: { get: () => null },
+          text: async () => '{"error":{"code":"NOT_FOUND","message":"Record not found"}}',
+        }),
+      );
+      const svc = makeService();
+      const ctx = createMockContext({ errors: smithsonianGetObject.errors });
+      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
+      expect(err.data?.reason).toBe('not_found');
+      expect(err.data?.recovery?.hint).toBe(NOT_FOUND_RECOVERY);
     });
 
     it('reads object from response directly — not response.rows[0] (content endpoint shape)', async () => {
@@ -549,6 +592,108 @@ describe('SmithsonianService', () => {
       const full = svc.toFullObject(raw);
       expect(full.materials).toEqual(['Carved oak, 30 cm tall']);
       expect(full.dimensions).toEqual([]);
+    });
+  });
+
+  describe('museum_name resolution', () => {
+    /**
+     * The vocabulary `smithsonian_list_terms { field: "unit_code" }` returns — every
+     * code a live record can carry. Kept whole so a future upstream addition shows up
+     * here as a failing row rather than a silent raw-code echo on the wire.
+     */
+    const LIVE_UNIT_CODES = [
+      'AAA',
+      'AAG',
+      'ACAH',
+      'ACM',
+      'ACMA',
+      'CFCHFOLKLIFE',
+      'CHNDM',
+      'CHSDM',
+      'EEPA',
+      'FBR',
+      'FSA',
+      'HAC',
+      'HMSG',
+      'HSFA',
+      'NAA',
+      'NASM',
+      'NASMAC',
+      'NMAA',
+      'NMAAHC',
+      'NMAH',
+      'NMAI',
+      'NMAIA',
+      'NMAfA',
+      'NMNHANTHRO',
+      'NMNHBIRDS',
+      'NMNHBOTANY',
+      'NMNHEDUCATION',
+      'NMNHENTO',
+      'NMNHFISHES',
+      'NMNHHERPS',
+      'NMNHINV',
+      'NMNHMAMMALS',
+      'NMNHMINSCI',
+      'NMNHPALEO',
+      'NPG',
+      'NPM',
+      'NPMA',
+      'NZP',
+      'OCIO_DPO3D',
+      'OFEO-SG',
+      'SAAM',
+      'SAAMPAIK',
+      'SI',
+      'SIA',
+      'SIL',
+      'SILAF',
+      'SILNMAHTL',
+      'SLA_SRO',
+    ];
+
+    /** Codes with no primary-sourced name — a guessed expansion would be a fabricated fact. */
+    const UNSOURCED_CODES = ['FSA', 'NASMAC', 'NMAIA', 'SAAMPAIK'];
+
+    it('resolves every sourced live unit code to a name, not the raw code (issue #27)', () => {
+      const svc = makeService();
+      for (const code of LIVE_UNIT_CODES.filter((c) => !UNSOURCED_CODES.includes(c))) {
+        expect(svc.toSummary({ unitCode: code }).museum_name, `unit_code ${code}`).not.toBe(code);
+      }
+    });
+
+    it('echoes the raw code for the four unsourced archive codes — never a guessed name', () => {
+      const svc = makeService();
+      for (const code of UNSOURCED_CODES) {
+        expect(svc.toSummary({ unitCode: code }).museum_name).toBe(code);
+      }
+    });
+
+    it('names NMNH sub-units at discipline level, not just "Natural History"', () => {
+      const svc = makeService();
+      expect(svc.toSummary({ unitCode: 'NMNHBIRDS' }).museum_name).toBe(
+        'NMNH - Vertebrate Zoology - Birds Division',
+      );
+      expect(svc.toSummary({ unitCode: 'NMNHPALEO' }).museum_name).toBe(
+        'NMNH - Paleobiology Dept.',
+      );
+    });
+
+    it('matches codes case-sensitively — NMAfA carries a lowercase f upstream', () => {
+      const svc = makeService();
+      expect(svc.toSummary({ unitCode: 'NMAfA' }).museum_name).toBe(
+        'National Museum of African Art',
+      );
+      expect(svc.toSummary({ unitCode: 'NMAFA' }).museum_name).toBe('NMAFA');
+    });
+
+    it('drops the retired FSG and bare NMNH keys — neither can match a live record', () => {
+      const svc = makeService();
+      // FSG was the pre-2019 Freer/Sackler code; the unit is indexed as NMAA now.
+      expect(svc.toSummary({ unitCode: 'FSG' }).museum_name).toBe('FSG');
+      expect(svc.toSummary({ unitCode: 'NMAA' }).museum_name).toBe('National Museum of Asian Art');
+      // Bare NMNH is superseded by the eleven NMNH* discipline sub-units.
+      expect(svc.toSummary({ unitCode: 'NMNH' }).museum_name).toBe('NMNH');
     });
   });
 
