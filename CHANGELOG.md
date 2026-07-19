@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.17](changelog/0.1.x/0.1.17.md) — 2026-07-19
+
+Fix not_found errors missing their recovery hint, smithsonian_explore museum mode silently free-texting unrecognized values, and museum_name falling back to raw codes for most of the vocabulary; correct the online_only field description
+
 ## [0.1.16](changelog/0.1.x/0.1.16.md) — 2026-07-19
 
 Correct smithsonian_explore's curated/representative language to match its first-page behavior, tighten tool-definition prose across the surface, fix NMNH unit-code examples, and enforce the date_decade format at the schema boundary
