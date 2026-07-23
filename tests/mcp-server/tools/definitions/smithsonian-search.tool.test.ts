@@ -4,7 +4,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianSearch } from '@/mcp-server/tools/definitions/smithsonian-search.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
@@ -70,6 +70,103 @@ describe('smithsonianSearch', () => {
     await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_results', recovery: { hint: expectedHint } },
     });
+  });
+
+  it('returns a successful terminal page when start is past the end (issue #29)', async () => {
+    // rowCount > 0 with an empty page means the offset walked off the end of a real
+    // result set — normal pagination completion. The pre-fix guard read the page-local
+    // length and threw no_results, telling a caller with 400 real matches to check
+    // their spelling.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 400 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', start: 10000, rows: 10 });
+    const result = await smithsonianSearch.handler(input, ctx);
+
+    expect(result.objects).toEqual([]);
+    expect(result.total_count).toBe(400);
+  });
+
+  it('still throws no_results when the query genuinely matches nothing at any offset (issue #29)', async () => {
+    // The complement of the fix: rowCount === 0 is a real zero-match query, so the
+    // spelling/broadening recovery is the correct advice even at a deep start.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'xyzzy_no_such_thing', start: 500 });
+    await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_results' },
+    });
+  });
+
+  it('does not report truncated on a past-the-end page (issue #29)', async () => {
+    // The page-local trigger reported truncated: true, shown: 0 on a page that
+    // withholds nothing — the same defect #30 fixes in smithsonian_list_terms,
+    // newly reachable here once the guard stopped throwing.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 400 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', start: 10000, rows: 10 });
+    await smithsonianSearch.handler(input, ctx);
+
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('does not report truncated on the exact last page (issue #29)', async () => {
+    // start(20) + shown(5) === rowCount(25): nothing remains past this page.
+    const tail = Array.from({ length: 5 }, (_, i) => makeObjectSummary(`nasm_TAIL${i}`));
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: tail, rowCount: 25 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'quilt', start: 20, rows: 10 });
+    await smithsonianSearch.handler(input, ctx);
+
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('still reports truncated when objects remain past the page (issue #29)', async () => {
+    const page = Array.from({ length: 10 }, (_, i) => makeObjectSummary(`nasm_MID${i}`));
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: page, rowCount: 400 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', start: 20, rows: 10 });
+    await smithsonianSearch.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(10);
+    expect(enrichment.truncationCeiling).toBe(400);
+  });
+
+  it('truncation guidance names start and survives the enrichment schema (issue #23)', async () => {
+    // Two failure modes, one test. ctx.enrich.truncated() always writes a notice, but
+    // the generic default names no continuation input — and with no `notice` field
+    // declared, output.extend(enrichment) stripped it off the wire entirely.
+    const page = Array.from({ length: 10 }, (_, i) => makeObjectSummary(`nasm_G${i}`));
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: page, rowCount: 400 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearch.errors });
+    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', rows: 10 });
+    const result = await smithsonianSearch.handler(input, ctx);
+
+    const effectiveOutput = smithsonianSearch.output.extend(smithsonianSearch.enrichment!);
+    const onTheWire = effectiveOutput.parse({ ...result, ...getEnrichment(ctx) });
+    expect(onTheWire.notice).toContain('start');
+    expect(onTheWire.notice).not.toBe(
+      'Results capped at 10; showing 10. Raise the cap or narrow with filters.',
+    );
   });
 
   it('harvests valid object_type/unit_code terms into the recovery hint on a filtered-zero (issue #15)', async () => {

@@ -80,6 +80,90 @@ describe('smithsonianListTerms', () => {
     expect(result.total).toBe(48);
   });
 
+  it('does not report truncated on a past-the-end page (issue #30)', async () => {
+    // The trigger compared the page length against the full total, so an empty
+    // terminal page disclosed truncated: true, shown: 0 — advertising omitted data
+    // on a call that had already walked off the end of the vocabulary.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 8683)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'culture', start: 100000, rows: 5 });
+    const result = await smithsonianListTerms.handler(input, ctx);
+
+    expect(result.terms).toEqual([]);
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('does not report truncated on the exact last page (issue #30)', async () => {
+    // start(10) + shown(2) === total(12): the terminal page withholds nothing.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult(['Images', '3D Models'], 12)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({
+      field: 'online_media_type',
+      start: 10,
+      rows: 5,
+    });
+    await smithsonianListTerms.handler(input, ctx);
+
+    expect(getEnrichment(ctx).truncated).toBeUndefined();
+  });
+
+  it('still reports truncated when terms remain past the page (issue #30)', async () => {
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult(['Aztecs', 'Balinese'], 8683)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'culture', start: 10, rows: 2 });
+    await smithsonianListTerms.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(2);
+    expect(enrichment.truncationCeiling).toBe(8683);
+  });
+
+  it('truncation guidance names start, rows, and contains (issue #23)', async () => {
+    // The generic default ("Raise the cap or narrow with filters") names no input a
+    // caller can act on. list_terms already declares `notice`, so only the guidance
+    // text is at issue here.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult(['Aztecs', 'Balinese'], 8683)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'culture', rows: 2 });
+    const result = await smithsonianListTerms.handler(input, ctx);
+
+    const effectiveOutput = smithsonianListTerms.output.extend(smithsonianListTerms.enrichment!);
+    const onTheWire = effectiveOutput.parse({ ...result, ...getEnrichment(ctx) });
+    expect(onTheWire.notice).toContain('start');
+    expect(onTheWire.notice).toContain('rows');
+    expect(onTheWire.notice).toContain('contains');
+  });
+
+  it('the filtered-empty notice is never clobbered by truncation guidance (issue #23)', async () => {
+    // Both branches write the same enrichment `notice` key, so a reachable overlap
+    // would silently drop one. total === 0 makes the truncation trigger impossible,
+    // keeping them mutually exclusive — this pins that invariant.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 0)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'culture', contains: 'zzznope' });
+    await smithsonianListTerms.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('zzznope');
+    expect(enrichment.truncated).toBeUndefined();
+  });
+
   it('defaults start to 0 and rows to 50', async () => {
     const listTermsFn = vi.fn().mockResolvedValue(makeTermsResult(['United States of America'], 1));
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({

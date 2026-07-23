@@ -52,6 +52,41 @@ const RelatedObjectSchema = z
   })
   .describe('A related object with its connecting metadata signals.');
 
+/**
+ * The `smithsonian_search` call that reproduces one fan-out exactly. Every query
+ * this tool builds has a 1:1 equivalent in that tool's `query`/`filters` input,
+ * and `smithsonian_search` applies `start` straight to the upstream offset with
+ * no per-signal depth cap — so this is the retrieval path for a signal's matches
+ * beyond the merged interleave's per-signal reach.
+ */
+const SearchContinuationSchema = z
+  .object({
+    query: z
+      .string()
+      .describe(
+        "Pass verbatim as smithsonian_search's query. Empty when the signal is expressed entirely through filters.",
+      ),
+    filters: z
+      .object({
+        culture: z.string().optional().describe('smithsonian_search filters.culture value.'),
+        object_type: z
+          .string()
+          .optional()
+          .describe('smithsonian_search filters.object_type value.'),
+        date_decade: z
+          .string()
+          .optional()
+          .describe('smithsonian_search filters.date_decade value.'),
+      })
+      .optional()
+      .describe(
+        "Pass verbatim as smithsonian_search's filters. Omitted when the signal's constraint is already carried entirely by query.",
+      ),
+  })
+  .describe(
+    "Exact smithsonian_search input that reproduces this signal's full match set, at any depth.",
+  );
+
 export const smithsonianFindRelated = tool('smithsonian_find_related', {
   title: 'Find Related Smithsonian Objects',
   description:
@@ -97,6 +132,27 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     search_signals_used: z
       .array(z.string().describe('A metadata signal used for a fan-out search.'))
       .describe('Metadata fields that drove the fan-out searches.'),
+    signals: z
+      .array(
+        z
+          .object({
+            signal: z
+              .string()
+              .describe(
+                'Matches an entry in search_signals_used and in related[].similarity_signals.',
+              ),
+            row_count: z
+              .number()
+              .describe(
+                `True upstream match count for this signal, uncapped — it can exceed the ${MAX_FETCH_PER_SIGNAL}-per-signal depth this tool's own paging reaches.`,
+              ),
+            search_continuation: SearchContinuationSchema,
+          })
+          .describe('One fan-out signal with its true size and its retrieval path.'),
+      )
+      .describe(
+        `Per-signal breakdown of every fan-out that returned. Use search_continuation with smithsonian_search to retrieve a signal's matches past this tool's ${MAX_FETCH_PER_SIGNAL}-per-signal reach. A signal whose upstream call failed is omitted.`,
+      ),
   }),
 
   enrichment: {
@@ -112,7 +168,13 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .number()
       .optional()
       .describe(
-        'Upper bound on the related objects reachable by paging with start. Cross-signal overlaps are not subtracted, so it can overcount.',
+        "Upper bound on the related objects reachable by paging with start. Cross-signal overlaps are not subtracted, so it can overcount. Signals larger than this tool's per-signal reach are counted at that reach — see signals[].row_count for their true size.",
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        "Guidance naming the inputs that retrieve the related objects this page omitted — start for the next page, signals[].search_continuation for a signal past this tool's reach.",
       ),
   },
 
@@ -162,7 +224,15 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
 
     // Build fan-out queries: culture, maker, topic, period+type.
     // Field constraints are embedded in q as Lucene field:value terms.
-    type FanOut = { query: string; filters: string[]; signal: string };
+    // `continuation` is the equivalent smithsonian_search input, captured here
+    // where the raw signal values are still in hand rather than reverse-parsed
+    // out of the Lucene strings (issue #18).
+    type FanOut = {
+      query: string;
+      filters: string[];
+      signal: string;
+      continuation: z.infer<typeof SearchContinuationSchema>;
+    };
     const fanOuts: FanOut[] = [];
 
     const culture0 = cultures[0];
@@ -171,6 +241,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         query: '',
         filters: [luceneField('culture', culture0)],
         signal: `culture: ${culture0}`,
+        continuation: { query: '', filters: { culture: culture0 } },
       });
     }
     const maker0 = makerNames[0];
@@ -179,6 +250,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         query: maker0,
         filters: [],
         signal: `maker: ${maker0}`,
+        continuation: { query: maker0 },
       });
     }
     const topic0 = topics[0];
@@ -187,6 +259,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         query: topic0,
         filters: [],
         signal: `topic: ${topic0}`,
+        continuation: { query: topic0 },
       });
     }
     // Always add period+type combo
@@ -200,7 +273,24 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       const signal = [period && `period: ${period}`, objType && `type: ${objType}`]
         .filter(Boolean)
         .join(', ');
-      fanOuts.push({ query: '', filters, signal });
+      // smithsonian_search's date_decade only accepts the "NNNNs" shape, but EDAN
+      // indexes date terms in many others (year ranges, BCE values). When the period
+      // isn't decade-shaped the structured filter can't carry it, so the continuation
+      // falls back to the fan-out's exact Lucene expression — smithsonian_search
+      // forwards `query` verbatim when no filters accompany it, reproducing the
+      // identical upstream q either way.
+      const decade = period && /^\d{4}s$/.test(period) ? period : undefined;
+      const continuation: z.infer<typeof SearchContinuationSchema> =
+        period && !decade
+          ? { query: filters.join(' AND ') }
+          : {
+              query: '',
+              filters: {
+                ...(decade && { date_decade: decade }),
+                ...(objType && { object_type: objType }),
+              },
+            };
+      fanOuts.push({ query: '', filters, signal, continuation });
     }
 
     const searchSignalsUsed = fanOuts.map((f) => f.signal);
@@ -255,6 +345,25 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       return { items, signal: fo.signal, rowCount: wave1.rowCount };
     };
     const fanOutResults = await Promise.allSettled(fanOuts.map(fetchSignal));
+
+    // Per-signal disclosure (issue #18). The merged interleave reaches at most
+    // MAX_FETCH_PER_SIGNAL rows per signal, so a broad signal has matches no `start`
+    // on this tool can retrieve. row_count is the uncapped upstream truth and
+    // search_continuation is the escape hatch — allSettled preserves input order,
+    // so each result pairs with the fan-out that produced it. A rejected fan-out
+    // contributed nothing and has no known row count, so it's omitted rather than
+    // disclosed as zero.
+    const signals = fanOuts.flatMap((fo, index) => {
+      const settled = fanOutResults[index];
+      if (settled?.status !== 'fulfilled') return [];
+      return [
+        {
+          signal: fo.signal,
+          row_count: settled.value.rowCount,
+          search_continuation: fo.continuation,
+        },
+      ];
+    });
 
     // Step 3: accumulate every signal per record_id, bucket by first-discovery
     // order for round-robin fairness, then interleave so each signal contributes
@@ -352,7 +461,20 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const moreInMerged = merged.length > input.start + input.limit;
     const moreUpstream = buckets.some((b) => b.rowCount > neededDepth);
     if (moreInMerged || moreUpstream) {
-      ctx.enrich.truncated({ shown: related.length, cap: input.limit, ceiling });
+      // Two-tier continuation: `start` pages the merged interleave up to each
+      // signal's MAX_FETCH_PER_SIGNAL reach; signals[].search_continuation is the
+      // only path past it. Name both, because a broad signal exhausts the first
+      // long before the ceiling is reached.
+      ctx.enrich.truncated({
+        shown: related.length,
+        cap: input.limit,
+        ceiling,
+        guidance:
+          `Showing ${related.length} related objects from offset ${input.start}. ` +
+          'Advance start (start = page × limit) for the next page. Each signal is reachable ' +
+          `to ${MAX_FETCH_PER_SIGNAL} objects this way — see signals[].row_count for a signal's true size, ` +
+          'and pass its search_continuation to smithsonian_search to retrieve the rest.',
+      });
     }
 
     return {
@@ -363,6 +485,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       },
       related,
       search_signals_used: searchSignalsUsed,
+      signals,
     };
   },
 
@@ -378,6 +501,24 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       lines.push(`**Connected by:** ${obj.similarity_signals.join(', ')}`);
       lines.push(`**CC0:** ${obj.is_cc0 ? 'Yes' : 'No'}`);
       if (obj.thumbnail_url) lines.push(`**Thumbnail:** ${obj.thumbnail_url}`);
+    }
+    if (result.signals.length > 0) {
+      lines.push('\n## Signals');
+      lines.push("Retrieve a signal past this tool's reach with smithsonian_search:\n");
+      for (const s of result.signals) {
+        const c = s.search_continuation;
+        // Each filter key renders in its own block, never as exclusive branches —
+        // every field must reach content[] on the same render.
+        const filterArgs: string[] = [];
+        if (c.filters?.culture) filterArgs.push(`culture: ${JSON.stringify(c.filters.culture)}`);
+        if (c.filters?.object_type)
+          filterArgs.push(`object_type: ${JSON.stringify(c.filters.object_type)}`);
+        if (c.filters?.date_decade)
+          filterArgs.push(`date_decade: ${JSON.stringify(c.filters.date_decade)}`);
+        const filterArg = filterArgs.length > 0 ? `, filters: { ${filterArgs.join(', ')} }` : '';
+        lines.push(`- **${s.signal}** — ${s.row_count} upstream matches`);
+        lines.push(`  \`smithsonian_search { query: ${JSON.stringify(c.query)}${filterArg} }\``);
+      }
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

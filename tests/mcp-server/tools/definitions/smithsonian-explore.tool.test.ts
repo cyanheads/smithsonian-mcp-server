@@ -3,7 +3,8 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-explore.tool.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { z } from '@cyanheads/mcp-ts-core';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianExplore } from '@/mcp-server/tools/definitions/smithsonian-explore.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
@@ -206,6 +207,190 @@ describe('smithsonianExplore', () => {
 
     const effectiveOutput = smithsonianExplore.output.extend(smithsonianExplore.enrichment!);
     expect(() => effectiveOutput.parse(result)).not.toThrow();
+  });
+
+  it('defaults start to 0 and forwards it to the service (issue #24)', async () => {
+    const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(3), rowCount: 150 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianExplore.errors });
+    await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({ mode: 'medium', value: 'Paintings' }),
+      ctx,
+    );
+    expect(searchFn.mock.calls[0]?.[0]).toMatchObject({ start: 0 });
+
+    await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({ mode: 'medium', value: 'Paintings', start: 25 }),
+      ctx,
+    );
+    // The offset must reach upstream — it was hard-coded to 0 before this input existed.
+    expect(searchFn.mock.calls[1]?.[0]).toMatchObject({ start: 25 });
+  });
+
+  it('pages contiguously — page(0,5) ++ page(5,5) equals page(0,10) by record_id (issue #24)', async () => {
+    // Reconstruction is the load-bearing proof: a "page 2 differs from page 1" check
+    // also passes when a gap silently drops objects. Upstream is modelled as a stable
+    // ordered sequence sliced by start/rows, which the live API was verified to be.
+    const fullSeq: ObjectSummary[] = Array.from({ length: 40 }, (_, i) => ({
+      record_id: `nmai_SEQ${String(i + 1).padStart(3, '0')}`,
+      title: `Painting ${i + 1}`,
+      unit_code: 'NMAI',
+      museum_name: 'National Museum of the American Indian',
+      is_cc0: true,
+      has_media: false,
+    }));
+    const searchFn = vi.fn().mockImplementation((params: { rows: number; start: number }) =>
+      Promise.resolve({
+        rows: fullSeq.slice(params.start, params.start + params.rows),
+        rowCount: fullSeq.length,
+      }),
+    );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianExplore.errors });
+    const page1 = await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({ mode: 'medium', value: 'Paintings', rows: 5, start: 0 }),
+      ctx,
+    );
+    const page2 = await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({ mode: 'medium', value: 'Paintings', rows: 5, start: 5 }),
+      ctx,
+    );
+    const both = await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({ mode: 'medium', value: 'Paintings', rows: 10, start: 0 }),
+      ctx,
+    );
+
+    const ids1 = page1.sample_objects.map((o) => o.record_id);
+    const ids2 = page2.sample_objects.map((o) => o.record_id);
+    expect([...ids1, ...ids2]).toEqual(both.sample_objects.map((o) => o.record_id));
+    // Gap-free and overlap-free, not merely distinct.
+    expect(ids1).not.toEqual(ids2);
+  });
+
+  it('returns a successful empty page when start is past the end, not no_results (issue #24)', async () => {
+    // Adding `start` newly makes a past-the-end page reachable — the defect class #29
+    // fixes in smithsonian_search. The guard must read the true rowCount, so a caller
+    // is never told to fix a category value that was already correct.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 11129 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianExplore.errors });
+    const input = smithsonianExplore.input.parse({
+      mode: 'medium',
+      value: 'Paintings',
+      start: 20000,
+    });
+    const result = await smithsonianExplore.handler(input, ctx);
+
+    expect(result.sample_objects).toEqual([]);
+    expect(result.total_count).toBe(11129);
+    expect(result.museum_breakdown).toEqual([]);
+  });
+
+  it('still throws no_results when the category genuinely matches nothing (issue #24)', async () => {
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianExplore.errors });
+    const input = smithsonianExplore.input.parse({
+      mode: 'medium',
+      value: 'Painting',
+      start: 500,
+    });
+    await expect(smithsonianExplore.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_results' },
+    });
+  });
+
+  it('does not report truncated on the true last page or past the end (issue #24)', async () => {
+    // start(10) + shown(2) === rowCount(12). The page-local trigger misfires here on
+    // every page but the first, because a last page is always shorter than the total.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: makeSamples(2), rowCount: 12 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const lastPageCtx = createMockContext({ errors: smithsonianExplore.errors });
+    await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({
+        mode: 'medium',
+        value: 'Paintings',
+        rows: 10,
+        start: 10,
+      }),
+      lastPageCtx,
+    );
+    expect(getEnrichment(lastPageCtx).truncated).toBeUndefined();
+
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 12 }),
+    } as unknown as svcModule.SmithsonianService);
+    const pastEndCtx = createMockContext({ errors: smithsonianExplore.errors });
+    await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({
+        mode: 'medium',
+        value: 'Paintings',
+        rows: 10,
+        start: 9999,
+      }),
+      pastEndCtx,
+    );
+    expect(getEnrichment(pastEndCtx).truncated).toBeUndefined();
+  });
+
+  it('still reports truncated when objects remain past the page (issue #24)', async () => {
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: makeSamples(10), rowCount: 11129 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianExplore.errors });
+    await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({ mode: 'medium', value: 'Paintings', rows: 10, start: 20 }),
+      ctx,
+    );
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(10);
+    expect(enrichment.truncationCeiling).toBe(11129);
+  });
+
+  it('explore truncation guidance names start and survives the enrichment schema (issue #23)', async () => {
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: vi.fn().mockResolvedValue({ rows: makeSamples(10), rowCount: 11129 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianExplore.errors });
+    const result = await smithsonianExplore.handler(
+      smithsonianExplore.input.parse({ mode: 'medium', value: 'Paintings', rows: 10 }),
+      ctx,
+    );
+
+    const effectiveOutput = smithsonianExplore.output.extend(smithsonianExplore.enrichment!);
+    const onTheWire = effectiveOutput.parse({ ...result, ...getEnrichment(ctx) });
+    expect(onTheWire.notice).toContain('start');
+    expect(onTheWire.notice).not.toBe(
+      'Results capped at 10; showing 10. Raise the cap or narrow with filters.',
+    );
+  });
+
+  it('describes sample_objects as the requested page, not the first page (issue #24)', () => {
+    // The sample is page-relative once start exists; the shipped descriptions are the
+    // whole change here, so they are asserted directly.
+    const schema = z.toJSONSchema(smithsonianExplore.output) as {
+      properties: { sample_objects: { description?: string } };
+    };
+    const description = schema.properties.sample_objects.description ?? '';
+    expect(description).not.toMatch(/first page/i);
+    expect(description).toMatch(/requested page/i);
+    expect(smithsonianExplore.description).not.toMatch(/first page/i);
   });
 
   it('format renders mode, value, total_count, and sample record_ids', () => {

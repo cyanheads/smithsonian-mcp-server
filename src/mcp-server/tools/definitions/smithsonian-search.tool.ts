@@ -192,13 +192,19 @@ export const smithsonianSearch = tool('smithsonian_search', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the result set was capped by the rows parameter.'),
+      .describe(
+        'True when matching objects remain past this page. False on a terminal or past-the-end page, where nothing is being withheld.',
+      ),
     shown: z.number().optional().describe('Number of objects returned in this page.'),
     cap: z.number().optional().describe('The rows cap that was applied.'),
     truncationCeiling: z
       .number()
       .optional()
       .describe('Total matching objects (upper bound for omitted items).'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance naming the input that retrieves the objects this page omitted.'),
   },
 
   errors: [
@@ -245,7 +251,12 @@ export const smithsonianSearch = tool('smithsonian_search', {
       ctx,
     );
 
-    if (objects.length === 0) {
+    // Guard on the TRUE match count, not the page-local length. A deep `start`
+    // past the end of a real result set returns an empty page with rowCount > 0 —
+    // normal pagination completion, not a query that matched nothing. Firing
+    // no_results there tells a caller with hundreds of real matches to check
+    // their spelling (issue #29).
+    if (rowCount === 0) {
       // A filtered zero-result is most often a filter value outside the
       // controlled vocabulary — surface the actionable invalid_filter reason
       // (recovery points at smithsonian_list_terms) rather than generic no_results.
@@ -309,8 +320,19 @@ export const smithsonianSearch = tool('smithsonian_search', {
 
     ctx.log.info('Search complete', { count: objects.length, total: rowCount });
 
-    if (objects.length < rowCount) {
-      ctx.enrich.truncated({ shown: objects.length, cap: rows, ceiling: rowCount });
+    // Account for the offset already consumed: a page is incomplete only when
+    // objects remain BEYOND it. Comparing the page-local length against the total
+    // reports truncated on every page past the first, including the terminal and
+    // past-the-end pages the rowCount guard above now lets through.
+    if (input.start + objects.length < rowCount) {
+      ctx.enrich.truncated({
+        shown: objects.length,
+        cap: rows,
+        ceiling: rowCount,
+        guidance:
+          `${rowCount} objects match; this page shows ${objects.length} from offset ${input.start}. ` +
+          'Retrieve the rest by advancing start (start = page × rows, rows max 100), or narrow with filters.',
+      });
     }
 
     return { objects, total_count: rowCount };

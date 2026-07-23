@@ -8,6 +8,7 @@ import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
+import { smithsonianSearch } from '@/mcp-server/tools/definitions/smithsonian-search.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, RawEDAN } from '@/services/smithsonian/types.js';
 
@@ -749,6 +750,247 @@ describe('smithsonianFindRelated', () => {
     }
   });
 
+  it('discloses each fan-out signal with its uncapped upstream row_count (issue #18)', async () => {
+    // The merged interleave reaches at most MAX_FETCH_PER_SIGNAL (5000) rows per
+    // signal, so a broad signal has matches no `start` on this tool can retrieve.
+    // row_count is the uncapped truth; truncationCeiling stays the capped reach, and
+    // the two must be allowed to disagree.
+    const anchorRaw = makeAnchorRaw();
+    // Every fan-out returns a distinct row so all four become contributing buckets —
+    // the ceiling sums only buckets that surfaced candidates.
+    const row = (id: string): ObjectSummary => ({
+      record_id: id,
+      title: id,
+      unit_code: 'NMAI',
+      museum_name: 'National Museum of the American Indian',
+      is_cc0: true,
+      has_media: false,
+    });
+    const searchFn = vi.fn().mockImplementation((params: { query: string; filters?: string[] }) => {
+      if (params.filters?.some((f) => f.startsWith('culture:')))
+        return Promise.resolve({ rows: [row('culture_1')], rowCount: 14662 });
+      if (params.query === 'Lockheed')
+        return Promise.resolve({ rows: [row('maker_1')], rowCount: 199 });
+      if (params.query === 'Aviation')
+        return Promise.resolve({ rows: [row('topic_1')], rowCount: 63 });
+      return Promise.resolve({ rows: [row('period_1')], rowCount: 12 });
+    });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const input = smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20 });
+    const result = await smithsonianFindRelated.handler(input, ctx);
+
+    expect(result.signals.map((s) => s.signal)).toEqual(result.search_signals_used);
+    expect(result.signals.map((s) => s.row_count)).toEqual([14662, 199, 63, 12]);
+    // The ceiling caps each signal at the 5,000 reach; row_count does not.
+    expect(getEnrichment(ctx).truncationCeiling).toBe(5000 + 199 + 63 + 12);
+    expect(result.signals[0]?.row_count).toBeGreaterThan(5000);
+  });
+
+  it('signal continuations reproduce each fan-out as smithsonian_search input (issue #18)', async () => {
+    // Every fan-out query has a 1:1 equivalent in smithsonian_search's query/filters
+    // shape — the retrieval path past this tool's per-signal reach. Each of the four
+    // signal kinds maps differently, so all four are pinned.
+    const anchorRaw = makeAnchorRaw();
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 7 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const input = smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' });
+    const result = await smithsonianFindRelated.handler(input, ctx);
+
+    const bySignal = new Map(result.signals.map((s) => [s.signal, s.search_continuation]));
+    // culture is a filter-only signal: no free text, one structured filter.
+    expect(bySignal.get('culture: American')).toEqual({
+      query: '',
+      filters: { culture: 'American' },
+    });
+    // maker and topic are plain free-text queries with no filters at all.
+    expect(bySignal.get('maker: Lockheed')).toEqual({ query: 'Lockheed' });
+    expect(bySignal.get('topic: Aviation')).toEqual({ query: 'Aviation' });
+    // period+type carries both constraints structurally when the date is decade-shaped.
+    expect(bySignal.get('period: 1960s, type: Aircraft')).toEqual({
+      query: '',
+      filters: { date_decade: '1960s', object_type: 'Aircraft' },
+    });
+  });
+
+  it('falls back to exact Lucene when the period is not decade-shaped (issue #18)', async () => {
+    // smithsonian_search's date_decade only accepts "NNNNs", but most EDAN date terms
+    // are other shapes (year ranges, BCE values). The structured filter cannot carry
+    // those, so the continuation must degrade to the fan-out's exact Lucene rather
+    // than advertise an input the sibling tool rejects.
+    const anchorRaw = makeAnchorRaw();
+    anchorRaw.content!.indexedStructured!.date = ['1000-1099'];
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const result = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+      ctx,
+    );
+
+    const periodSignal = result.signals.find((s) => s.signal.startsWith('period:'));
+    // The exact q the fan-out sent — smithsonian_search forwards `query` verbatim
+    // when no filters accompany it, so this reproduces the identical upstream call.
+    expect(periodSignal?.search_continuation).toEqual({
+      query: 'date:1000-1099 AND object_type:Aircraft',
+    });
+    // The whole continuation must parse as smithsonian_search input; the rejected
+    // date_decade shape is exactly what this fallback exists to avoid.
+    expect(() => smithsonianSearch.input.parse(periodSignal?.search_continuation)).not.toThrow();
+  });
+
+  it('every signal continuation parses as smithsonian_search input (issue #18)', async () => {
+    // The disclosure is only useful if the sibling tool accepts it verbatim.
+    const anchorRaw = makeAnchorRaw();
+    anchorRaw.content!.indexedStructured!.culture = ['Plains Indian'];
+    anchorRaw.content!.indexedStructured!.object_type = ['Crewed spacecraft'];
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 3 }),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const result = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+      ctx,
+    );
+
+    expect(result.signals.length).toBeGreaterThan(0);
+    for (const s of result.signals) {
+      expect(() => smithsonianSearch.input.parse(s.search_continuation)).not.toThrow();
+    }
+  });
+
+  it('omits a fan-out whose upstream call failed from signals[] (issue #18)', async () => {
+    // A rejected fan-out contributed nothing and has no known row count — disclosing
+    // it as zero would understate the signal rather than admit it is unknown.
+    const anchorRaw = makeAnchorRaw();
+    const searchFn = vi
+      .fn()
+      .mockImplementation((params: { filters?: string[] }) =>
+        params.filters?.some((f) => f.startsWith('culture:'))
+          ? Promise.reject(new Error('upstream 503'))
+          : Promise.resolve({ rows: [], rowCount: 11 }),
+      );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const result = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+      ctx,
+    );
+
+    expect(result.signals.map((s) => s.signal)).not.toContain('culture: American');
+    expect(result.signals.map((s) => s.signal)).toContain('maker: Lockheed');
+    // search_signals_used still lists every fan-out attempted.
+    expect(result.search_signals_used).toContain('culture: American');
+  });
+
+  it('truncation guidance names start and the signal continuation, and survives the enrichment schema (issue #23)', async () => {
+    // Two-tier continuation: start pages the merged interleave, signals[] is the only
+    // path past a signal's reach. Pre-fix, no `notice` field was declared, so the
+    // notice ctx.enrich.truncated() always writes was stripped off the wire entirely.
+    const anchorRaw = makeAnchorRaw();
+    const cultureRows: ObjectSummary[] = Array.from({ length: 20 }, (_, i) => ({
+      record_id: `culture_${i + 1}`,
+      title: `Culture Object ${i + 1}`,
+      unit_code: 'NMAI',
+      museum_name: 'National Museum of the American Indian',
+      is_cc0: true,
+      has_media: false,
+    }));
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: vi
+        .fn()
+        .mockImplementation((params: { filters?: string[] }) =>
+          Promise.resolve(
+            params.filters?.some((f) => f.startsWith('culture:'))
+              ? { rows: cultureRows, rowCount: 14662 }
+              : { rows: [], rowCount: 0 },
+          ),
+        ),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    const result = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001', limit: 20 }),
+      ctx,
+    );
+
+    const effectiveOutput = smithsonianFindRelated.output.extend(
+      smithsonianFindRelated.enrichment!,
+    );
+    const onTheWire = effectiveOutput.parse({ ...result, ...getEnrichment(ctx) });
+    expect(onTheWire.notice).toContain('start');
+    expect(onTheWire.notice).toContain('search_continuation');
+    expect(onTheWire.notice).not.toBe(
+      'Results capped at 20; showing 20. Raise the cap or narrow with filters.',
+    );
+  });
+
   it('format renders anchor, related record_ids, and similarity signals', () => {
     const output = {
       anchor: { record_id: 'nasm_TEST001', title: 'Anchor Object', unit_code: 'NASM' },
@@ -763,6 +1005,14 @@ describe('smithsonianFindRelated', () => {
         },
       ],
       search_signals_used: ['culture: American', 'maker: Lockheed'],
+      signals: [
+        {
+          signal: 'culture: American',
+          row_count: 14662,
+          search_continuation: { query: '', filters: { culture: 'American' } },
+        },
+        { signal: 'maker: Lockheed', row_count: 199, search_continuation: { query: 'Lockheed' } },
+      ],
     };
     const blocks = smithsonianFindRelated.format!(output);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
@@ -772,11 +1022,47 @@ describe('smithsonianFindRelated', () => {
     expect(text).toContain('maker: Lockheed');
   });
 
+  it('format renders every signal continuation field into content[] (issue #18)', () => {
+    // content[]-only clients read format() alone, so the row_count and the exact
+    // smithsonian_search arguments must survive the markdown render — a filter key
+    // rendered in an exclusive branch would reach structuredContent and nothing else.
+    const output = {
+      anchor: { record_id: 'nasm_TEST001', title: 'Anchor Object', unit_code: 'NASM' },
+      related: [],
+      search_signals_used: ['culture: American', 'period: 1960s, type: Aircraft'],
+      signals: [
+        {
+          signal: 'culture: American',
+          row_count: 14662,
+          search_continuation: { query: '', filters: { culture: 'American' } },
+        },
+        {
+          signal: 'period: 1960s, type: Aircraft',
+          row_count: 12,
+          search_continuation: {
+            query: '',
+            filters: { date_decade: '1960s', object_type: 'Aircraft' },
+          },
+        },
+      ],
+    };
+    const text = smithsonianFindRelated.format!(output)
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+    expect(text).toContain('14662');
+    expect(text).toContain('smithsonian_search');
+    expect(text).toContain('culture: "American"');
+    // Both filter keys of the same continuation render together, not as alternatives.
+    expect(text).toContain('date_decade: "1960s"');
+    expect(text).toContain('object_type: "Aircraft"');
+  });
+
   it('format renders cleanly when related is empty', () => {
     const output = {
       anchor: { record_id: 'nasm_TEST001', title: 'Anchor Object', unit_code: 'NASM' },
       related: [],
       search_signals_used: ['culture: American'],
+      signals: [],
     };
     const blocks = smithsonianFindRelated.format!(output);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');

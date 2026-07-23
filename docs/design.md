@@ -19,7 +19,7 @@
 | `smithsonian_search` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms; `contains` narrows the vocabulary by a case-insensitive substring. | `field` (unit_code, culture, place, date, online_media_type), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
 | `smithsonian_get_object` | Normalized metadata projection by ID: title, description, dates, materials, dimensions, exhibition, credit, and a media summary (count + CC0 image count). | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
-| `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Searches a constrained query internally and returns category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. | `mode`, `value`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound) |
+| `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Searches a constrained query internally and returns category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound) |
 | `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, maker, topics). Returns up to 20 related objects, each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
@@ -106,14 +106,15 @@ Each step is independently testable.
   - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to records carrying an indexed `online_media_type` value. That vocabulary covers digitized surrogates (finding aids, catalog cards, scanned books, full text, electronic resources) alongside images, 3D models, and video; the surrogate types often have no deliverable media attached, so a match can still report `has_media: false`. `has_media` reads `descriptiveNonRepeating.online_media` — a separate upstream signal — and is what predicts a `smithsonian_get_media` outcome.
   - `cc0_only?: boolean` — when true, ANDs the Lucene term `media_usage:CC0` into `q` to restrict to CC0 objects. Useful before calling `smithsonian_get_media`.
 - `rows?: number` — page size (default 20, max 100).
-- `start?: number` — offset for pagination (default 0).
+- `start?: number` — offset for pagination (default 0). A `start` past the end returns a successful empty page, not an error.
 
 **Output:**
-- `objects[]` — curated summaries: `{ record_id, title, date, unit_code, museum_name, object_type, thumbnail_url, is_cc0, has_media }`.
+- `objects[]` — curated summaries: `{ record_id, title, date, unit_code, museum_name, object_type, thumbnail_url, is_cc0, has_media }`. Empty on a page past the end of the result set.
 - `total_count` — total matching objects before pagination.
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names `start` as the retrieval path.
 
 **Errors:**
-- `no_results` (NotFound) — no objects matched the query and filters. Recovery: broaden the query, remove filters, or check spelling.
+- `no_results` (NotFound) — the query and filters match nothing at all (`rowCount === 0`). Recovery: broaden the query, remove filters, or check spelling. Deliberately keyed to the true match count rather than the page-local length, so a deep `start` against a query with real matches is never told to check its spelling.
 - `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: for a culture/place/date_decade value, resolve it to an exact term with `smithsonian_list_terms { field, contains: <value> }`; for object_type/unit_code, exact co-occurring values are harvested into the hint. Then retry with an exact term.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
@@ -164,15 +165,17 @@ Each step is independently testable.
   - `culture`: culture term (`"Aztec"`, `"Sioux"`, `"Japanese"`)
   - `period`: decade string (`"1940s"`, `"1860s"`)
   - `medium`: object type, usually plural (`"Paintings"`, `"Aircraft"`)
-- `rows?: number` — sample objects to return (default 10).
+- `rows?: number` — sample objects to return (default 10, max 50).
+- `start?: number` — pagination offset into the category's match set (default 0, 0-indexed). Page contiguously with `start = page × rows`; the category query and upstream ordering are identical across pages, so adjacent pages reconstruct the full set gap-free. A `start` past the end returns a successful empty page, not an error.
 
 **Output:**
 - `mode`, `value`, `total_count` — how many objects match
-- `sample_objects[]` — representative objects: `{ record_id, title, date, unit_code, thumbnail_url, is_cc0 }`
-- `museum_breakdown[]` — when mode is not `museum`, top 5 contributing units with counts (helps plan museum-focused follow-up searches)
+- `sample_objects[]` — the requested page: `{ record_id, title, date, unit_code, thumbnail_url, is_cc0 }`
+- `museum_breakdown[]` — when mode is not `museum`, top 5 contributing units with counts, computed from the current page (helps plan museum-focused follow-up searches)
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names `start` as the retrieval path
 
 **Errors:**
-- `no_results` (NotFound) — no objects match the category. Recovery: try a broader value, check spelling, or switch mode.
+- `no_results` (NotFound) — the category matches nothing at all (`rowCount === 0`). Recovery: try a broader value, check spelling, or switch mode. Not raised for a `start` past the end of a real category, which is normal pagination completion.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -191,7 +194,8 @@ Each step is independently testable.
 - `anchor` — summary of the anchor object (`{ record_id, title, unit_code }`)
 - `related[]` — `{ record_id, title, date, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
 - `search_signals_used[]` — which metadata fields drove the fan-out searches
-- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the *reachable* related pool — each signal's upstream match count is capped at its per-signal reach (5,000) before summing, so the ceiling never exceeds what `start` can retrieve
+- `signals[]` — per-signal breakdown of every fan-out that returned: `{ signal, row_count, search_continuation }`. `row_count` is the signal's true upstream match count, uncapped — unlike `truncationCeiling` it is not clamped to the 5,000 per-signal reach, so the two disagree exactly when a signal is broader than this tool can page. `search_continuation` is the `smithsonian_search` input (`{ query, filters? }`) that reproduces that fan-out's query exactly, and `smithsonian_search` applies `start` straight to the upstream offset with no depth cap — so it is the retrieval path for everything past the 5,000 reach. A fan-out whose upstream call failed is omitted (it has no known row count); `search_signals_used` still lists it.
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the *reachable* related pool — each signal's upstream match count is capped at its per-signal reach (5,000) before summing, so the ceiling never exceeds what `start` can retrieve. `notice` names both continuation tiers: `start` for the next page, `signals[].search_continuation` for a signal past the reach.
 
 **Errors:**
 - `not_found` (NotFound) — anchor object not found. Recovery: verify the ID via `smithsonian_search`.

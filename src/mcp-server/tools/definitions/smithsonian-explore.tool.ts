@@ -17,12 +17,12 @@ const SampleObjectSchema = z
     thumbnail_url: z.string().optional().describe('Thumbnail image URL if available.'),
     is_cc0: z.boolean().describe('True when the object is CC0 open access.'),
   })
-  .describe('A sample object from the first page of category matches.');
+  .describe('A sample object from the requested page of category matches.');
 
 export const smithsonianExplore = tool('smithsonian_explore', {
   title: 'Explore Smithsonian by Category',
   description:
-    'Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Returns an overview: total count, the first page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes — museum, culture, period, medium. Use as the entry point for open-ended research.',
+    'Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Returns an overview: total count, a page of matching objects, and a breakdown of which museums those page objects come from. Page through the full category with start and rows. Four browse modes — museum, culture, period, medium. Use as the entry point for open-ended research.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -43,6 +43,12 @@ export const smithsonianExplore = tool('smithsonian_explore', {
       .max(50)
       .default(10)
       .describe('Number of sample objects to return (default 10, max 50).'),
+    start: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Pagination offset — 0-indexed. Page contiguously with start = page × rows.'),
   }),
 
   output: z.object({
@@ -55,7 +61,9 @@ export const smithsonianExplore = tool('smithsonian_explore', {
     total_count: z.number().describe('Total number of Smithsonian objects matching this category.'),
     sample_objects: z
       .array(SampleObjectSchema)
-      .describe('The first page of objects matching the category, in upstream order.'),
+      .describe(
+        'The requested page of objects matching the category, in upstream order. Empty when start is past the end of the category.',
+      ),
     museum_breakdown: z
       .array(
         z
@@ -81,13 +89,19 @@ export const smithsonianExplore = tool('smithsonian_explore', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the sample was capped by the rows parameter.'),
+      .describe(
+        'True when matching objects remain past this page. False on a terminal or past-the-end page, where nothing is being withheld.',
+      ),
     shown: z.number().optional().describe('Number of sample objects returned.'),
     cap: z.number().optional().describe('The rows cap that was applied.'),
     truncationCeiling: z
       .number()
       .optional()
       .describe('Total matching objects (upper bound for omitted items).'),
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance naming the input that retrieves the objects this page omitted.'),
   },
 
   errors: [
@@ -135,14 +149,25 @@ export const smithsonianExplore = tool('smithsonian_explore', {
         break;
     }
 
-    ctx.log.info('Exploring Smithsonian', { mode: input.mode, value: input.value, filters, query });
+    ctx.log.info('Exploring Smithsonian', {
+      mode: input.mode,
+      value: input.value,
+      filters,
+      query,
+      start: input.start,
+    });
 
     const { rows: objects, rowCount } = await svc.search(
-      { query, rows: input.rows, start: 0, filters },
+      { query, rows: input.rows, start: input.start, filters },
       ctx,
     );
 
-    if (objects.length === 0) {
+    // Guard on the TRUE match count, not the page-local length. A start past the
+    // end of a real category returns an empty page with rowCount > 0 — normal
+    // pagination completion, not a category value outside the vocabulary. Firing
+    // no_results there would send the caller to smithsonian_list_terms to fix a
+    // value that was already correct.
+    if (rowCount === 0) {
       throw ctx.fail(
         'no_results',
         `No Smithsonian objects found for ${input.mode} "${input.value}".`,
@@ -189,8 +214,19 @@ export const smithsonianExplore = tool('smithsonian_explore', {
       samples: sampleObjects.length,
     });
 
-    if (sampleObjects.length < rowCount) {
-      ctx.enrich.truncated({ shown: sampleObjects.length, cap: input.rows, ceiling: rowCount });
+    // Account for the offset already consumed: objects remaining BEYOND this page,
+    // not merely a page smaller than the category. The page-local comparison would
+    // report truncated on the genuine last page (where length is rowCount − start)
+    // and on the past-the-end page the rowCount guard above now lets through.
+    if (input.start + sampleObjects.length < rowCount) {
+      ctx.enrich.truncated({
+        shown: sampleObjects.length,
+        cap: input.rows,
+        ceiling: rowCount,
+        guidance:
+          `${rowCount} objects match this category; this page shows ${sampleObjects.length} from offset ${input.start}. ` +
+          'Retrieve the rest by advancing start (start = page × rows, rows max 50).',
+      });
     }
 
     return {

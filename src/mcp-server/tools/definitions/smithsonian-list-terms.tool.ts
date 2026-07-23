@@ -64,7 +64,9 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
     truncated: z
       .boolean()
       .optional()
-      .describe('True when the term list was capped by the rows parameter.'),
+      .describe(
+        'True when matching terms remain past this page. False on a terminal or past-the-end page, where nothing is being withheld.',
+      ),
     shown: z.number().optional().describe('Number of terms returned in this page.'),
     cap: z.number().optional().describe('The rows cap that was applied.'),
     truncationCeiling: z
@@ -77,7 +79,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .string()
       .optional()
       .describe(
-        'Guidance when a contains filter matched no terms — how to broaden or drop the filter.',
+        'Guidance naming the input that retrieves the terms this page omitted, or how to broaden a contains filter that matched nothing.',
       ),
   },
 
@@ -122,6 +124,10 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
 
     ctx.log.info('Terms listed', { field: input.field, count: terms.length, total });
 
+    // These two branches both write the same enrichment `notice` key, so only the
+    // last to run would survive. They stay mutually exclusive by construction: the
+    // filtered-empty branch needs total === 0, and the truncation trigger below
+    // needs something past the page, which total === 0 can never satisfy.
     if (input.contains && total === 0) {
       ctx.enrich.notice(
         `No term in the "${input.field}" vocabulary contains "${input.contains}". ` +
@@ -129,8 +135,18 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       );
     }
 
-    if (terms.length < total) {
-      ctx.enrich.truncated({ shown: terms.length, cap: input.rows, ceiling: total });
+    // Account for the offset already consumed — terms remaining BEYOND this page,
+    // not merely a page smaller than the vocabulary. The page-local comparison
+    // reported truncated with shown: 0 on a past-the-end page (issue #30).
+    if (input.start + terms.length < total) {
+      ctx.enrich.truncated({
+        shown: terms.length,
+        cap: input.rows,
+        ceiling: total,
+        guidance:
+          `${total} terms match; this page shows ${terms.length} from offset ${input.start}. ` +
+          'Retrieve the rest by advancing start by rows, or narrow the vocabulary with contains.',
+      });
     }
 
     return { field: input.field, terms, total };

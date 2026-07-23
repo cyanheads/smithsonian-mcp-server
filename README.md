@@ -97,7 +97,8 @@ CC0-gated image access at multiple resolutions.
 Category-constrained browse for open-ended collection discovery.
 
 - Four modes: `museum` (by unit code, e.g. `"NASM"` — matched exactly, not by museum name), `culture` (e.g. `"Aztecs"`), `period` (decade, e.g. `"1940s"`), `medium` (object type, e.g. `"Paintings"`)
-- Returns total count, representative sample objects, and a museum breakdown showing which institutions hold matching items
+- Returns total count, a page of sample objects, and a museum breakdown showing which institutions hold matching items (computed from the current page)
+- Use `start` + `rows` for standard pagination (offset-based, `start = page × rows`, max 50 per page) — adjacent pages retrieve the objects a capped sample omits
 - Ideal entry point when the user wants to understand what the Smithsonian has about a topic
 
 ---
@@ -111,6 +112,7 @@ Cross-collection discovery via shared metadata signals.
 - Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
 - `similarity_signals` on each result show every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
 - Page past a truncated result with `start` — a 0-indexed offset into the interleaved related set; page contiguously with `start = page × limit` (each signal is reachable to a depth of 5,000, fetched in ≤1,000-row chunks; a deeper page can shift an object by a bounded amount near a seam). A truncated response reports `truncationCeiling` as an upper bound on the reachable related pool
+- `signals[]` breaks the fan-out down per signal: `row_count` is that signal's true upstream size (uncapped, so it can exceed the 5,000 reach) and `search_continuation` is the exact `smithsonian_search` input that retrieves the signal's full match set at any depth — the retrieval path past this tool's per-signal reach
 
 ---
 
