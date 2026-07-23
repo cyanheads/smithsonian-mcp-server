@@ -367,6 +367,15 @@ export class SmithsonianService {
     url: string,
     ctx: RequestContextLike,
     extraHeaders?: Record<string, string>,
+    /**
+     * Non-2xx statuses that are an expected outcome for this call, logged at
+     * `debug` instead of `error` (the status-mapped throw is unchanged). Only
+     * getContent passes this — a missing object is a real 404 from EDAN, and a
+     * bad object ID is a routine client mistake, not a server-side fault worth
+     * an error-level line in the digest. search/listTerms omit it: a 404 there
+     * would be genuinely unexpected.
+     */
+    expectedStatuses?: number[],
   ): Promise<T> {
     return withRetry(
       async () => {
@@ -374,6 +383,7 @@ export class SmithsonianService {
         const response = await fetchWithTimeout(url, 15_000, ctx, {
           headers: { Accept: 'application/json', ...extraHeaders },
           ...(signal && { signal }),
+          ...(expectedStatuses && { expectedStatuses }),
         });
         const raw = (await response.json()) as T;
 
@@ -473,7 +483,10 @@ export class SmithsonianService {
     // Pass API key as header (not query param) so it never appears in logs or errors.
     let raw: RawContentResponse;
     try {
-      raw = await this.get<RawContentResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
+      // EDAN returns a real HTTP 404 for a missing object; expect it so a bad ID
+      // logs at debug, not as a server error. The NotFound throw still fires and
+      // is rewrapped below with the caller's recovery hint.
+      raw = await this.get<RawContentResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey }, [404]);
     } catch (err: unknown) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
