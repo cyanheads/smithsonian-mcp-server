@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.18](changelog/0.1.x/0.1.18.md) — 2026-07-22
+
+Add smithsonian_find_related per-signal continuation and smithsonian_explore pagination; fix past-the-end no_results/truncation handling in search and list_terms; name the retrieval path in every truncation notice
+
 ## [0.1.17](changelog/0.1.x/0.1.17.md) — 2026-07-19
 
 Fix not_found errors missing their recovery hint, smithsonian_explore museum mode silently free-texting unrecognized values, and museum_name falling back to raw codes for most of the vocabulary; correct the online_only field description
