@@ -51,16 +51,16 @@ Organized around discovery and research workflows, not raw endpoints.
 
 | Tool | Behavior |
 |:---|:---|
-| `smithsonian_search` | Full-text across all 19.4M objects. Shortcut `query` for simple search; structured filters (museum, object_type, date_range, culture, place, medium, maker). Returns thumbnails, attribution, object IDs, and faceted counts so the agent narrows without a separate facet call. |
+| `smithsonian_search_objects` | Full-text across all 19.4M objects. Shortcut `query` for simple search; structured filters (museum, object_type, date_range, culture, place, medium, maker). Returns thumbnails, attribution, object IDs, and faceted counts so the agent narrows without a separate facet call. |
 | `smithsonian_get_object` | Full record by ID: title, description, date, materials, dimensions, provenance, exhibition history, unit, collection, credit line, image URLs (multi-resolution), related object IDs. |
-| `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Returns a category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. |
+| `smithsonian_browse_category` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Returns a category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. |
 | `smithsonian_find_related` | Given an object ID, find related items across collections via the API's relatedness data plus metadata similarity (culture, period, medium, maker, topic). Cross-museum discovery is the value-add. |
 | `smithsonian_get_image` | High-res IIIF image URL(s) at multiple resolutions. Open-access (CC0) objects only; states access status clearly when an object isn't open. |
 
 ## Design Notes & Requirements
 
 - **Curate output for the LLM's next decision** — the API returns large nested objects; don't pass through raw Elasticsearch hits. Format as structured markdown (title, date, museum, one-line description, thumbnail).
-- **`smithsonian_explore` uses the mode-consolidation pattern** — one tool with a category enum instead of four browse tools.
+- **`smithsonian_browse_category` uses the mode-consolidation pattern** — one tool with a category enum instead of four browse tools.
 - **Cross-collection discovery is the differentiator** — the raw relatedness field is shallow; the LLM reasons about deeper connections by combining metadata across objects.
 - **IIIF images** integrate with image-capable MCP clients — the model can describe the artifact photo.
 - Route large search results (some queries return thousands of objects) to DataCanvas.

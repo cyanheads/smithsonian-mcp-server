@@ -31,7 +31,7 @@
 
 > **A free `api.data.gov` API key is required.** Register at [https://api.data.gov/signup](https://api.data.gov/signup) — approval is instant. Set it as `SMITHSONIAN_API_KEY` in your MCP client config or `.env` file. The server will not start without it.
 >
-> **CC0 media gating:** `smithsonian_get_media` only returns CC0-licensed (open access) images. Use `smithsonian_search` with `filters.cc0_only: true` to find objects with downloadable media before calling it.
+> **CC0 media gating:** `smithsonian_get_media` only returns CC0-licensed (open access) images. Use `smithsonian_search_objects` with `filters.cc0_only: true` to find objects with downloadable media before calling it.
 
 ---
 
@@ -41,14 +41,14 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 
 | Tool | Description |
 |:---|:---|
-| `smithsonian_search` | Search across 19.4M objects by text query with optional filters (museum, type, decade, culture, place, online-only, CC0). Returns curated summaries with total count. |
+| `smithsonian_search_objects` | Search across 19.4M objects by text query with optional filters (museum, type, decade, culture, place, online-only, CC0). Returns curated summaries with total count. |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). |
 | `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
 | `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned — throws when none exist. |
-| `smithsonian_explore` | Browse collections by category (museum, culture, period, medium) with total count, sample objects, and museum breakdown. Entry point for open-ended research. |
+| `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
 | `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, maker, topic, and period signals. |
 
-### `smithsonian_search`
+### `smithsonian_search_objects`
 
 Full-text search with structured filters across the entire Smithsonian catalog.
 
@@ -68,7 +68,7 @@ Enumerate the valid term vocabulary for an indexed filter field before applying 
 - Smithsonian uses a controlled vocabulary (terms are often plural, e.g. `Paintings` not `Painting`) — grounding filter values here avoids empty results
 - Pass `contains` to filter the vocabulary by a case-insensitive substring — resolve a guessed value (e.g. `greek` → `Greek, Attic`) to its exact term(s) in one call, or confirm absence with an empty result
 - Paginate with `start` + `rows` (default 50 per page, max 100); large vocabularies like `place` have 100k+ terms
-- `object_type` is not enumerable upstream — discover object-type values from the `object_type` field in `smithsonian_search` results
+- `object_type` is not enumerable upstream — discover object-type values from the `object_type` field in `smithsonian_search_objects` results
 
 ---
 
@@ -76,7 +76,7 @@ Enumerate the valid term vocabulary for an indexed filter field before applying 
 
 Normalized catalog metadata for a single object.
 
-- Input: `record_id` from `smithsonian_search` — do not construct IDs manually
+- Input: `record_id` from `smithsonian_search_objects` — do not construct IDs manually
 - Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, exhibition history, accession identifiers, credit line, rights statement
 - Media summary included — call `smithsonian_get_media` for full image URLs
 
@@ -88,18 +88,19 @@ CC0-gated image access at multiple resolutions.
 
 - Only CC0-licensed images are returned; throws `Forbidden` when an object has media but none is CC0
 - Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions
-- Use `smithsonian_search` with `filters.cc0_only: true` before calling this tool
+- Use `smithsonian_search_objects` with `filters.cc0_only: true` before calling this tool
 
 ---
 
-### `smithsonian_explore`
+### `smithsonian_browse_category`
 
-Category-constrained browse for open-ended collection discovery.
+Paginated browse within one exact category. For open-ended or topic discovery, use `smithsonian_search_objects` instead.
 
-- Four modes: `museum` (by unit code, e.g. `"NASM"` — matched exactly, not by museum name), `culture` (e.g. `"Aztecs"`), `period` (decade, e.g. `"1940s"`), `medium` (object type, e.g. `"Paintings"`)
+- Four modes: `museum` (by unit code, e.g. `"NASM"` — matched exactly, not by museum name), `culture` (e.g. `"Aztecs"`), `period` (decade in `NNNNs` form, e.g. `"1940s"`), `medium` (object type, e.g. `"Paintings"`)
+- `value` must be an exact indexed category term — resolve `museum`, `culture`, and `period` vocabulary with `smithsonian_list_terms` first; `object_type` is not enumerable there, so harvest it from `smithsonian_search_objects` results
 - Returns total count, a page of sample objects, and a museum breakdown showing which institutions hold matching items (computed from the current page)
 - Use `start` + `rows` for standard pagination (offset-based, `start = page × rows`, max 50 per page) — adjacent pages retrieve the objects a capped sample omits
-- Ideal entry point when the user wants to understand what the Smithsonian has about a topic
+- A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint naming the exact next call that resolves it
 
 ---
 
@@ -112,7 +113,7 @@ Cross-collection discovery via shared metadata signals.
 - Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
 - `similarity_signals` on each result show every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
 - Page past a truncated result with `start` — a 0-indexed offset into the interleaved related set; page contiguously with `start = page × limit` (each signal is reachable to a depth of 5,000, fetched in ≤1,000-row chunks; a deeper page can shift an object by a bounded amount near a seam). A truncated response reports `truncationCeiling` as an upper bound on the reachable related pool
-- `signals[]` breaks the fan-out down per signal: `row_count` is that signal's true upstream size (uncapped, so it can exceed the 5,000 reach) and `search_continuation` is the exact `smithsonian_search` input that retrieves the signal's full match set at any depth — the retrieval path past this tool's per-signal reach
+- `signals[]` breaks the fan-out down per signal: `row_count` is that signal's true upstream size (uncapped, so it can exceed the 5,000 reach) and `search_continuation` is the exact `smithsonian_search_objects` input that retrieves the signal's full match set at any depth — the retrieval path past this tool's per-signal reach
 
 ---
 

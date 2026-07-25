@@ -47,7 +47,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
         z
           .string()
           .describe(
-            'A term value — pass directly as the filter value in smithsonian_search or smithsonian_explore.',
+            'A term value — pass directly as the filter value in smithsonian_search_objects or smithsonian_browse_category.',
           ),
       )
       .describe(

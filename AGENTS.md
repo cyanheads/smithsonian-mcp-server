@@ -48,7 +48,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
 
-export const smithsonianSearch = tool('smithsonian_search', {
+export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
   description: 'Search across 19.4 million Smithsonian objects by text query and optional filters.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
@@ -89,7 +89,7 @@ import { notFound } from '@cyanheads/mcp-ts-core/errors';
 
 export const smithsonianObject = resource('smithsonian://{recordId}', {
   description: 'Fetch a Smithsonian catalog object by record ID.',
-  params: z.object({ recordId: z.string().describe('Object record_id from smithsonian_search.') }),
+  params: z.object({ recordId: z.string().describe('Object record_id from smithsonian_search_objects.') }),
   async handler(params, ctx) {
     const svc = getSmithsonianService();
     const raw = await svc.getContent(params.recordId, ctx);
@@ -223,20 +223,21 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                                 # createApp() entry point
   config/
-    server-config.ts                    # SMITHSONIAN_API_KEY, SMITHSONIAN_BASE_URL
+    server-config.ts                       # SMITHSONIAN_API_KEY, SMITHSONIAN_BASE_URL
   services/
     smithsonian/
-      smithsonian-service.ts            # Smithsonian API client (init/accessor pattern)
-      types.ts                          # Domain types (ObjectSummary, FullObject, ImageItem)
+      smithsonian-service.ts               # Smithsonian API client (init/accessor pattern)
+      types.ts                             # Domain types (ObjectSummary, FullObject, ImageItem)
   mcp-server/
     tools/definitions/
-      smithsonian-search.tool.ts        # smithsonian_search
-      smithsonian-get-object.tool.ts    # smithsonian_get_object
-      smithsonian-get-media.tool.ts     # smithsonian_get_media
-      smithsonian-explore.tool.ts       # smithsonian_explore
-      smithsonian-find-related.tool.ts  # smithsonian_find_related
+      smithsonian-search-objects.tool.ts   # smithsonian_search_objects
+      smithsonian-list-terms.tool.ts       # smithsonian_list_terms
+      smithsonian-get-object.tool.ts       # smithsonian_get_object
+      smithsonian-get-media.tool.ts        # smithsonian_get_media
+      smithsonian-browse-category.tool.ts  # smithsonian_browse_category
+      smithsonian-find-related.tool.ts     # smithsonian_find_related
 ```
 
 ---

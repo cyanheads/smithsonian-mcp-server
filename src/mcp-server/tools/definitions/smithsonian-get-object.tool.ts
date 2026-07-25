@@ -10,13 +10,15 @@ import { getSmithsonianService } from '@/services/smithsonian/smithsonian-servic
 export const smithsonianGetObject = tool('smithsonian_get_object', {
   title: 'Get Smithsonian Object',
   description:
-    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search results). Returns the exposed catalog fields — title, dates, description, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. The media summary is a count; full image URLs come from smithsonian_get_media.',
+    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns the exposed catalog fields — title, dates, description, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. The media summary is a count; full image URLs come from smithsonian_get_media.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
     id: z
       .string()
-      .describe('Object record_id from smithsonian_search results (e.g. "nasm_A19670093000").'),
+      .describe(
+        'Object record_id from smithsonian_search_objects results (e.g. "nasm_A19670093000").',
+      ),
   }),
 
   output: z.object({
@@ -135,14 +137,15 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'No object with the given ID exists in the Smithsonian catalog.',
-      recovery: 'Verify the ID via smithsonian_search and use the record_id from search results.',
+      recovery:
+        'Verify the ID via smithsonian_search_objects and use the record_id from search results.',
     },
     {
       reason: 'invalid_id',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The ID format is clearly malformed (empty string, whitespace only).',
       recovery:
-        'Use record_id values directly from smithsonian_search results — do not construct IDs manually.',
+        'Use record_id values directly from smithsonian_search_objects results — do not construct IDs manually.',
     },
   ],
 

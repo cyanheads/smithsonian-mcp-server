@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-07-10 22:19:54
+Generated on: 2026-07-25 09:36:31
 
 ```text
 smithsonian-mcp-server/
@@ -137,12 +137,12 @@ smithsonian-mcp-server/
 │   │   │   └── definitions/
 │   │   └── tools/
 │   │       └── definitions/
-│   │           ├── smithsonian-explore.tool.ts
+│   │           ├── smithsonian-browse-category.tool.ts
 │   │           ├── smithsonian-find-related.tool.ts
 │   │           ├── smithsonian-get-media.tool.ts
 │   │           ├── smithsonian-get-object.tool.ts
 │   │           ├── smithsonian-list-terms.tool.ts
-│   │           └── smithsonian-search.tool.ts
+│   │           └── smithsonian-search-objects.tool.ts
 │   ├── services/
 │   │   └── smithsonian/
 │   │       ├── smithsonian-service.ts
@@ -152,12 +152,12 @@ smithsonian-mcp-server/
 │   ├── mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
-│   │           ├── smithsonian-explore.tool.test.ts
+│   │           ├── smithsonian-browse-category.tool.test.ts
 │   │           ├── smithsonian-find-related.tool.test.ts
 │   │           ├── smithsonian-get-media.tool.test.ts
 │   │           ├── smithsonian-get-object.tool.test.ts
 │   │           ├── smithsonian-list-terms.tool.test.ts
-│   │           └── smithsonian-search.tool.test.ts
+│   │           └── smithsonian-search-objects.tool.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── services/

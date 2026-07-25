@@ -16,10 +16,10 @@
 
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
-| `smithsonian_search` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
+| `smithsonian_search_objects` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms; `contains` narrows the vocabulary by a case-insensitive substring. | `field` (unit_code, culture, place, date, online_media_type), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
 | `smithsonian_get_object` | Normalized metadata projection by ID: title, description, dates, materials, dimensions, exhibition, credit, and a media summary (count + CC0 image count). | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
-| `smithsonian_explore` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Searches a constrained query internally and returns category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound) |
+| `smithsonian_browse_category` | Paginated browse within one exact category. Mode: `museum` \| `culture` \| `period` \| `medium`; `value` must be an exact indexed category term, not free text. Searches a constrained query internally and returns the category total, a page of matching objects, and a museum breakdown of that page. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `invalid_category` (ValidationError) |
 | `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, maker, topics). Returns up to 20 related objects, each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
@@ -53,10 +53,10 @@ The server earns standalone status: single-source, but with massive cross-collec
 
 | Noun | Operations |
 |:-----|:-----------|
-| Object | search (by text + filters), get (by ID), explore (by category), find-related (by metadata similarity) |
+| Object | search (by text + filters), get (by ID), browse (by exact category), find-related (by metadata similarity) |
 | Media | get-images (by object ID, CC0 only) |
 
-The `smithsonian_explore` tool is a workflow over the `search` operation: it constructs a category-constrained search and returns an enriched overview rather than exposing a separate browse API endpoint (which doesn't exist in the open API).
+The `smithsonian_browse_category` tool is a workflow over the `search` operation: it constructs a category-constrained search and returns an enriched overview rather than exposing a separate browse API endpoint (which doesn't exist in the open API).
 
 `smithsonian_find_related` is a multi-step workflow: fetch anchor object → extract metadata signals → fan-out searches → deduplicate and interleave.
 
@@ -79,10 +79,10 @@ Single service — one API, one base URL, one auth pattern. Two primary methods 
 
 1. Config (`src/config/server-config.ts`) — `SMITHSONIAN_API_KEY`, base URL. Hard-fail on missing key.
 2. `SmithsonianService` — `search()` + `getContent()` with retry/backoff, URL construction, API key injection, response normalization helpers (flatten `freetext[]` label-content arrays, extract media, check CC0).
-3. `smithsonian_search` — search returning up to `rows` (≤100) curated summaries with offset pagination.
+3. `smithsonian_search_objects` — search returning up to `rows` (≤100) curated summaries with offset pagination.
 4. `smithsonian_get_object` — single content fetch with full field normalization.
 5. `smithsonian_get_media` — extract and gate images from a fetched object.
-6. `smithsonian_explore` — mode-dispatch to constrained searches.
+6. `smithsonian_browse_category` — mode-dispatch to constrained searches.
 7. `smithsonian_find_related` — multi-search fan-out.
 
 Each step is independently testable.
@@ -91,7 +91,7 @@ Each step is independently testable.
 
 ## Tool Detail
 
-### `smithsonian_search`
+### `smithsonian_search_objects`
 
 **Description:** Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
 
@@ -123,10 +123,10 @@ Each step is independently testable.
 
 ### `smithsonian_get_object`
 
-**Description:** Fetch a normalized catalog metadata projection for a Smithsonian object by its `record_id` (from `smithsonian_search` results). Returns the exposed catalog fields: title, dates, description, makers, materials, dimensions, place and culture associations, topics, exhibition history, credit line, accession identifiers, rights statement, and a curated media summary (count, CC0 status, thumbnail). The `record_id` uses the format returned by search — do not manually construct IDs.
+**Description:** Fetch a normalized catalog metadata projection for a Smithsonian object by its `record_id` (from `smithsonian_search_objects` results). Returns the exposed catalog fields: title, dates, description, makers, materials, dimensions, place and culture associations, topics, exhibition history, credit line, accession identifiers, rights statement, and a curated media summary (count, CC0 status, thumbnail). The `record_id` uses the format returned by search — do not manually construct IDs.
 
 **Input:**
-- `id: string` — Object `record_id` as returned by `smithsonian_search` (e.g. `"nasm_A19670093000"`). The service prepends `edanmdm:` automatically.
+- `id: string` — Object `record_id` as returned by `smithsonian_search_objects` (e.g. `"nasm_A19670093000"`). The service prepends `edanmdm:` automatically.
 
 **Output:**
 - `record_id`, `title`, `unit_code`, `museum_name`
@@ -147,23 +147,23 @@ Each step is independently testable.
 - `media_summary` — `{ count, cc0_image_count, has_cc0_images, thumbnail_url }` — `count` is the raw total across all media types (images, 3D models, video); `cc0_image_count` is what `smithsonian_get_media` returns, so the two reconcile. Call `smithsonian_get_media` for the full image list
 
 **Errors:**
-- `not_found` (NotFound) — no object with that ID in the catalog. Recovery: verify the ID via `smithsonian_search`.
-- `invalid_id` (ValidationError) — ID format is clearly malformed. Recovery: use `record_id` values from `smithsonian_search` results directly.
+- `not_found` (NotFound) — no object with that ID in the catalog. Recovery: verify the ID via `smithsonian_search_objects`.
+- `invalid_id` (ValidationError) — ID format is clearly malformed. Recovery: use `record_id` values from `smithsonian_search_objects` results directly.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
 ---
 
-### `smithsonian_explore`
+### `smithsonian_browse_category`
 
-**Description:** Browse Smithsonian collections by category to answer "what does the Smithsonian have about X?" questions. Returns an overview: total count, the first page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes: `museum` (by unit code), `culture` (by culture term), `period` (by decade, e.g. "1920s"), `medium` (by object type). Use as the entry point for open-ended research rather than a specific query.
+**Description:** Browse Smithsonian objects within one exact category. Returns the category total count, the requested page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes: `museum` (by unit code), `culture` (by culture term), `period` (by decade, e.g. "1920s"), `medium` (by object type). Every mode matches an exact indexed facet value — `smithsonian_search_objects` is the entry point for open-ended or topic discovery, and `smithsonian_list_terms` is the preparation step that resolves museum, culture, and date vocabulary.
 
 **Input:**
 - `mode: "museum" | "culture" | "period" | "medium"` — browse dimension.
 - `value: string` — category value appropriate to the mode:
   - `museum`: unit code (`"NASM"`, `"NMNHBIRDS"`), applied verbatim as a `unit_code` filter — matched exactly and case-sensitively, never as a museum name
   - `culture`: culture term (`"Aztec"`, `"Sioux"`, `"Japanese"`)
-  - `period`: decade string (`"1940s"`, `"1860s"`)
+  - `period`: decade in `"NNNNs"` form (`"1940s"`, `"1860s"`) — validated on the input object for this mode only, since `value` is polymorphic across modes and can't carry a field-level pattern
   - `medium`: object type, usually plural (`"Paintings"`, `"Aircraft"`)
 - `rows?: number` — sample objects to return (default 10, max 50).
 - `start?: number` — pagination offset into the category's match set (default 0, 0-indexed). Page contiguously with `start = page × rows`; the category query and upstream ordering are identical across pages, so adjacent pages reconstruct the full set gap-free. A `start` past the end returns a successful empty page, not an error.
@@ -175,7 +175,7 @@ Each step is independently testable.
 - Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names `start` as the retrieval path
 
 **Errors:**
-- `no_results` (NotFound) — the category matches nothing at all (`rowCount === 0`). Recovery: try a broader value, check spelling, or switch mode. Not raised for a `start` past the end of a real category, which is normal pagination completion.
+- `invalid_category` (ValidationError) — the category matches nothing at all (`rowCount === 0`). A browse category is an exact indexed facet, so a zero match means the supplied value is unusable, not that an object is missing. Recovery is mode-specific and names the literal next call: `museum` / `culture` / `period` route to `smithsonian_list_terms { field, contains: value }` — except a spaced `museum` value, which is a museum name rather than a code and can never be a `contains` substring of one, so it routes to the unfiltered `smithsonian_list_terms { field: "unit_code" }` vocabulary (48 codes, one page); `medium` names the `object_type` values harvested from re-running the value as a free-text search, falling back to routing the caller to that search when the harvest is empty. Candidates are listed, never auto-selected. Not raised for a `start` past the end of a real category, which is normal pagination completion.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -186,7 +186,7 @@ Each step is independently testable.
 **Description:** Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, maker names, and topic terms. Each related object is tagged with the signals that connected it to the anchor. Cross-museum discovery is the differentiator — the anchor may be NASM aerospace, but related objects span NMNH, SAAM, and NMAH.
 
 **Input:**
-- `id: string` — `record_id` of the anchor object (from `smithsonian_search` or `smithsonian_get_object`).
+- `id: string` — `record_id` of the anchor object (from `smithsonian_search_objects` or `smithsonian_get_object`).
 - `limit?: number` — max related objects to return (default 10, max 20).
 - `start?: number` — pagination offset into the interleaved related-object sequence (default 0). Page contiguously with `start = page × limit`: page N+1 continues where page N ended. Each contributing signal is reachable to a depth of 5,000 objects, fetched from upstream in ≤1,000-row chunks. Near a seam a bounded number of objects (up to the active-signal count) can shift by one page, since a deeper page fetches more per signal and may reallocate an object that ranks very differently across signals. Beyond 5,000 matches for a signal, `truncated` stays true but deeper pages aren't reachable.
 
@@ -194,11 +194,11 @@ Each step is independently testable.
 - `anchor` — summary of the anchor object (`{ record_id, title, unit_code }`)
 - `related[]` — `{ record_id, title, date, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
 - `search_signals_used[]` — which metadata fields drove the fan-out searches
-- `signals[]` — per-signal breakdown of every fan-out that returned: `{ signal, row_count, search_continuation }`. `row_count` is the signal's true upstream match count, uncapped — unlike `truncationCeiling` it is not clamped to the 5,000 per-signal reach, so the two disagree exactly when a signal is broader than this tool can page. `search_continuation` is the `smithsonian_search` input (`{ query, filters? }`) that reproduces that fan-out's query exactly, and `smithsonian_search` applies `start` straight to the upstream offset with no depth cap — so it is the retrieval path for everything past the 5,000 reach. A fan-out whose upstream call failed is omitted (it has no known row count); `search_signals_used` still lists it.
+- `signals[]` — per-signal breakdown of every fan-out that returned: `{ signal, row_count, search_continuation }`. `row_count` is the signal's true upstream match count, uncapped — unlike `truncationCeiling` it is not clamped to the 5,000 per-signal reach, so the two disagree exactly when a signal is broader than this tool can page. `search_continuation` is the `smithsonian_search_objects` input (`{ query, filters? }`) that reproduces that fan-out's query exactly, and `smithsonian_search_objects` applies `start` straight to the upstream offset with no depth cap — so it is the retrieval path for everything past the 5,000 reach. A fan-out whose upstream call failed is omitted (it has no known row count); `search_signals_used` still lists it.
 - Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the *reachable* related pool — each signal's upstream match count is capped at its per-signal reach (5,000) before summing, so the ceiling never exceeds what `start` can retrieve. `notice` names both continuation tiers: `start` for the next page, `signals[].search_continuation` for a signal past the reach.
 
 **Errors:**
-- `not_found` (NotFound) — anchor object not found. Recovery: verify the ID via `smithsonian_search`.
+- `not_found` (NotFound) — anchor object not found. Recovery: verify the ID via `smithsonian_search_objects`.
 - `invalid_id` (ValidationError) — ID format is clearly malformed.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
@@ -226,9 +226,9 @@ Each step is independently testable.
   - `high_res_tiff` — `{ url, width, height }` — archival TIFF when available
 
 **Errors:**
-- `not_found` (NotFound) — object not in catalog. Recovery: verify via `smithsonian_search`.
+- `not_found` (NotFound) — object not in catalog. Recovery: verify via `smithsonian_search_objects`.
 - `no_media` (NotFound) — object found but has no online media. Recovery: the physical object may not have been digitized.
-- `not_cc0` (Forbidden) — object found with media, but none of the media is CC0. Recovery: use `smithsonian_search` with `filters.cc0_only: true` to find CC0 objects.
+- `not_cc0` (Forbidden) — object found with media, but none of the media is CC0. Recovery: use `smithsonian_search_objects` with `filters.cc0_only: true` to find CC0 objects.
 - `invalid_id` (ValidationError) — ID format is clearly malformed.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
@@ -257,9 +257,9 @@ Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully.
 
 The idea doc referenced IIIF image manifests. Live probing shows the Smithsonian IDS (`ids.si.edu/ids/deliveryService`) does NOT serve IIIF manifests — it's a proprietary delivery service. Images are accessed via direct download URLs with size suffixes (`_thumb`, `_screen`, `.jpg`, `.tif`). The `smithsonian_get_media` tool exposes these URLs directly, which works well for image-capable MCP clients.
 
-### `smithsonian_explore` is a search workflow, not a browse endpoint
+### `smithsonian_browse_category` is a search workflow, not a browse endpoint
 
-The idea doc assumed a category browse endpoint. Live probing confirmed the `/terms` and `/category/search` endpoints return 404 — the open API does not expose category hierarchies. The `smithsonian_explore` tool constructs its overview by running a constrained `search` query using the mode as a filter field. This loses some richness (no true hierarchical browsing) but delivers the same agent goal: "show me what the Smithsonian has in category X."
+The idea doc assumed a category browse endpoint. Live probing confirmed the `/terms` and `/category/search` endpoints return 404 — the open API does not expose category hierarchies. The `smithsonian_browse_category` tool constructs its overview by running a constrained `search` query using the mode as a filter field. This loses some richness (no true hierarchical browsing) but delivers the same agent goal: "show me what the Smithsonian has in category X."
 
 ### `smithsonian_get_media` is a separate tool, not merged into `smithsonian_get_object`
 
@@ -269,13 +269,17 @@ The object endpoint returns a `media_summary` (count, cc0_image_count, has_cc0_i
 
 The idea doc used `smithsonian_get_image`. Renamed to `smithsonian_get_media` — the API technically supports Videos and 3D Images too (surfaced in `indexedStructured.online_media_type`), and the IDS returns multiple images per call. The current implementation focuses on Images; the name leaves room for future expansion without a breaking rename.
 
+### Rename from `smithsonian_search` / `smithsonian_explore` to `smithsonian_search_objects` / `smithsonian_browse_category`
+
+The two-word names presented free-text search and exact-category browse as peer starting points, and "explore" read as the open-ended entry point while the handler required one exact, case-sensitive controlled-vocabulary value — so agents routinely picked it first and collected repeated errors. The three-word names state the role: `search_objects` is the sole recommended start for open-ended discovery, `browse_category` pages within a category the caller has already resolved. No compatibility aliases were kept — retaining the old names would preserve the ambiguous affordance and advertise duplicate discovery tools.
+
 ### `record_id` vs. `url` for IDs
 
 The API response has two ID-like fields: `url` (e.g. `"edanmdm:nasm_A19670093000"`) and `content.descriptiveNonRepeating.record_ID` (e.g. `"nasm_A19670093000"`). The content endpoint accepts the full `edanmdm:` prefixed URL. The design uses `record_id` (the shorter form) as the identifier agents work with; the service layer prepends `edanmdm:` when calling the content endpoint. This matches the observable SI URL patterns (e.g., `si.edu/object/...:nasm_A19670093000`).
 
 ### No DataCanvas — direct paginated returns
 
-An earlier iteration spilled large result sets to a DuckDB-backed DataCanvas (`rows > 20` routed the full page to a SQL-queryable table). It was removed: the result set is catalog object summaries capped at ≤100 rows, where the workflow is find-the-object-then-drill-in, not aggregate-over-rows — the wrong shape for SQL, and `smithsonian_explore` already covers the cross-museum breakdown case. `smithsonian_search` now returns up to `rows` (≤100) summaries directly; page through larger result sets with `start` + `rows`.
+An earlier iteration spilled large result sets to a DuckDB-backed DataCanvas (`rows > 20` routed the full page to a SQL-queryable table). It was removed: the result set is catalog object summaries capped at ≤100 rows, where the workflow is find-the-object-then-drill-in, not aggregate-over-rows — the wrong shape for SQL, and `smithsonian_browse_category` already covers the cross-museum breakdown case. `smithsonian_search_objects` now returns up to `rows` (≤100) summaries directly; page through larger result sets with `start` + `rows`.
 
 ### CC0 gating is object-level AND image-level
 
@@ -289,7 +293,7 @@ In practice they agree, but the design checks both. `smithsonian_get_media` surf
 
 ## Known Limitations
 
-- **No category browse endpoint**: The open API doesn't expose `/terms` or `/category/search`. `smithsonian_explore` works around this via constrained search but can't return true hierarchical category trees.
+- **No category browse endpoint**: The open API doesn't expose `/terms` or `/category/search`. `smithsonian_browse_category` works around this via constrained search but can't return true hierarchical category trees.
 - **Filter values require prior knowledge**: Filters like `unit_code`, `object_type`, `culture` accept arbitrary strings but there's no discovery endpoint to list valid values. The design notes this in parameter descriptions and points agents to search first to discover real values.
 - **Rate limits**: The free api.data.gov tier has ~1,000 req/hr. The `smithsonian_find_related` workflow makes ~5 calls for a shallow page — more when paging a broad signal deep (each 1,000-row chunk is one call, capped per signal); a session of 50 related searches could hit the hourly limit. The service layer must implement backoff on 429.
 - **Objects without media**: A significant portion of catalog objects have no digitized media — `smithsonian_get_media` returns `no_media` for these.
@@ -303,7 +307,7 @@ In practice they agree, but the design checks both. `smithsonian_get_media` surf
 
 | Endpoint | Method | Used By |
 |:---------|:-------|:--------|
-| `/search` | GET | `smithsonian_search`, `smithsonian_explore`, `smithsonian_find_related` |
+| `/search` | GET | `smithsonian_search_objects`, `smithsonian_browse_category`, `smithsonian_find_related` |
 | `/content/{id}` | GET | `smithsonian_get_object`, `smithsonian_get_media`, `smithsonian_find_related` |
 
 ### Search parameters

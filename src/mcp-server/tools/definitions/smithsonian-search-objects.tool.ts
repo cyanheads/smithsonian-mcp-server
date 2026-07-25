@@ -1,6 +1,6 @@
 /**
- * @fileoverview smithsonian_search tool — full-text search across 19.4M Smithsonian objects.
- * @module mcp-server/tools/definitions/smithsonian-search.tool
+ * @fileoverview smithsonian_search_objects tool — full-text search across 19.4M Smithsonian objects.
+ * @module mcp-server/tools/definitions/smithsonian-search-objects.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
@@ -108,10 +108,10 @@ const ObjectSummarySchema = z
   })
   .describe('Curated summary of a single Smithsonian catalog object.');
 
-export const smithsonianSearch = tool('smithsonian_search', {
-  title: 'Search Smithsonian Collections',
+export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
+  title: 'Search Smithsonian Objects',
   description:
-    'Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media.',
+    'Recommended first step for open-ended or topic discovery: free-text search across 19.4 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, decade, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, decade, or object type — use smithsonian_browse_category instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -132,7 +132,7 @@ export const smithsonianSearch = tool('smithsonian_search', {
           .string()
           .optional()
           .describe(
-            'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search results.',
+            'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search_objects results.',
           ),
         date_decade: z
           .string()
@@ -230,9 +230,9 @@ export const smithsonianSearch = tool('smithsonian_search', {
     // Multi-word values are quoted; single tokens are bare.
     const filters: string[] = [];
     const f = input.filters;
-    if (f?.unit_code) filters.push(`unit_code:${f.unit_code}`);
+    if (f?.unit_code) filters.push(luceneField('unit_code', f.unit_code));
     if (f?.object_type) filters.push(luceneField('object_type', f.object_type));
-    if (f?.date_decade) filters.push(`date:${f.date_decade}`);
+    if (f?.date_decade) filters.push(luceneField('date', f.date_decade));
     if (f?.culture) filters.push(luceneField('culture', f.culture));
     if (f?.place) filters.push(luceneField('place', f.place));
     if (f?.online_only) filters.push('online_media_type:*');

@@ -8,7 +8,7 @@ import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
-import { smithsonianSearch } from '@/mcp-server/tools/definitions/smithsonian-search.tool.js';
+import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, RawEDAN } from '@/services/smithsonian/types.js';
 
@@ -799,8 +799,8 @@ describe('smithsonianFindRelated', () => {
     expect(result.signals[0]?.row_count).toBeGreaterThan(5000);
   });
 
-  it('signal continuations reproduce each fan-out as smithsonian_search input (issue #18)', async () => {
-    // Every fan-out query has a 1:1 equivalent in smithsonian_search's query/filters
+  it('signal continuations reproduce each fan-out as smithsonian_search_objects input (issue #18)', async () => {
+    // Every fan-out query has a 1:1 equivalent in smithsonian_search_objects's query/filters
     // shape — the retrieval path past this tool's per-signal reach. Each of the four
     // signal kinds maps differently, so all four are pinned.
     const anchorRaw = makeAnchorRaw();
@@ -838,7 +838,7 @@ describe('smithsonianFindRelated', () => {
   });
 
   it('falls back to exact Lucene when the period is not decade-shaped (issue #18)', async () => {
-    // smithsonian_search's date_decade only accepts "NNNNs", but most EDAN date terms
+    // smithsonian_search_objects's date_decade only accepts "NNNNs", but most EDAN date terms
     // are other shapes (year ranges, BCE values). The structured filter cannot carry
     // those, so the continuation must degrade to the fan-out's exact Lucene rather
     // than advertise an input the sibling tool rejects.
@@ -864,17 +864,19 @@ describe('smithsonianFindRelated', () => {
     );
 
     const periodSignal = result.signals.find((s) => s.signal.startsWith('period:'));
-    // The exact q the fan-out sent — smithsonian_search forwards `query` verbatim
+    // The exact q the fan-out sent — smithsonian_search_objects forwards `query` verbatim
     // when no filters accompany it, so this reproduces the identical upstream call.
     expect(periodSignal?.search_continuation).toEqual({
       query: 'date:1000-1099 AND object_type:Aircraft',
     });
-    // The whole continuation must parse as smithsonian_search input; the rejected
+    // The whole continuation must parse as smithsonian_search_objects input; the rejected
     // date_decade shape is exactly what this fallback exists to avoid.
-    expect(() => smithsonianSearch.input.parse(periodSignal?.search_continuation)).not.toThrow();
+    expect(() =>
+      smithsonianSearchObjects.input.parse(periodSignal?.search_continuation),
+    ).not.toThrow();
   });
 
-  it('every signal continuation parses as smithsonian_search input (issue #18)', async () => {
+  it('every signal continuation parses as smithsonian_search_objects input (issue #18)', async () => {
     // The disclosure is only useful if the sibling tool accepts it verbatim.
     const anchorRaw = makeAnchorRaw();
     anchorRaw.content!.indexedStructured!.culture = ['Plains Indian'];
@@ -900,7 +902,7 @@ describe('smithsonianFindRelated', () => {
 
     expect(result.signals.length).toBeGreaterThan(0);
     for (const s of result.signals) {
-      expect(() => smithsonianSearch.input.parse(s.search_continuation)).not.toThrow();
+      expect(() => smithsonianSearchObjects.input.parse(s.search_continuation)).not.toThrow();
     }
   });
 
@@ -1024,7 +1026,7 @@ describe('smithsonianFindRelated', () => {
 
   it('format renders every signal continuation field into content[] (issue #18)', () => {
     // content[]-only clients read format() alone, so the row_count and the exact
-    // smithsonian_search arguments must survive the markdown render — a filter key
+    // smithsonian_search_objects arguments must survive the markdown render — a filter key
     // rendered in an exclusive branch would reach structuredContent and nothing else.
     const output = {
       anchor: { record_id: 'nasm_TEST001', title: 'Anchor Object', unit_code: 'NASM' },
@@ -1050,7 +1052,7 @@ describe('smithsonianFindRelated', () => {
       .map((b) => (b.type === 'text' ? b.text : ''))
       .join('');
     expect(text).toContain('14662');
-    expect(text).toContain('smithsonian_search');
+    expect(text).toContain('smithsonian_search_objects');
     expect(text).toContain('culture: "American"');
     // Both filter keys of the same continuation render together, not as alternatives.
     expect(text).toContain('date_decade: "1960s"');

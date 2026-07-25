@@ -1,12 +1,12 @@
 /**
- * @fileoverview Tests for smithsonian_search tool.
- * @module tests/mcp-server/tools/definitions/smithsonian-search.tool.test
+ * @fileoverview Tests for smithsonian_search_objects tool.
+ * @module tests/mcp-server/tools/definitions/smithsonian-search-objects.tool.test
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { smithsonianSearch } from '@/mcp-server/tools/definitions/smithsonian-search.tool.js';
+import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary } from '@/services/smithsonian/types.js';
 
@@ -24,7 +24,7 @@ function makeObjectSummary(id = 'nasm_TEST001'): ObjectSummary {
   };
 }
 
-describe('smithsonianSearch', () => {
+describe('smithsonianSearchObjects', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -34,9 +34,9 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 100 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'aircraft' });
-    const result = await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'aircraft' });
+    const result = await smithsonianSearchObjects.handler(input, ctx);
 
     expect(result.objects).toHaveLength(1);
     expect(result.objects[0]?.record_id).toBe('nasm_TEST001');
@@ -50,9 +50,9 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'quilt', rows: 25 });
-    const result = await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'quilt', rows: 25 });
+    const result = await smithsonianSearchObjects.handler(input, ctx);
 
     expect(result.objects).toHaveLength(25);
     expect(searchFn.mock.calls[0]?.[0]).toMatchObject({ rows: 25 });
@@ -63,11 +63,13 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'xyzzy_no_results_ever' });
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'xyzzy_no_results_ever' });
     // The declared contract recovery must reach the wire as data.recovery.hint.
-    const expectedHint = smithsonianSearch.errors?.find((e) => e.reason === 'no_results')?.recovery;
-    await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
+    const expectedHint = smithsonianSearchObjects.errors?.find(
+      (e) => e.reason === 'no_results',
+    )?.recovery;
+    await expect(smithsonianSearchObjects.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_results', recovery: { hint: expectedHint } },
     });
   });
@@ -81,9 +83,13 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 400 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', start: 10000, rows: 10 });
-    const result = await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
+      query: 'Apollo 11',
+      start: 10000,
+      rows: 10,
+    });
+    const result = await smithsonianSearchObjects.handler(input, ctx);
 
     expect(result.objects).toEqual([]);
     expect(result.total_count).toBe(400);
@@ -96,9 +102,12 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'xyzzy_no_such_thing', start: 500 });
-    await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
+      query: 'xyzzy_no_such_thing',
+      start: 500,
+    });
+    await expect(smithsonianSearchObjects.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_results' },
     });
   });
@@ -111,9 +120,13 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 400 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', start: 10000, rows: 10 });
-    await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
+      query: 'Apollo 11',
+      start: 10000,
+      rows: 10,
+    });
+    await smithsonianSearchObjects.handler(input, ctx);
 
     expect(getEnrichment(ctx).truncated).toBeUndefined();
   });
@@ -125,9 +138,9 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: tail, rowCount: 25 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'quilt', start: 20, rows: 10 });
-    await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'quilt', start: 20, rows: 10 });
+    await smithsonianSearchObjects.handler(input, ctx);
 
     expect(getEnrichment(ctx).truncated).toBeUndefined();
   });
@@ -138,9 +151,9 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: page, rowCount: 400 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', start: 20, rows: 10 });
-    await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'Apollo 11', start: 20, rows: 10 });
+    await smithsonianSearchObjects.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.truncated).toBe(true);
@@ -157,11 +170,13 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: page, rowCount: 400 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'Apollo 11', rows: 10 });
-    const result = await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'Apollo 11', rows: 10 });
+    const result = await smithsonianSearchObjects.handler(input, ctx);
 
-    const effectiveOutput = smithsonianSearch.output.extend(smithsonianSearch.enrichment!);
+    const effectiveOutput = smithsonianSearchObjects.output.extend(
+      smithsonianSearchObjects.enrichment!,
+    );
     const onTheWire = effectiveOutput.parse({ ...result, ...getEnrichment(ctx) });
     expect(onTheWire.notice).toContain('start');
     expect(onTheWire.notice).not.toBe(
@@ -210,12 +225,12 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'Greek',
       filters: { object_type: 'Painting' },
     });
-    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+    const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
     expect(err.data?.reason).toBe('invalid_filter');
     const hint = err.data?.recovery?.hint as string;
@@ -237,15 +252,15 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'quilt',
       filters: { object_type: 'Painting' },
     });
-    const expectedHint = smithsonianSearch.errors?.find(
+    const expectedHint = smithsonianSearchObjects.errors?.find(
       (e) => e.reason === 'invalid_filter',
     )?.recovery;
-    await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
+    await expect(smithsonianSearchObjects.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_filter', recovery: { hint: expectedHint } },
     });
   });
@@ -261,15 +276,15 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'quilt',
       filters: { object_type: 'Painting' },
     });
-    const expectedHint = smithsonianSearch.errors?.find(
+    const expectedHint = smithsonianSearchObjects.errors?.find(
       (e) => e.reason === 'invalid_filter',
     )?.recovery;
-    await expect(smithsonianSearch.handler(input, ctx)).rejects.toMatchObject({
+    await expect(smithsonianSearchObjects.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'invalid_filter', recovery: { hint: expectedHint } },
     });
   });
@@ -283,12 +298,12 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'sculpture',
       filters: { culture: 'Ancient Greek' },
     });
-    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+    const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
     expect(err.data?.reason).toBe('invalid_filter');
     const hint = err.data?.recovery?.hint as string;
@@ -307,9 +322,12 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'mask', filters: { place: 'Nigeria' } });
-    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
+      query: 'mask',
+      filters: { place: 'Nigeria' },
+    });
+    const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
     expect(err.data?.reason).toBe('invalid_filter');
     const hint = err.data?.recovery?.hint as string;
@@ -325,12 +343,12 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'car',
       filters: { date_decade: '1820s' },
     });
-    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+    const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
     expect(err.data?.reason).toBe('invalid_filter');
     const hint = err.data?.recovery?.hint as string;
@@ -360,12 +378,12 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'portrait',
       filters: { culture: 'Ancient Greek', object_type: 'Painting' },
     });
-    const err = await smithsonianSearch.handler(input, ctx).catch((e) => e);
+    const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
     const hint = err.data?.recovery?.hint as string;
     expect(hint).toContain('field: "culture", contains: "Ancient Greek"');
@@ -382,11 +400,13 @@ describe('smithsonianSearch', () => {
       search: vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({ query: 'phlogiston', rows: 100 });
-    const result = await smithsonianSearch.handler(input, ctx);
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'phlogiston', rows: 100 });
+    const result = await smithsonianSearchObjects.handler(input, ctx);
 
-    const effectiveOutput = smithsonianSearch.output.extend(smithsonianSearch.enrichment!);
+    const effectiveOutput = smithsonianSearchObjects.output.extend(
+      smithsonianSearchObjects.enrichment!,
+    );
     expect(() => effectiveOutput.parse(result)).not.toThrow();
   });
 
@@ -396,8 +416,8 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'test',
       filters: {
         unit_code: 'NASM',
@@ -406,7 +426,7 @@ describe('smithsonianSearch', () => {
         online_only: true,
       },
     });
-    await smithsonianSearch.handler(input, ctx);
+    await smithsonianSearchObjects.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
     // Filters are passed as Lucene terms to embed in q — not as separate fq params
@@ -433,12 +453,12 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'dinosaur',
       filters: { online_only: true },
     });
-    const result = await smithsonianSearch.handler(input, ctx);
+    const result = await smithsonianSearchObjects.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
     expect(calledParams.filters).toEqual(['online_media_type:*']);
@@ -450,7 +470,7 @@ describe('smithsonianSearch', () => {
     // The advertised description is the whole fix here — no code path changed. Assert
     // the substantive claim, not the exact prose: it must name online_media_type and
     // must not restate the old "objects that have any online media" promise.
-    const jsonSchema = z.toJSONSchema(smithsonianSearch.input) as {
+    const jsonSchema = z.toJSONSchema(smithsonianSearchObjects.input) as {
       properties: {
         filters: { properties: { online_only: { description?: string } } };
       };
@@ -466,19 +486,40 @@ describe('smithsonianSearch', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearch.errors });
-    const input = smithsonianSearch.input.parse({
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
       query: 'test',
       filters: {
         culture: 'Plains Indian',
         place: 'United States of America',
       },
     });
-    await smithsonianSearch.handler(input, ctx);
+    await smithsonianSearchObjects.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
     expect(calledParams.filters).toContain('culture:"Plains Indian"');
     expect(calledParams.filters).toContain('place:"United States of America"');
+  });
+
+  it('quotes a multi-word unit_code so it cannot leak into free text (issue #32)', async () => {
+    // An unquoted unit_code term ends the field constraint at the first space, so
+    // the trailing words rejoin q as free text and the result set comes back
+    // effectively unfiltered — reported to the caller as the museum's total_count.
+    const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({
+      query: 'flight',
+      filters: { unit_code: 'National Air and Space Museum' },
+    });
+    await smithsonianSearchObjects.handler(input, ctx);
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    expect(calledParams.filters).toContain('unit_code:"National Air and Space Museum"');
+    expect(calledParams.filters).not.toContain('unit_code:National Air and Space Museum');
   });
 
   it('defaults rows to 20 and start to 0', async () => {
@@ -488,8 +529,8 @@ describe('smithsonianSearch', () => {
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext();
-    const input = smithsonianSearch.input.parse({ query: 'test' });
-    await smithsonianSearch.handler(input, ctx);
+    const input = smithsonianSearchObjects.input.parse({ query: 'test' });
+    await smithsonianSearchObjects.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { rows: number; start: number };
     expect(calledParams.rows).toBe(20);
@@ -497,7 +538,7 @@ describe('smithsonianSearch', () => {
   });
 
   it('caps rows at 100', () => {
-    expect(() => smithsonianSearch.input.parse({ query: 'test', rows: 101 })).toThrow();
+    expect(() => smithsonianSearchObjects.input.parse({ query: 'test', rows: 101 })).toThrow();
   });
 
   it('rejects a date_decade outside the "NNNNs" format at the schema boundary', () => {
@@ -505,11 +546,11 @@ describe('smithsonianSearch', () => {
     // decade word is refused before it reaches upstream as a zero-result query.
     for (const date_decade of ['1920', '20s', '1920S', 'nineteen-twenties']) {
       expect(() =>
-        smithsonianSearch.input.parse({ query: 'test', filters: { date_decade } }),
+        smithsonianSearchObjects.input.parse({ query: 'test', filters: { date_decade } }),
       ).toThrow();
     }
     expect(() =>
-      smithsonianSearch.input.parse({ query: 'test', filters: { date_decade: '1920s' } }),
+      smithsonianSearchObjects.input.parse({ query: 'test', filters: { date_decade: '1920s' } }),
     ).not.toThrow();
   });
 
@@ -518,7 +559,7 @@ describe('smithsonianSearch', () => {
       objects: [makeObjectSummary()],
       total_count: 100,
     };
-    const blocks = smithsonianSearch.format!(output);
+    const blocks = smithsonianSearchObjects.format!(output);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('nasm_TEST001');
     expect(text).toContain('Test Object');
@@ -529,7 +570,7 @@ describe('smithsonianSearch', () => {
 
   it('format renders the object date when present (issue #20)', () => {
     const output = { objects: [makeObjectSummary()], total_count: 1 };
-    const blocks = smithsonianSearch.format!(output);
+    const blocks = smithsonianSearchObjects.format!(output);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('**Date:** 1960s');
   });
@@ -546,7 +587,7 @@ describe('smithsonianSearch', () => {
       has_media: false,
     };
     const output = { objects: [dateless], total_count: 1 };
-    const blocks = smithsonianSearch.format!(output);
+    const blocks = smithsonianSearchObjects.format!(output);
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).not.toContain('**Date:**');
     expect(text).toContain('nmnh_NODATE');
