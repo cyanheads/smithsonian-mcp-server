@@ -38,17 +38,25 @@ const LIST_TERMS_FIELD = { culture: 'culture', place: 'place', date_decade: 'dat
  * summaries); object_type/unit_code values ARE in summaries, so they're named from the
  * unfiltered harvest. Returns '' when neither applies, so the caller keeps the static
  * contract hint.
+ *
+ * Each routable filter carries `indexed` — whether the value is an exact member of
+ * its vocabulary. Sending a caller to resolve a value the index already enumerates
+ * dead-ends them on the same value and the same failure (issue #33), so an indexed
+ * value gets told what its zero match actually means instead.
  */
 function composeFilterHint(
-  routableFilters: Array<{ filter: string; field: string; value: string }>,
+  routableFilters: Array<{ filter: string; field: string; value: string; indexed: boolean }>,
   objectTypes: string[],
   unitCodes: string[],
 ): string {
   const parts: string[] = [];
-  for (const { filter, field, value } of routableFilters) {
+  for (const { filter, field, value, indexed } of routableFilters) {
     parts.push(
-      `Your ${filter} filter "${value}" matched nothing — resolve it to an exact term with ` +
-        `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`,
+      indexed
+        ? `Your ${filter} filter "${value}" is an exact term in the "${field}" vocabulary, so resolving it again returns the same value — it either has no retrievable objects at all or does not overlap your query and other filters. Drop it, or pick a different term from ` +
+            `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`
+        : `Your ${filter} filter "${value}" matched nothing — resolve it to an exact term with ` +
+            `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`,
     );
   }
   const harvested: string[] = [];
@@ -268,21 +276,28 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
         // Harvesting is best-effort and failure-path only: any error or an empty
         // re-query keeps the static contract hint, so it never turns a clean
         // invalid_filter into a crash.
-        const routableFilters: Array<{ filter: string; field: string; value: string }> = [];
+        const routable: Array<{ filter: string; field: string; value: string }> = [];
         if (f?.culture)
-          routableFilters.push({
-            filter: 'culture',
-            field: LIST_TERMS_FIELD.culture,
-            value: f.culture,
-          });
+          routable.push({ filter: 'culture', field: LIST_TERMS_FIELD.culture, value: f.culture });
         if (f?.place)
-          routableFilters.push({ filter: 'place', field: LIST_TERMS_FIELD.place, value: f.place });
+          routable.push({ filter: 'place', field: LIST_TERMS_FIELD.place, value: f.place });
         if (f?.date_decade)
-          routableFilters.push({
+          routable.push({
             filter: 'date_decade',
             field: LIST_TERMS_FIELD.date_decade,
             value: f.date_decade,
           });
+
+        // Whether each routable value is already an exact vocabulary term, which
+        // decides between "resolve it" and "it resolves to itself" (issue #33).
+        // Best-effort and failure-path only: a throwing lookup reads as not
+        // indexed, keeping the resolve-it hint that predates the check.
+        const routableFilters = await Promise.all(
+          routable.map(async (r) => ({
+            ...r,
+            indexed: await svc.isIndexedTerm(r.field, r.value, ctx).catch(() => false),
+          })),
+        );
 
         // Harvest only when object_type/unit_code is the culprit — those are the only
         // filters whose exact values an unfiltered re-query can surface.

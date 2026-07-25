@@ -27,6 +27,24 @@ function makeSamples(count = 3): ObjectSummary[] {
 }
 
 /**
+ * Stand in for the service on the zero-match path, where the handler consults the
+ * term vocabulary to tell an unresolvable category value from a resolvable one
+ * (issue #33). `indexed` is the answer that check returns; passing it explicitly
+ * keeps every zero-match test on a deliberate branch rather than on the
+ * best-effort catch that a missing method would otherwise fall into.
+ */
+function makeZeroMatchService(
+  search: ReturnType<typeof vi.fn>,
+  indexed: boolean | Error = false,
+): svcModule.SmithsonianService {
+  const isIndexedTerm =
+    indexed instanceof Error
+      ? vi.fn().mockRejectedValue(indexed)
+      : vi.fn().mockResolvedValue(indexed);
+  return { search, isIndexedTerm } as unknown as svcModule.SmithsonianService;
+}
+
+/**
  * Read the recovery hint off a thrown browse error, asserting it sits at the one
  * path both wire surfaces are built from. `structuredContent.error.data.recovery.hint`
  * is what structuredContent-reading clients (Claude Code) receive; the framework's
@@ -87,9 +105,9 @@ describe('smithsonianBrowseCategory', () => {
     // enumerable through smithsonian_list_terms, so with no harvest to fall back on the
     // medium hint routes to a free-text smithsonian_search_objects whose result
     // object_type values are the vocabulary to inspect.
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-    } as unknown as svcModule.SmithsonianService);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+      makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })),
+    );
 
     const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
     const input = smithsonianBrowseCategory.input.parse({
@@ -121,9 +139,7 @@ describe('smithsonianBrowseCategory', () => {
         ],
         rowCount: 3,
       });
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      search: searchFn,
-    } as unknown as svcModule.SmithsonianService);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(makeZeroMatchService(searchFn));
 
     const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
     const input = smithsonianBrowseCategory.input.parse({ mode: 'medium', value: 'Painting' });
@@ -152,9 +168,7 @@ describe('smithsonianBrowseCategory', () => {
     const searchFn = vi.fn().mockResolvedValueOnce({ rows: [], rowCount: 0 });
     if (thrown) searchFn.mockRejectedValueOnce(thrown);
     else searchFn.mockResolvedValueOnce(resolved);
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      search: searchFn,
-    } as unknown as svcModule.SmithsonianService);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(makeZeroMatchService(searchFn));
 
     const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
     const input = smithsonianBrowseCategory.input.parse({ mode: 'medium', value: 'Painting' });
@@ -166,9 +180,7 @@ describe('smithsonianBrowseCategory', () => {
 
   it('throws invalid_category with the culture-mode recovery hint on a true zero-match (issue #31)', async () => {
     const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      search: searchFn,
-    } as unknown as svcModule.SmithsonianService);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(makeZeroMatchService(searchFn));
 
     const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
     const input = smithsonianBrowseCategory.input.parse({
@@ -188,9 +200,9 @@ describe('smithsonianBrowseCategory', () => {
   it('throws invalid_category with the period-mode recovery hint on a true zero-match (issue #31)', async () => {
     // A well-formed decade that simply isn't indexed. The "NNNNs" requirement is enforced
     // at the schema boundary, so the hint carries only the resolution step.
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-    } as unknown as svcModule.SmithsonianService);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+      makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })),
+    );
 
     const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
     const input = smithsonianBrowseCategory.input.parse({ mode: 'period', value: '1234s' });
@@ -319,9 +331,7 @@ describe('smithsonianBrowseCategory', () => {
     // reported as the museum's total_count. It must reach the invalid_category contract
     // instead, whose museum-mode recovery names the smithsonian_list_terms unit_code call.
     const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      search: searchFn,
-    } as unknown as svcModule.SmithsonianService);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(makeZeroMatchService(searchFn));
 
     const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
     const input = smithsonianBrowseCategory.input.parse({
@@ -332,11 +342,14 @@ describe('smithsonianBrowseCategory', () => {
 
     // #31: a zero-match browse is invalid_category (ValidationError), not no_results.
     expect(err.data?.reason).toBe('invalid_category');
-    // A museum name can't be a `contains` substring of any code, so the hint names the
-    // unfiltered vocabulary rather than a call that returns an empty term list.
+    // #37: `contains` now matches each code's museum name as well as the code, so a
+    // museum name resolves through the same filtered call any other value takes —
+    // the hint no longer needs to route this shape to the unfiltered 48-code list.
     const hint = recoveryHint(err);
-    expect(hint).toContain('smithsonian_list_terms { field: "unit_code" }');
-    expect(hint).not.toContain('contains:');
+    expect(hint).toContain(
+      'smithsonian_list_terms { field: "unit_code", contains: "National Museum of Natural History" }',
+    );
+    expect(hint).toContain('museum names');
 
     // #26: the value is filtered as one quoted phrase term, never free-texted. Unquoted,
     // EDAN parses the trailing words as free text and matches ~1.7M records.
@@ -348,9 +361,9 @@ describe('smithsonianBrowseCategory', () => {
   it('keeps the contains substring in the museum hint for a spaceless code (issue #31)', async () => {
     // A mistyped or partial code IS resolvable by substring — every live unit_code is
     // space-free, so `contains` only dead-ends on the museum-name shape handled above.
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-    } as unknown as svcModule.SmithsonianService);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+      makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })),
+    );
 
     const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
     const input = smithsonianBrowseCategory.input.parse({ mode: 'museum', value: 'NMNH' });
@@ -360,6 +373,100 @@ describe('smithsonianBrowseCategory', () => {
     expect(recoveryHint(err)).toContain(
       'smithsonian_list_terms { field: "unit_code", contains: "NMNH" }',
     );
+  });
+
+  describe('indexed-but-empty category values (issue #33)', () => {
+    /**
+     * Both branches of the same zero match, per mode. `indexed: true` is a value the
+     * vocabulary enumerates: `smithsonian_list_terms` hands it straight back, so a
+     * hint telling the caller to resolve it there loops them through the identical
+     * failing call. `indexed: false` is the resolvable case that hint was written for.
+     */
+    it.each([
+      ['museum', 'FSA', 'unit_code', 'indexed Smithsonian unit code'],
+      ['culture', 'Guiana', 'culture', 'indexed culture term'],
+      ['period', '1210s', 'date', 'indexed decade'],
+    ] as const)(
+      '%s mode: an indexed value is named as empty, not as unresolvable',
+      async (mode, value, field, claim) => {
+        const isIndexedTerm = vi.fn().mockResolvedValue(true);
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+          search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+          isIndexedTerm,
+        } as unknown as svcModule.SmithsonianService);
+
+        const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+        const input = smithsonianBrowseCategory.input.parse({ mode, value });
+        const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
+
+        expect(err.data?.reason).toBe('invalid_category');
+        const hint = recoveryHint(err);
+        expect(hint).toContain(claim);
+        expect(hint).toContain('matches no retrievable objects');
+        // The dead-end the old hint produced: "resolve it, then browse again".
+        expect(hint).not.toContain('then browse again with the exact value');
+        // Routed somewhere that can succeed instead of back into the same call.
+        expect(hint).toContain('smithsonian_search_objects');
+        // The membership test runs against the mode's own indexed field.
+        expect(isIndexedTerm).toHaveBeenCalledWith(field, value, ctx);
+      },
+    );
+
+    it.each([
+      ['museum', 'NOTACODE', 'is not an exact Smithsonian unit code'],
+      ['culture', 'Guianaa', 'is not an exact culture term'],
+      ['period', '1210s', 'matched no indexed decade'],
+    ] as const)(
+      '%s mode: a value outside the vocabulary still gets the resolve-it hint',
+      async (mode, value, claim) => {
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+          makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), false),
+        );
+
+        const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+        const input = smithsonianBrowseCategory.input.parse({ mode, value });
+        const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
+
+        const hint = recoveryHint(err);
+        expect(hint).toContain(claim);
+        expect(hint).toContain(`contains: "${value}"`);
+        expect(hint).not.toContain('matches no retrievable objects');
+      },
+    );
+
+    it('never consults the vocabulary for medium — object_type is not enumerable', async () => {
+      const isIndexedTerm = vi.fn().mockResolvedValue(true);
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+        isIndexedTerm,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+      const input = smithsonianBrowseCategory.input.parse({ mode: 'medium', value: 'Painting' });
+      const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
+
+      expect(isIndexedTerm).not.toHaveBeenCalled();
+      // A true answer would otherwise have flipped the hint; medium keeps its harvest.
+      expect(recoveryHint(err)).toContain('smithsonian_search_objects { query: "Painting" }');
+    });
+
+    it('falls back to the resolve-it hint when the vocabulary lookup throws', async () => {
+      // The check is best-effort and failure-path only: an unreachable /terms must not
+      // turn a clean invalid_category into a crash.
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        makeZeroMatchService(
+          vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+          new Error('EDAN unavailable'),
+        ),
+      );
+
+      const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+      const input = smithsonianBrowseCategory.input.parse({ mode: 'culture', value: 'Guiana' });
+      const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
+
+      expect(err.data?.reason).toBe('invalid_category');
+      expect(recoveryHint(err)).toContain('is not an exact culture term');
+    });
   });
 
   it('non-truncated result validates against the effective output schema (issue #13)', async () => {
