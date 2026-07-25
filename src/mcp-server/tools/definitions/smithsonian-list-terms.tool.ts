@@ -10,7 +10,7 @@ import { getSmithsonianService } from '@/services/smithsonian/smithsonian-servic
 export const smithsonianListTerms = tool('smithsonian_list_terms', {
   title: 'List Valid Filter Terms',
   description:
-    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field (unit_code, culture, place, date, online_media_type). Terms are a controlled vocabulary — often plural or qualified (e.g. "Paintings", not "Painting") — so guessed filter values tend to return nothing. Returns a page of the field\'s distinct term values; large vocabularies (place has 100k+ terms) page via start and rows.',
+    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field (unit_code, culture, place, date, online_media_type). Terms are a controlled vocabulary — often plural or qualified (e.g. "Paintings", not "Painting") — so guessed filter values tend to return nothing. Returns a page of the field\'s distinct term values; large vocabularies (place has 100k+ terms) page via start and rows. For unit_code, each code is returned with its museum name and contains matches the name as well as the code, so a museum name resolves to its code in one call.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -36,7 +36,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .string()
       .optional()
       .describe(
-        'Case-insensitive substring filter on the term vocabulary — resolve a filter value (e.g. "greek") to its exact controlled-vocabulary term(s).',
+        'Case-insensitive substring filter on the term vocabulary — resolve a filter value (e.g. "greek") to its exact controlled-vocabulary term(s). For unit_code the substring also matches each code\'s museum name, so "National Air and Space" resolves to "NASM".',
       ),
   }),
 
@@ -57,6 +57,12 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .number()
       .describe(
         'Total number of distinct terms for this field (the full vocabulary size; terms is one page of it).',
+      ),
+    labels: z
+      .record(z.string(), z.string())
+      .optional()
+      .describe(
+        'Museum name for each unit_code on this page that has one — present only when field is "unit_code". A few rarely-indexed archive sub-unit codes have no mapped name and are absent from this map; their term is still returned in terms.',
       ),
   }),
 
@@ -102,7 +108,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       rows: input.rows,
     });
 
-    const { terms, total } = await svc.listTerms(
+    const { terms, total, labels } = await svc.listTerms(
       {
         field: input.field,
         start: input.start,
@@ -149,15 +155,20 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       });
     }
 
-    return { field: input.field, terms, total };
+    return { field: input.field, terms, total, ...(labels && { labels }) };
   },
 
   format: (result) => {
+    const labels = result.labels ?? {};
     const lines: string[] = [
       `**Field:** \`${result.field}\` — ${result.total.toLocaleString()} distinct terms, showing ${result.terms.length}\n`,
     ];
-    for (const t of result.terms) {
-      lines.push(`- \`${t}\``);
+    // Rendered over the union of the page and the label keys so every labelled
+    // code reaches the markdown surface. `labels` is keyed by the codes on this
+    // page, so for a real response the union is the page itself.
+    for (const term of new Set([...result.terms, ...Object.keys(labels)])) {
+      const name = labels[term];
+      lines.push(name ? `- \`${term}\` — ${name}` : `- \`${term}\``);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

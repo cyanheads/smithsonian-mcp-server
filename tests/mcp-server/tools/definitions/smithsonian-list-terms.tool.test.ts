@@ -257,4 +257,66 @@ describe('smithsonianListTerms', () => {
     expect(text).toContain('NASM');
     expect(text).toContain('NMNH');
   });
+
+  describe('unit_code museum names (issue #37)', () => {
+    it('passes the service labels through to the output', async () => {
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        listTerms: vi.fn().mockResolvedValue({
+          terms: ['NASM', 'FSA'],
+          total: 2,
+          labels: { NASM: 'National Air and Space Museum' },
+        }),
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+      const input = smithsonianListTerms.input.parse({ field: 'unit_code' });
+      const result = await smithsonianListTerms.handler(input, ctx);
+
+      expect(result.labels).toEqual({ NASM: 'National Air and Space Museum' });
+      // The output must still validate once the enrichment fields are folded in.
+      const effectiveOutput = smithsonianListTerms.output.extend(smithsonianListTerms.enrichment!);
+      expect(() => effectiveOutput.parse(result)).not.toThrow();
+    });
+
+    it('omits labels entirely for a field that has none', async () => {
+      // The service returns no map for culture/place/date, and an absent field must
+      // stay absent rather than serialize as an empty object.
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        listTerms: vi.fn().mockResolvedValue(makeTermsResult(['Aztecs'], 1)),
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+      const input = smithsonianListTerms.input.parse({ field: 'culture' });
+      const result = await smithsonianListTerms.handler(input, ctx);
+
+      expect(result).not.toHaveProperty('labels');
+    });
+
+    it('format renders the museum name beside each labelled code', () => {
+      // format() is the surface Claude Desktop reads; a label that reached only
+      // structuredContent would be invisible there.
+      const blocks = smithsonianListTerms.format!({
+        field: 'unit_code',
+        terms: ['NASM', 'FSA'],
+        total: 2,
+        labels: { NASM: 'National Air and Space Museum' },
+      });
+      const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      expect(text).toContain('`NASM` — National Air and Space Museum');
+      // A code with no mapped name renders bare, never with a guessed expansion.
+      expect(text).toContain('`FSA`');
+      expect(text).not.toMatch(/`FSA` —/);
+    });
+
+    it('format is unchanged for a field with no labels', () => {
+      const blocks = smithsonianListTerms.format!({
+        field: 'culture',
+        terms: ['Aztecs', 'Roman'],
+        total: 2,
+      });
+      const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
+      const termLines = text.split('\n').filter((line) => line.startsWith('- '));
+      expect(termLines).toEqual(['- `Aztecs`', '- `Roman`']);
+    });
+  });
 });
