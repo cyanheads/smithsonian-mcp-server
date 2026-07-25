@@ -42,7 +42,7 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 | Tool | Description |
 |:---|:---|
 | `smithsonian_search_objects` | Search across 19.4M objects by text query with optional filters (museum, type, decade, culture, place, online-only, CC0). Returns curated summaries with total count. |
-| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). |
+| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
 | `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
 | `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned — throws when none exist. |
 | `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
@@ -67,7 +67,9 @@ Enumerate the valid term vocabulary for an indexed filter field before applying 
 - Returns the field's distinct term values as a page of the full vocabulary — no per-term object counts are available upstream
 - Smithsonian uses a controlled vocabulary (terms are often plural, e.g. `Paintings` not `Painting`) — grounding filter values here avoids empty results
 - Pass `contains` to filter the vocabulary by a case-insensitive substring — resolve a guessed value (e.g. `greek` → `Greek, Attic`) to its exact term(s) in one call, or confirm absence with an empty result
+- For `unit_code`, a `labels` map returns each code's museum name and `contains` matches that name as well as the code, so `National Air and Space` resolves to `NASM` in one call
 - Paginate with `start` + `rows` (default 50 per page, max 100); large vocabularies like `place` have 100k+ terms
+- Each field's vocabulary is cached for `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` (default 1 hour) — upstream ignores paging and returns the whole set on every call, so paging a large vocabulary uncached re-downloads it each time
 - `object_type` is not enumerable upstream — discover object-type values from the `object_type` field in `smithsonian_search_objects` results
 
 ---
@@ -100,7 +102,7 @@ Paginated browse within one exact category. For open-ended or topic discovery, u
 - `value` must be an exact indexed category term — resolve `museum`, `culture`, and `period` vocabulary with `smithsonian_list_terms` first; `object_type` is not enumerable there, so harvest it from `smithsonian_search_objects` results
 - Returns total count, a page of sample objects, and a museum breakdown showing which institutions hold matching items (computed from the current page)
 - Use `start` + `rows` for standard pagination (offset-based, `start = page × rows`, max 50 per page) — adjacent pages retrieve the objects a capped sample omits
-- A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint naming the exact next call that resolves it
+- A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint. A value outside the vocabulary gets the exact `smithsonian_list_terms` call that resolves it; a value the index enumerates but that matches no objects is named as such and routed elsewhere, since resolving it returns the same value
 
 ---
 
@@ -269,6 +271,7 @@ cp .env.example .env
 |:---------|:------------|:--------|
 | `SMITHSONIAN_API_KEY` | **Required.** Free API key from [api.data.gov/signup](https://api.data.gov/signup). | — |
 | `SMITHSONIAN_BASE_URL` | Smithsonian Open Access API base URL. | `https://api.si.edu/openaccess/api/v1.0` |
+| `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` | Seconds to cache each indexed field's term vocabulary. `0` disables caching. | `3600` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
@@ -321,7 +324,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | Directory | Purpose |
 |:----------|:--------|
 | `src/index.ts` | `createApp()` entry point — registers tools and initializes the Smithsonian service. |
-| `src/config` | Server-specific environment variable parsing (`SMITHSONIAN_API_KEY`, `SMITHSONIAN_BASE_URL`). |
+| `src/config` | Server-specific environment variable parsing (`SMITHSONIAN_API_KEY`, `SMITHSONIAN_BASE_URL`, `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS`). |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). |
 | `src/services/smithsonian` | Smithsonian Open Access API client, normalization, and type definitions. |
 | `tests/` | Unit and integration tests. |

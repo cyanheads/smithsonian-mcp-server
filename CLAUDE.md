@@ -126,6 +126,8 @@ import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 const ServerConfigSchema = z.object({
   apiKey: z.string().min(1).describe('API key from https://api.data.gov/signup. Required.'),
   baseUrl: z.string().default('https://api.si.edu/openaccess/api/v1.0'),
+  // z.coerce for numeric env vars — a plain z.number() rejects the string value.
+  termsCacheTtlSeconds: z.coerce.number().int().min(0).default(3600),
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
@@ -133,6 +135,7 @@ export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     apiKey: 'SMITHSONIAN_API_KEY',
     baseUrl: 'SMITHSONIAN_BASE_URL',
+    termsCacheTtlSeconds: 'SMITHSONIAN_TERMS_CACHE_TTL_SECONDS',
   });
   return _config;
 }
@@ -225,7 +228,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 src/
   index.ts                                 # createApp() entry point
   config/
-    server-config.ts                       # SMITHSONIAN_API_KEY, SMITHSONIAN_BASE_URL
+    server-config.ts                       # SMITHSONIAN_API_KEY, SMITHSONIAN_BASE_URL, SMITHSONIAN_TERMS_CACHE_TTL_SECONDS
   services/
     smithsonian/
       smithsonian-service.ts               # Smithsonian API client (init/accessor pattern)
