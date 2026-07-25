@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-25
+
+Cache term vocabulary with a TTL, add unit_code museum-name labels, and stop recovery hints looping on indexed-but-empty terms
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-25 · ⚠️ Breaking
 
 Breaking: rename smithsonian_search/smithsonian_explore to smithsonian_search_objects/smithsonian_browse_category; fix unquoted unit_code filter leaking free text
