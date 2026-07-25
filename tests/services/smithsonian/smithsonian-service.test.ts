@@ -4,7 +4,8 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
+import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import { SmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
@@ -18,8 +19,17 @@ import type {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeService(): SmithsonianService {
-  return new SmithsonianService();
+function makeService(storage: StorageService = createInMemoryStorage()): SmithsonianService {
+  return new SmithsonianService(storage);
+}
+
+/**
+ * A context carrying a tenant, required by every storage-backed path — the term
+ * vocabulary cache reads and writes tenant-scoped keys (issue #38). Real contexts
+ * always carry one ('default' on stdio); the bare mock does not.
+ */
+function makeTenantContext() {
+  return createMockContext({ tenantId: 'test-tenant' });
 }
 
 /**
@@ -194,7 +204,7 @@ describe('SmithsonianService', () => {
     it('returns normalized ObjectSummary rows and rowCount', async () => {
       mockFetch(makeSearchResponse());
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx);
       expect(result.rowCount).toBe(42);
       expect(result.rows).toHaveLength(1);
@@ -216,7 +226,7 @@ describe('SmithsonianService', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       await svc.search({ query: 'test', rows: 5, start: 0 }, ctx);
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
       const calledInit = (fetchMock.mock.calls[0] as [string, RequestInit])[1];
@@ -237,7 +247,7 @@ describe('SmithsonianService', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       await svc.search(
         { query: 'test', rows: 5, start: 0, filters: ['unit_code:NASM', 'media_usage:CC0'] },
         ctx,
@@ -254,7 +264,7 @@ describe('SmithsonianService', () => {
     it('throws on API_KEY_MISSING error-in-200', async () => {
       mockFetch({ error: { code: 'API_KEY_MISSING', message: 'No api_key was supplied.' } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       await expect(svc.search({ query: 'test', rows: 5, start: 0 }, ctx)).rejects.toThrow(
         /API key missing/i,
       );
@@ -263,7 +273,7 @@ describe('SmithsonianService', () => {
     it('API_KEY_MISSING error-in-200 uses InternalError code — not retryable', async () => {
       mockFetch({ error: { code: 'API_KEY_MISSING', message: 'No api_key was supplied.' } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const err = await svc.search({ query: 'test', rows: 5, start: 0 }, ctx).catch((e) => e);
       // InternalError (-32603) is NOT in withRetry's retryable set — config errors surface immediately.
       expect(err.code).toBe(JsonRpcErrorCode.InternalError);
@@ -277,7 +287,7 @@ describe('SmithsonianService', () => {
         error: { code: 'OVER_RATE_LIMIT', message: 'Rate limit exceeded.' },
       });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const promise = svc.search({ query: 'test', rows: 5, start: 0 }, ctx).catch((e) => e);
       // Advance time past all backoff intervals (2s + 4s + 8s = 14s)
       await vi.runAllTimersAsync();
@@ -293,7 +303,7 @@ describe('SmithsonianService', () => {
       vi.useFakeTimers();
       mockFetch429();
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const promise = svc.search({ query: 'test', rows: 5, start: 0 }, ctx).catch((e) => e);
       await vi.runAllTimersAsync();
       const err = await promise;
@@ -312,7 +322,7 @@ describe('SmithsonianService', () => {
       };
       mockFetch(sparseResponse);
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.search({ query: 'sparse', rows: 5, start: 0 }, ctx);
       // record_id falls back to the raw id when record_ID and url are absent
       expect(result.rows[0]?.record_id).toBe('ld1-sparse');
@@ -327,7 +337,7 @@ describe('SmithsonianService', () => {
     it('returns the raw EDAN object directly from response', async () => {
       mockFetch(makeContentResponse('nasm_TEST001'));
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const raw = await svc.getContent('nasm_TEST001', ctx);
       expect(raw.title).toBe('Test Object');
       expect(raw.content?.descriptiveNonRepeating?.record_ID).toBe('nasm_TEST001');
@@ -342,7 +352,7 @@ describe('SmithsonianService', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       await svc.getContent('nasm_TEST001', ctx);
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
       expect(calledUrl).toContain('edanmdm%3Anasm_TEST001');
@@ -351,7 +361,7 @@ describe('SmithsonianService', () => {
     it('throws notFound with reason "not_found" when response is absent', async () => {
       mockFetch({ status: 200, responseCode: 1, response: null });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
       expect(err.code).toBe(JsonRpcErrorCode.NotFound);
       expect(err.message).toMatch(/No Smithsonian object/i);
@@ -387,7 +397,7 @@ describe('SmithsonianService', () => {
         }),
       );
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
       expect(err.code).toBe(JsonRpcErrorCode.NotFound);
       expect(err.message).toMatch(/nasm_MISSING/i);
@@ -435,7 +445,7 @@ describe('SmithsonianService', () => {
       };
       mockFetch(contentShape);
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const raw = await svc.getContent('saam_DIRECT001', ctx);
       // Asserts the envelope was unwrapped at `response`, not `response.rows[0]`
       expect(raw.title).toBe('Direct Response Object');
@@ -743,7 +753,7 @@ describe('SmithsonianService', () => {
         response: { message: 'search terms returned successfully', terms: fullVocab },
       });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.listTerms({ field: 'unit_code', start: 2, rows: 3 }, ctx);
       // total is the full vocabulary size; terms is only the requested page
       expect(result.total).toBe(8);
@@ -759,7 +769,7 @@ describe('SmithsonianService', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       await svc.listTerms({ field: 'unit_code', start: 5, rows: 10 }, ctx);
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
       // Upstream ignores rows/start; the URL must not carry them (avoids implying
@@ -772,7 +782,7 @@ describe('SmithsonianService', () => {
     it('returns an empty page but real total when start is past the end', async () => {
       mockFetch({ status: 200, responseCode: 1, response: { terms: ['AAA', 'AAG'] } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.listTerms({ field: 'unit_code', start: 50, rows: 10 }, ctx);
       expect(result.total).toBe(2);
       expect(result.terms).toEqual([]);
@@ -782,7 +792,7 @@ describe('SmithsonianService', () => {
       // e.g. an unsupported field returning { response: { message } } and no terms.
       mockFetch({ status: 200, responseCode: 1, response: { message: 'no terms' } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
       expect(result.total).toBe(0);
       expect(result.terms).toEqual([]);
@@ -801,7 +811,7 @@ describe('SmithsonianService', () => {
       ];
       mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.listTerms(
         { field: 'culture', start: 0, rows: 50, contains: 'greek' },
         ctx,
@@ -815,7 +825,7 @@ describe('SmithsonianService', () => {
       const fullVocab = ['Greek A', 'Greek B', 'Greek C', 'Roman', 'Greek D'];
       mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.listTerms(
         { field: 'culture', start: 1, rows: 2, contains: 'greek' },
         ctx,
@@ -829,7 +839,7 @@ describe('SmithsonianService', () => {
       const fullVocab = ['Aztec', 'Roman', 'Egyptian'];
       mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.listTerms(
         { field: 'culture', start: 0, rows: 50, contains: 'greek' },
         ctx,
@@ -843,10 +853,244 @@ describe('SmithsonianService', () => {
       const fullVocab = ['AAA', 'AAG', 'ACAH', 'ACM'];
       mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
       const svc = makeService();
-      const ctx = createMockContext();
+      const ctx = makeTenantContext();
       const result = await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
       expect(result.total).toBe(4);
       expect(result.terms).toEqual(fullVocab);
+    });
+  });
+
+  describe('unit_code labels (issue #37)', () => {
+    /** Two mapped codes sharing a name, one case-sensitive code, two unmapped codes. */
+    const UNIT_CODES = ['AAA', 'CHNDM', 'CHSDM', 'FSA', 'NASM', 'NASMAC', 'NMAfA'];
+
+    it('returns the museum name for every mapped code on the page', async () => {
+      mockFetch({ status: 200, responseCode: 1, response: { terms: UNIT_CODES } });
+      const result = await makeService().listTerms(
+        { field: 'unit_code', start: 0, rows: 50 },
+        makeTenantContext(),
+      );
+      expect(result.labels?.AAA).toBe('Archives of American Art');
+      expect(result.labels?.NASM).toBe('National Air and Space Museum');
+      expect(result.labels?.NMAfA).toBe('National Museum of African Art');
+    });
+
+    it('omits unmapped codes from labels while still returning them in terms', async () => {
+      // The four unattributed archive codes have no primary-sourced name, so they
+      // must be absent from the map rather than carry a guessed or echoed value.
+      mockFetch({ status: 200, responseCode: 1, response: { terms: UNIT_CODES } });
+      const result = await makeService().listTerms(
+        { field: 'unit_code', start: 0, rows: 50 },
+        makeTenantContext(),
+      );
+      expect(result.terms).toContain('FSA');
+      expect(result.terms).toContain('NASMAC');
+      expect(result.labels).not.toHaveProperty('FSA');
+      expect(result.labels).not.toHaveProperty('NASMAC');
+    });
+
+    it('labels only the codes on the requested page', async () => {
+      mockFetch({ status: 200, responseCode: 1, response: { terms: UNIT_CODES } });
+      const result = await makeService().listTerms(
+        { field: 'unit_code', start: 4, rows: 1 },
+        makeTenantContext(),
+      );
+      expect(result.terms).toEqual(['NASM']);
+      expect(Object.keys(result.labels ?? {})).toEqual(['NASM']);
+    });
+
+    it('matches contains against the museum name, not just the code', async () => {
+      // No unit code contains "National Air and Space" as a substring, so this
+      // resolves only because the label participates in the match.
+      mockFetch({ status: 200, responseCode: 1, response: { terms: UNIT_CODES } });
+      const result = await makeService().listTerms(
+        { field: 'unit_code', start: 0, rows: 50, contains: 'National Air and Space' },
+        makeTenantContext(),
+      );
+      expect(result.terms).toEqual(['NASM']);
+      expect(result.total).toBe(1);
+      expect(result.labels).toEqual({ NASM: 'National Air and Space Museum' });
+    });
+
+    it('returns every code whose name matches, and keeps code matching intact', async () => {
+      mockFetch({ status: 200, responseCode: 1, response: { terms: UNIT_CODES } });
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      // Two codes carry the Cooper Hewitt name; both must come back.
+      const byName = await svc.listTerms(
+        { field: 'unit_code', start: 0, rows: 50, contains: 'cooper hewitt' },
+        ctx,
+      );
+      expect(byName.terms).toEqual(['CHNDM', 'CHSDM']);
+      // A code substring that appears in no name still matches the code itself.
+      const byCode = await svc.listTerms(
+        { field: 'unit_code', start: 0, rows: 50, contains: 'NASM' },
+        ctx,
+      );
+      expect(byCode.terms).toEqual(['NASM', 'NASMAC']);
+    });
+
+    it('returns no labels map for a field other than unit_code', async () => {
+      // "Museum" appears in several museum names, so a field that leaked label
+      // matching would over-match here as well as carry the map.
+      mockFetch({
+        status: 200,
+        responseCode: 1,
+        response: { terms: ['Aztecs', 'NASM', 'Roman'] },
+      });
+      const result = await makeService().listTerms(
+        { field: 'culture', start: 0, rows: 50, contains: 'museum' },
+        makeTenantContext(),
+      );
+      expect(result.labels).toBeUndefined();
+      expect(result.terms).toEqual([]);
+      expect(result.total).toBe(0);
+    });
+  });
+
+  describe('isIndexedTerm()', () => {
+    const VOCAB = ['AAA', 'AAG', 'NASM', 'NMAfA'];
+
+    it('is an exact membership test — a substring of a term is not a term', async () => {
+      // The reason `contains` cannot stand in: it would report a hit for "AA".
+      mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      expect(await svc.isIndexedTerm('unit_code', 'AAA', ctx)).toBe(true);
+      expect(await svc.isIndexedTerm('unit_code', 'AA', ctx)).toBe(false);
+    });
+
+    it('matches case-sensitively, as EDAN itself resolves a term', async () => {
+      // NMAfA carries a lowercase f upstream; NMAFA matches nothing there, and a
+      // case-insensitive check would wrongly call it indexed.
+      mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      expect(await svc.isIndexedTerm('unit_code', 'NMAfA', ctx)).toBe(true);
+      expect(await svc.isIndexedTerm('unit_code', 'NMAFA', ctx)).toBe(false);
+    });
+
+    it('returns false for a value outside the vocabulary', async () => {
+      mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
+      expect(await makeService().isIndexedTerm('unit_code', 'NOTACODE', makeTenantContext())).toBe(
+        false,
+      );
+    });
+  });
+
+  describe('term vocabulary caching (issue #38)', () => {
+    /** A terms-endpoint fetch mock that records how many upstream calls were made. */
+    function mockTermsFetch(terms: string[]) {
+      const body = { status: 200, responseCode: 1, response: { terms } };
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('fetches the vocabulary once and serves later calls from storage', async () => {
+      // The upstream endpoint ignores rows/start and returns the whole vocabulary,
+      // so the defect is per-call refetching, not the returned value — the call
+      // count is the assertion that fails without a cache.
+      const fetchMock = mockTermsFetch(['AAA', 'AAG', 'NASM']);
+      const svc = makeService();
+      const ctx = makeTenantContext();
+
+      const first = await svc.listTerms({ field: 'unit_code', start: 0, rows: 2 }, ctx);
+      const second = await svc.listTerms({ field: 'unit_code', start: 1, rows: 2 }, ctx);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(first.terms).toEqual(['AAA', 'AAG']);
+      expect(second.terms).toEqual(['AAG', 'NASM']);
+      expect(second.total).toBe(3);
+    });
+
+    it('caches per field — a second field still costs one fetch', async () => {
+      const fetchMock = mockTermsFetch(['AAA', 'AAG']);
+      const svc = makeService();
+      const ctx = makeTenantContext();
+
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      await svc.listTerms({ field: 'culture', start: 0, rows: 50 }, ctx);
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const fetchedUrls = fetchMock.mock.calls.map((call) => (call as [string])[0]);
+      expect(fetchedUrls[0]).toContain('/terms/unit_code');
+      expect(fetchedUrls[1]).toContain('/terms/culture');
+    });
+
+    it('shares the cached vocabulary with isIndexedTerm — the check adds no fetch', async () => {
+      // The membership check runs on the recovery path of every zero-match browse
+      // and search; against an uncached vocabulary it would pay a full download.
+      const fetchMock = mockTermsFetch(['AAA', 'AAG', 'NASM']);
+      const svc = makeService();
+      const ctx = makeTenantContext();
+
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      expect(await svc.isIndexedTerm('unit_code', 'AAA', ctx)).toBe(true);
+      expect(await svc.isIndexedTerm('unit_code', 'NOTACODE', ctx)).toBe(false);
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('isolates the cache per tenant', async () => {
+      const fetchMock = mockTermsFetch(['AAA', 'AAG']);
+      const svc = makeService();
+
+      await svc.listTerms(
+        { field: 'unit_code', start: 0, rows: 50 },
+        createMockContext({ tenantId: 'tenant-a' }),
+      );
+      await svc.listTerms(
+        { field: 'unit_code', start: 0, rows: 50 },
+        createMockContext({ tenantId: 'tenant-b' }),
+      );
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('refetches once the TTL has elapsed', async () => {
+      const fetchMock = mockTermsFetch(['AAA', 'AAG']);
+      const svc = makeService();
+      const ctx = makeTenantContext();
+
+      vi.useFakeTimers();
+      try {
+        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+        // Inside the default 3600 s TTL the entry is still served from storage.
+        vi.setSystemTime(Date.now() + 3_599_000);
+        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+
+        vi.setSystemTime(Date.now() + 2_000);
+        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('SMITHSONIAN_TERMS_CACHE_TTL_SECONDS=0 disables caching entirely', async () => {
+      // The config memo is module-level, so the TTL override needs a fresh module
+      // graph — the same reason this case cannot ride the default-TTL service above.
+      vi.resetModules();
+      vi.stubEnv('SMITHSONIAN_TERMS_CACHE_TTL_SECONDS', '0');
+      const fetchMock = mockTermsFetch(['AAA', 'AAG']);
+      const { SmithsonianService: FreshService } = await import(
+        '@/services/smithsonian/smithsonian-service.js'
+      );
+      const svc = new FreshService(createInMemoryStorage());
+      const ctx = makeTenantContext();
+
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
 });

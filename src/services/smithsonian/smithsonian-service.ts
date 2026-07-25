@@ -45,6 +45,9 @@ import type {
  * pattern would ship a guess as a sourced fact on a public field, so they take the
  * raw-code fallback below instead.
  *
+ * Backs the `museum_name` field on every object-returning tool and the `labels`
+ * map `smithsonian_list_terms` returns for `unit_code`.
+ *
  * Keys are matched exactly, including case (`NMAfA` carries a lowercase f upstream)
  * and separators (`OFEO-SG`, `SLA_SRO`, `OCIO_DPO3D`). Two codes that earlier
  * versions mapped are gone: bare `NMNH`, superseded by the eleven `NMNH*` discipline
@@ -52,7 +55,7 @@ import type {
  * Asian Art (`NMAA`) in 2019. Neither can match a live record, and `FSG` would have
  * echoed a name the institution no longer uses.
  */
-const MUSEUM_NAMES: Record<string, string> = {
+export const MUSEUM_NAMES: Record<string, string> = {
   AAA: 'Archives of American Art',
   AAG: 'Archives of American Gardens',
   ACAH: 'Archives Center, National Museum of American History',
@@ -362,6 +365,8 @@ export function luceneField(field: string, value: string): string {
 // ---------------------------------------------------------------------------
 
 export class SmithsonianService {
+  constructor(private readonly storage: StorageService) {}
+
   /** Execute a GET request with retry/backoff. Handles error-in-200 responses. */
   private get<T extends { error?: { code?: string; message?: string } }>(
     url: string,
@@ -529,35 +534,96 @@ export class SmithsonianService {
   }
 
   /**
+   * The full term vocabulary for an indexed field, read from the injected
+   * `StorageService` when warm and fetched from `/terms/{field}` on a miss.
+   *
+   * The upstream endpoint returns `response.terms` as a bare `string[]` (no
+   * per-term counts) and ignores `rows`/`start`, always returning the full
+   * vocabulary — `place` alone is ~114k terms (~3.2 MB, seconds of latency
+   * against a 15 s fetch budget). Caching it turns every page of a walk, and
+   * every vocabulary check on a recovery path, into an in-memory scan; the data
+   * is a controlled vocabulary with no freshness requirement on the scale of a
+   * session, so a TTL of hours is safe and a cold miss costs what an uncached
+   * call costs today. `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS=0` disables it.
+   *
+   * The framework's storage key validator only accepts `^[a-zA-Z0-9_.\-/]+$`, so
+   * the key separator is `/` — a `terms:${field}` key throws at runtime.
+   */
+  private async vocabulary(field: string, ctx: RequestContextLike): Promise<string[]> {
+    const cfg = getServerConfig();
+    const key = `terms/${field}`;
+    const ttl = cfg.termsCacheTtlSeconds;
+
+    if (ttl > 0) {
+      const cached = await this.storage.get<string[]>(key, ctx);
+      if (cached) return cached;
+    }
+
+    const url = `${cfg.baseUrl}/terms/${encodeURIComponent(field)}`;
+    const raw = await this.get<RawTermsResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
+    const terms = raw.response?.terms ?? [];
+
+    if (ttl > 0) await this.storage.set(key, terms, ctx, { ttl });
+    return terms;
+  }
+
+  /**
    * Enumerate the valid term vocabulary for an indexed field, optionally narrowed
    * by a case-insensitive substring.
    *
-   * The upstream `/terms/{field}` endpoint returns `response.terms` as a bare
-   * `string[]` (no per-term counts) and ignores `rows`/`start`, always returning
-   * the full vocabulary — `place` alone is ~114k terms (~3.2 MB). Pagination is
-   * therefore done client-side: fetch once, then slice. Only the requested page
-   * is returned, so a full vocabulary never reaches the tool output.
+   * Pagination is client-side: the upstream vocabulary arrives whole, so the page
+   * is a slice of it. Only the requested page is returned, so a full vocabulary
+   * never reaches the tool output.
    *
-   * `contains` filters that already-fetched vocabulary in memory, before pagination,
-   * so it costs no extra upstream call. When set, `total` is the post-filter match
-   * count and the page is sliced from the matching terms; an empty result confirms
-   * no such term exists.
+   * `contains` filters that vocabulary in memory, before pagination, so both
+   * `total` and the page reflect the match set and an empty result confirms no
+   * such term exists. For `unit_code` the substring also matches each code's
+   * museum name, so a caller who knows only the name ("National Air and Space")
+   * resolves it to a code in one call; `labels` returns the name for every code
+   * on the page that has one, and codes outside {@link MUSEUM_NAMES} come back
+   * bare, as they do on every other tool.
    */
   async listTerms(
     params: { field: string; start: number; rows: number; contains?: string },
     ctx: RequestContextLike,
-  ): Promise<{ terms: string[]; total: number }> {
-    const cfg = getServerConfig();
-    const url = `${cfg.baseUrl}/terms/${encodeURIComponent(params.field)}`;
+  ): Promise<{ terms: string[]; total: number; labels?: Record<string, string> }> {
+    const all = await this.vocabulary(params.field, ctx);
+    const labelled = params.field === 'unit_code';
 
-    const raw = await this.get<RawTermsResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
-    const all = raw.response?.terms ?? [];
-    // Case-insensitive substring filter over the full vocabulary already in hand,
-    // applied before pagination so both `total` and the page reflect the match set.
     const needle = params.contains?.toLowerCase();
-    const matched = needle ? all.filter((term) => term.toLowerCase().includes(needle)) : all;
+    const matched = needle
+      ? all.filter(
+          (term) =>
+            term.toLowerCase().includes(needle) ||
+            (labelled && MUSEUM_NAMES[term]?.toLowerCase().includes(needle) === true),
+        )
+      : all;
     const page = matched.slice(params.start, params.start + params.rows);
-    return { terms: page, total: matched.length };
+    if (!labelled) return { terms: page, total: matched.length };
+
+    const labels: Record<string, string> = {};
+    for (const term of page) {
+      const name = MUSEUM_NAMES[term];
+      if (name) labels[term] = name;
+    }
+    return { terms: page, total: matched.length, labels };
+  }
+
+  /**
+   * True when `value` is an exact member of the field's term vocabulary.
+   *
+   * Exact and case-sensitive, matching how EDAN itself resolves a term: `NMAfA`
+   * is real and `NMAFA` matches nothing. The `contains` filter on {@link listTerms}
+   * cannot stand in — it is a case-insensitive substring match, so it reports a
+   * hit for a wrong-case value and for a fragment that is not itself a term.
+   *
+   * Separates the two zero-match failures the recovery hints otherwise conflate:
+   * a value outside the vocabulary (resolvable through smithsonian_list_terms)
+   * from one the index enumerates but that matches no retrievable object, where
+   * resolving it again returns the caller to the same failing call.
+   */
+  async isIndexedTerm(field: string, value: string, ctx: RequestContextLike): Promise<boolean> {
+    return (await this.vocabulary(field, ctx)).includes(value);
   }
 }
 
@@ -567,8 +633,8 @@ export class SmithsonianService {
 
 let _service: SmithsonianService | undefined;
 
-export function initSmithsonianService(_config: AppConfig, _storage: StorageService): void {
-  _service = new SmithsonianService();
+export function initSmithsonianService(_config: AppConfig, storage: StorageService): void {
+  _service = new SmithsonianService(storage);
 }
 
 export function getSmithsonianService(): SmithsonianService {
