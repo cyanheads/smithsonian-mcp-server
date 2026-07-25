@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-25 · ⚠️ Breaking
+
+Breaking: rename smithsonian_search/smithsonian_explore to smithsonian_search_objects/smithsonian_browse_category; fix unquoted unit_code filter leaking free text
+
 ## [0.1.18](changelog/0.1.x/0.1.18.md) — 2026-07-22
 
 Add smithsonian_find_related per-signal continuation and smithsonian_explore pagination; fix past-the-end no_results/truncation handling in search and list_terms; name the retrieval path in every truncation notice
