@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -44,7 +44,7 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 | `smithsonian_search_objects` | Search across 19.4M objects by text query with optional filters (museum, type, decade, culture, place, online-only, CC0). Returns curated summaries with total count. |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
 | `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
-| `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned — throws when none exist. |
+| `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned, never an empty list — a distinct error reason names why, whether the object has nothing digitized, only non-image media, or only restricted images. |
 | `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
 | `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, maker, topic, and period signals. |
 
@@ -89,6 +89,7 @@ Normalized catalog metadata for a single object.
 CC0-gated image access at multiple resolutions.
 
 - Only CC0-licensed images are returned; throws `Forbidden` when an object has media but none is CC0
+- Throws `no_images` when an object's media is entirely non-image (scanned books, 3D models, sound recordings); the recovery hint names the types present
 - Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions
 - Use `smithsonian_search_objects` with `filters.cc0_only: true` before calling this tool
 
@@ -139,8 +140,8 @@ Smithsonian-specific:
 
 Agent-friendly output:
 
-- CC0 flags on every object summary — agents can gate image download calls without an extra lookup
-- Typed error reasons (`no_results`, `invalid_filter`, `not_found`, `not_cc0`, `no_media`, `invalid_id`) with recovery hints for each case
+- `has_media` on every object summary — agents can gate image download calls without an extra lookup (the `is_cc0` flag is the metadata license, which the Open Access corpus carries almost everywhere)
+- Typed error reasons (`no_results`, `invalid_filter`, `not_found`, `no_media`, `no_images`, `not_cc0`, `invalid_id`) with recovery hints for each case
 - `similarity_signals` on related-object results let agents explain why objects were surfaced
 - `total_count` on all search responses enables agents to communicate result scope before paginating
 

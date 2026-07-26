@@ -21,7 +21,7 @@
 | `smithsonian_get_object` | Normalized metadata projection by ID: title, description, dates, materials, dimensions, exhibition, credit, and a media summary (count + CC0 image count). | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_browse_category` | Paginated browse within one exact category. Mode: `museum` \| `culture` \| `period` \| `medium`; `value` must be an exact indexed category term, not free text. Searches a constrained query internally and returns the category total, a page of matching objects, and a museum breakdown of that page. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `invalid_category` (ValidationError) |
 | `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, maker, topics). Returns up to 20 related objects, each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
-| `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
+| `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `no_images` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
 ### Resources
 
@@ -105,7 +105,7 @@ Each step is independently testable.
   - `culture?: string` — culture term from `indexedStructured.culture` (e.g. `"Plains Indian"`).
   - `place?: string` — geographic place from `indexedStructured.place` (e.g. `"United States of America"`).
   - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to records carrying an indexed `online_media_type` value. That vocabulary covers digitized surrogates (finding aids, catalog cards, scanned books, full text, electronic resources) alongside images, 3D models, and video; the surrogate types often have no deliverable media attached, so a match can still report `has_media: false`. `has_media` reads `descriptiveNonRepeating.online_media` — a separate upstream signal — and is what predicts a `smithsonian_get_media` outcome.
-  - `cc0_only?: boolean` — when true, ANDs the Lucene term `media_usage:CC0` into `q` to restrict to CC0 objects. Useful before calling `smithsonian_get_media`.
+  - `cc0_only?: boolean` — when true, ANDs the Lucene term `media_usage:CC0` into `q`. That term marks a record as *having CC0 media attached*, not as being CC0-licensed, so this selects on media presence rather than license: of 14.5M records, 5.25M carry the term and the 9.24M excluded are CC0 too, just undigitized. `has_media` remains the signal that predicts a `smithsonian_get_media` outcome.
 - `rows?: number` — page size (default 20, max 100).
 - `start?: number` — offset for pagination (default 0). A `start` past the end returns a successful empty page, not an error.
 
@@ -208,7 +208,7 @@ Each step is independently testable.
 
 ### `smithsonian_get_media`
 
-**Description:** Returns all available images for a Smithsonian object at multiple resolutions. Only CC0 (open access) objects and their CC0-licensed images are returned — the tool explicitly reports when an object exists but its media is not open access. Each image includes high-res JPEG/TIFF URLs, screen-size and thumbnail URLs, pixel dimensions, and accessibility alt text. Intended for use with image-capable MCP clients that can display or analyze the photos.
+**Description:** Returns all available images for a Smithsonian object at multiple resolutions. Only CC0 (open access) objects and their CC0-licensed images are returned. The tool never returns an empty `images[]` — each way an object can yield no images (nothing digitized, media that is entirely non-image, images that are entirely non-CC0) has its own declared error reason. Each image includes high-res JPEG/TIFF URLs, screen-size and thumbnail URLs, pixel dimensions, and accessibility alt text. Intended for use with image-capable MCP clients that can display or analyze the photos.
 
 **Input:**
 - `id: string` — `record_id` of the object (e.g. `"nasm_A19670093000"`).
@@ -229,7 +229,8 @@ Each step is independently testable.
 **Errors:**
 - `not_found` (NotFound) — object not in catalog. Recovery: verify via `smithsonian_search_objects`.
 - `no_media` (NotFound) — object found but has no online media. Recovery: the physical object may not have been digitized.
-- `not_cc0` (Forbidden) — object found with media, but none of the media is CC0. Recovery: use `smithsonian_search_objects` with `filters.cc0_only: true` to find CC0 objects.
+- `no_images` (NotFound) — object found with media, but all of it is non-image (scanned books, 3D models, sound recordings). Recovery: the hint names the media types present and points at `smithsonian_get_object`'s `media_summary` and `record_link`.
+- `not_cc0` (Forbidden) — object found with images, but none of them is CC0. Recovery: use `smithsonian_search_objects` with `filters.cc0_only: true` to find CC0 objects.
 - `invalid_id` (ValidationError) — ID format is clearly malformed.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
