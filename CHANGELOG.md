@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.4](changelog/0.3.x/0.3.4.md) — 2026-07-26
+
+Neighbor-substring recovery hints now search for the tightest narrow substring instead of trying three fixed candidates
+
 ## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-07-26
 
 Indexed-term recovery hints now name a proven contains substring instead of the failing value itself
