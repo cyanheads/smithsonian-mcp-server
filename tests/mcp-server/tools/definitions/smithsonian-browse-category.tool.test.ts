@@ -441,6 +441,19 @@ describe('smithsonianBrowseCategory', () => {
         expect(hint).not.toContain('contains:');
         // Routed somewhere that can succeed instead of back into the same call.
         expect(hint).toContain('smithsonian_search_objects');
+        // culture and topic state why no substring is named, and the sentence claims
+        // only what the search establishes. It is capped at MAX_NEIGHBOR_PROBES
+        // scans, so it can stop with fragments untried (#47); and a fragment over
+        // MAX_NEIGHBOR_TERMS is discarded, so a value reaching this branch may have
+        // found one and had it rejected as too broad (#48). Either way what is true
+        // is that no NARROW set was found — not that no fragment resolved at all.
+        if (mode === 'culture' || mode === 'topic') {
+          expect(hint).toContain(
+            `a bounded search of its fragments found no narrow set of other ${mode} terms to browse`,
+          );
+          expect(hint).not.toMatch(/no fragment of it/i);
+          expect(hint).not.toMatch(/found no different/i);
+        }
         // The membership test runs against the mode's own indexed field.
         expect(describeTerm).toHaveBeenCalledWith(field, value, ctx);
       },
@@ -451,10 +464,10 @@ describe('smithsonianBrowseCategory', () => {
       [
         'topic',
         'Bell UH-1H Iroquois "Huey" Smokey III',
-        { contains: 'Bell', count: 234 },
-        '234 other topic terms',
+        { contains: 'Bell UH-1', count: 2 },
+        '2 other topic terms',
       ],
-      ['topic', 'Quilts--History', { contains: 'Quilts', count: 1 }, '1 other topic term'],
+      ['topic', 'Quilts--History', { contains: 'Quilts', count: 1 }, 'the one other topic term'],
     ] as const)(
       '%s mode: an indexed value with neighbors routes to the proven substring (issue #46)',
       async (mode, value, neighbors, claim) => {

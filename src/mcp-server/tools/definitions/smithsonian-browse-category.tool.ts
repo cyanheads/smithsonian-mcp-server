@@ -50,14 +50,15 @@ const MAX_OBJECT_TYPE_CANDIDATES = 12;
  * same value back and the caller loops through the identical failure (issue #33).
  * That branch says the term is indexed and empty, and routes somewhere that can
  * succeed. Where that route is a `contains` search — culture and topic, the two
- * vocabularies too large to browse whole — it names `term.neighbors.contains`, a
- * substring the service proved lists other terms, and drops the clause when there
- * is none rather than handing back the failing value (issue #46). museum and
- * period route to the unfiltered vocabulary (48 unit codes, ~200 date terms), so
- * neither ever depended on a substring. medium's object_type is not enumerable
- * upstream, so it never gets a vocabulary check; `objectTypes`, harvested from a
- * free-text re-query, names candidates directly and falls back to routing the
- * caller to that same search when the harvest comes back empty. Never
+ * vocabularies too large to browse whole — it names `term.neighbors.contains`, the
+ * tightest substring the service proved lists other terms (issue #47) and few
+ * enough of them to beat browsing the field (issue #48), and drops the clause when
+ * there is none rather than handing back the failing value (issue
+ * #46). museum and period route to the unfiltered vocabulary (48 unit codes, ~200
+ * date terms), so neither ever depended on a substring. medium's object_type is
+ * not enumerable upstream, so it never gets a vocabulary check; `objectTypes`,
+ * harvested from a free-text re-query, names candidates directly and falls back to
+ * routing the caller to that same search when the harvest comes back empty. Never
  * auto-selects a candidate: the hint lists terms and the caller picks the
  * intended one.
  */
@@ -80,8 +81,8 @@ function categoryRecoveryHint(
     case 'culture':
       if (term.indexed) {
         return neighbors
-          ? `"${value}" is an indexed culture term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse one of the ${neighbors.count} other culture ${neighbors.count === 1 ? 'term' : 'terms'} from smithsonian_list_terms { field: "culture", contains: "${neighbors.contains}" }, or search the collection directly with smithsonian_search_objects.`
-          : `"${value}" is an indexed culture term, but it currently matches no retrievable objects — resolving it again returns the same value, and neither it nor a leading segment of it lists a different culture term. Search the collection directly with smithsonian_search_objects.`;
+          ? `"${value}" is an indexed culture term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse ${neighbors.count === 1 ? 'the one other culture term' : `one of the ${neighbors.count} other culture terms`} from smithsonian_list_terms { field: "culture", contains: "${neighbors.contains}" }, or search the collection directly with smithsonian_search_objects.`
+          : `"${value}" is an indexed culture term, but it currently matches no retrievable objects — resolving it again returns the same value, and a bounded search of its fragments found no narrow set of other culture terms to browse. Search the collection directly with smithsonian_search_objects.`;
       }
       return `"${value}" is not an exact culture term. Resolve it with smithsonian_list_terms { field: "culture", contains: "${value}" }, then browse again with the exact value.`;
     case 'period':
@@ -92,8 +93,8 @@ function categoryRecoveryHint(
     case 'topic':
       if (term.indexed) {
         return neighbors
-          ? `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse one of the ${neighbors.count} other topic ${neighbors.count === 1 ? 'term' : 'terms'} from smithsonian_list_terms { field: "topic", contains: "${neighbors.contains}" }, or search the collection directly with smithsonian_search_objects.`
-          : `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value, and neither it nor a leading segment of it lists a different topic term. Search the collection directly with smithsonian_search_objects.`;
+          ? `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse ${neighbors.count === 1 ? 'the one other topic term' : `one of the ${neighbors.count} other topic terms`} from smithsonian_list_terms { field: "topic", contains: "${neighbors.contains}" }, or search the collection directly with smithsonian_search_objects.`
+          : `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value, and a bounded search of its fragments found no narrow set of other topic terms to browse. Search the collection directly with smithsonian_search_objects.`;
       }
       return `"${value}" is not an exact topic term. Resolve it with smithsonian_list_terms { field: "topic", contains: "${value}" }, then browse again with the exact value.`;
     case 'medium':

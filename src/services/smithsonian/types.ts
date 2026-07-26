@@ -208,9 +208,10 @@ export interface TermDescription {
   /** True when the value is an exact, case-sensitive member of the vocabulary. */
   indexed: boolean;
   /**
-   * A substring that a `contains` query resolves to at least one term other than
-   * the value itself. Absent when no tested substring does, in which case a hint
-   * has no working term route to offer and must not name one.
+   * The tightest substring a `contains` query resolves to at least one term other
+   * than the value itself, and to few enough of them to be worth browsing. Absent
+   * when no tested substring does either, in which case a hint has no working term
+   * route to offer and must not name one.
    */
   neighbors?: {
     /** The substring to pass as smithsonian_list_terms `contains`. */

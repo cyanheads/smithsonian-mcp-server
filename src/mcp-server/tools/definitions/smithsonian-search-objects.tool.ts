@@ -39,7 +39,12 @@ function distinctValues(values: Array<string | undefined>, cap = 12): string[] {
  * `neighbors` then decides whether that branch can name a substitute term —
  * passing the failing value as the `contains` substring lists only itself on the
  * long, fully-qualified end of the vocabulary, so the clause is dropped unless the
- * service found a substring that lists something else (issue #46).
+ * service found a substring that lists something else (issue #46), and the one it
+ * names is the tightest such substring rather than the first that works at all
+ * (issue #47). A substring too broad to narrow the field is discarded the same way
+ * (issue #48), so a value can reach the dropped-clause branch having found a
+ * fragment — which is why that branch says no NARROW set was found rather than
+ * that no fragment resolved at all.
  */
 function composeFilterHint(
   routableFilters: Array<{ field: string; value: string } & TermDescription>,
@@ -58,9 +63,12 @@ function composeFilterHint(
     const indexedEmpty = `Your ${field} filter "${value}" is an exact term in the "${field}" vocabulary, so resolving it again returns the same value — it either has no retrievable objects at all or does not overlap your query and other filters.`;
     parts.push(
       neighbors
-        ? `${indexedEmpty} Drop it, or pick one of the ${neighbors.count} other ${field} ${neighbors.count === 1 ? 'term' : 'terms'} from ` +
-            `smithsonian_list_terms { field: "${field}", contains: "${neighbors.contains}" }.`
-        : `${indexedEmpty} Neither the value nor a leading segment of it lists a different ${field} term, so drop the filter and search on the query alone.`,
+        ? `${indexedEmpty} Drop it, or pick ${
+            neighbors.count === 1
+              ? `the one other ${field} term`
+              : `one of the ${neighbors.count} other ${field} terms`
+          } from smithsonian_list_terms { field: "${field}", contains: "${neighbors.contains}" }.`
+        : `${indexedEmpty} A bounded search of its fragments found no narrow set of other ${field} terms to browse, so drop the filter and search on the query alone.`,
     );
   }
   const harvested: string[] = [];

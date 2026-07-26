@@ -389,23 +389,178 @@ export function luceneField(field: string, value: string): string {
 }
 
 /**
- * `contains` substrings to try for a term, widest first: the value itself, the
- * segment before its first structural separator, then its leading token.
- *
- * The whole value is first because it is the substring a caller would write, and
- * on the short vocabularies (`culture`, `place`) it already lists neighbors —
- * "Guiana" is inside "Guiana, French". Where it fails is the long, fully-qualified
- * end of `topic`, whose terms carry LCSH subdivisions ("Quilts--History") and
- * qualifiers ('Bell UH-1H Iroquois "Huey" Smokey III'); cutting at `--`, `(`, or
- * `,` recovers the shared head, and the leading token is the last resort when the
- * value carries no separator at all. Each is only a candidate — {@link
- * SmithsonianService.describeTerm} tests it against the vocabulary before any hint
- * names it.
+ * Upper bound on vocabulary scans one neighbor search may run. Every scan walks
+ * the whole cached array — 133,113 terms for `topic` — so the search is bounded
+ * explicitly rather than by the shape of whatever value failed. Ordinary terms
+ * stay under it: ten words or fewer covers 99.9% of the `topic` vocabulary and
+ * runs a median of 6 scans. The cap exists for the tail, where a 101-word term
+ * would otherwise run ~150 scans on an error path.
  */
-function containsCandidates(value: string): string[] {
-  const cut = value.search(/--|[(,]/);
-  const candidates = [value, cut > 0 ? value.slice(0, cut) : '', value.split(/\s+/)[0] ?? ''];
-  return [...new Set(candidates.map((c) => c.trim()).filter(Boolean))];
+const MAX_NEIGHBOR_PROBES = 48;
+
+/**
+ * Upper bound on how many other terms a named `contains` may list. Past it the
+ * search reports no neighbors, and the caller takes the branch that offers no term
+ * route at all — a substring that returns a large fraction of the field is not a
+ * route, it is browsing the field with extra steps. `Mzab` has no cut that lists
+ * anything, so the search bottoms out at `M`, which names 2,936 other terms out of
+ * an 8,683-term culture vocabulary (issue #48).
+ *
+ * The bound is a fixed count rather than a fraction of the vocabulary, which the
+ * live distributions decide. A fraction cannot bound the large vocabularies: the
+ * tightest cut of the place term `Gièvres` is `Gi`, which lists 5,512 other place
+ * terms and is still only 4.8% of the field — under any fraction loose enough to
+ * admit `Mzab`'s 33.8%. It also collapses on the small ones, where 2% of the
+ * 201-term `date` vocabulary is 4 terms, while a tenth of `date` values — which
+ * smithsonian_search_objects routes through this same branch — name 13 or more. A
+ * fixed count holds across both, and isolates the same tail in vocabularies that
+ * differ 15-fold in size: at 800 the clause is dropped for 0.36% of `culture`,
+ * 0.38% of `place` and 0.65% of `topic`, and for nothing in `date` or `unit_code`.
+ *
+ * 800 is eight full pages of smithsonian_list_terms, whose page caps at 100 rows,
+ * and it sits between the two live cases that fix the range. `place: "Nigeria"`
+ * lists 575 Nigerian place terms — wide, but every one of them is the thing the
+ * caller asked about, so a ceiling that cuts it is the wrong ceiling.
+ * `culture: "Rickarie"` bottoms out at `Ric`, whose 1,195 terms are mostly the
+ * `ric` inside `African`, and which opens on `!Kung (African people)`.
+ */
+const MAX_NEIGHBOR_TERMS = 800;
+
+/**
+ * Word boundaries are whitespace; a candidate substring starts and ends on a
+ * letter or digit, so surrounding punctuation is never carried into one.
+ */
+const ALPHANUMERIC = /[\p{L}\p{N}]/u;
+const WHITESPACE = /\s/;
+
+/**
+ * Offsets where a whitespace-delimited word begins, each advanced past that word's
+ * leading punctuation. The advance is what reaches `Yank` inside `"Yank"` — a
+ * handful of `topic` terms carry quotes and nothing else in the vocabulary does,
+ * so a candidate that keeps them can only ever match the value it came from.
+ */
+function wordStarts(value: string): number[] {
+  const starts: number[] = [];
+  let atBoundary = true;
+  for (let index = 0; index < value.length; index++) {
+    const char = value[index] as string;
+    if (WHITESPACE.test(char)) {
+      atBoundary = true;
+    } else if (atBoundary && ALPHANUMERIC.test(char)) {
+      starts.push(index);
+      atBoundary = false;
+    }
+  }
+  return starts;
+}
+
+/**
+ * Ascending exclusive end offsets for candidates anchored at `start`, restricted
+ * to those longer than `minLength` and ending either on an alphanumeric or at a
+ * word boundary — the end of the value, or the offset before whitespace.
+ *
+ * Ending mid-word is deliberate and load-bearing: `Bell UH-1` cuts inside `UH-1H`
+ * and `Guian` inside `Guiana`, and neither is reachable from word boundaries
+ * alone. The word-boundary clause keeps the punctuation a word OWNS attached to
+ * it. Alphanumeric alone cannot end a candidate on the trailing period of
+ * `New York. (N.Y.)`, the `(?)` of `Woodland (?)`, or the combining macron of a
+ * decomposed `Osiā`, and the widest cut it can reach instead is the overshoot
+ * this search exists to remove — `New York` lists 907 other place terms where the
+ * value's own trailing period lists 1. What the clause still excludes is a cut
+ * that strands an opener mid-word: `Yombe (` is never a candidate, because that
+ * `(` is followed by a letter rather than whitespace or the end of the value.
+ *
+ * The rule is also what keeps a candidate off a surrogate boundary: an end after
+ * a lone high surrogate qualifies only if the next code unit is whitespace or
+ * absent, neither of which is the low half of a pair.
+ */
+function candidateEnds(value: string, start: number, minLength: number): number[] {
+  const ends: number[] = [];
+  for (let end = start + minLength + 1; end <= value.length; end++) {
+    if (
+      end === value.length ||
+      WHITESPACE.test(value[end] as string) ||
+      ALPHANUMERIC.test(value[end - 1] as string)
+    ) {
+      ends.push(end);
+    }
+  }
+  return ends;
+}
+
+/**
+ * The tightest `contains` substring of `value` that still lists a term other than
+ * `value`, or undefined when no candidate does — or when the tightest that does is
+ * looser than {@link MAX_NEIGHBOR_TERMS} allows.
+ *
+ * Tightest means longest. For a fixed start, a longer substring matches a subset
+ * of what a shorter one matches, so length is the axis that narrows the result
+ * set: `Bell UH-1` lists 2 other `topic` terms, both of them the sibling
+ * helicopters the caller wanted, where `Bell` lists 234 — 82 of which match
+ * mid-word only (`Cerebellum`, `Abronia umbellata`). Candidates begin at every
+ * word boundary and may end mid-word, which is what covers both shapes these
+ * vocabularies need: a cut inside a word, and an internal window (`of North
+ * American` inside `Check-list of North American Birds (Monograph)`) that no
+ * leading-prefix walk reaches.
+ *
+ * Two properties keep the cost bounded. Within one start, "lists another term" is
+ * monotone in length — true for a substring implies true for each of its prefixes
+ * — so the longest working end is found by binary search over the end offsets, in
+ * log-many scans rather than one per character. Across starts, only candidates
+ * longer than the incumbent are generated, so a start whose shortest remaining
+ * candidate fails costs a single scan. {@link MAX_NEIGHBOR_PROBES} caps the total.
+ *
+ * A longer candidate replaces the incumbent only when it is no looser. Length
+ * alone would trade `Yombe` (6 other `culture` terms) for `African people` (908):
+ * both work, but the longer one is a shared qualifier rather than a narrowing cut,
+ * and handing back 908 terms repeats the overshoot the search exists to remove.
+ */
+function tightestNeighbors(
+  value: string,
+  vocabulary: string[],
+): { contains: string; count: number } | undefined {
+  /**
+   * Every scan asks the same question of the same array, so the value is dropped
+   * and the case folded once here rather than per candidate — the fold alone costs
+   * more than two scans on `topic`.
+   */
+  const others = vocabulary.filter((term) => term !== value).map((term) => term.toLowerCase());
+
+  let probes = 0;
+  const lists = (needle: string): boolean => {
+    probes++;
+    const search = needle.toLowerCase();
+    return others.some((term) => term.includes(search));
+  };
+  const countOf = (needle: string): number => {
+    probes++;
+    const search = needle.toLowerCase();
+    return others.filter((term) => term.includes(search)).length;
+  };
+
+  let best: { contains: string; count: number } | undefined;
+  for (const start of wordStarts(value)) {
+    if (probes >= MAX_NEIGHBOR_PROBES) break;
+    const ends = candidateEnds(value, start, best?.contains.length ?? 0);
+    if (ends.length === 0 || !lists(value.slice(start, ends[0] as number))) continue;
+
+    let low = 0;
+    let high = ends.length - 1;
+    while (low < high && probes < MAX_NEIGHBOR_PROBES) {
+      const mid = Math.ceil((low + high) / 2);
+      if (lists(value.slice(start, ends[mid] as number))) low = mid;
+      else high = mid - 1;
+    }
+
+    const contains = value.slice(start, ends[low] as number);
+    const count = countOf(contains);
+    if (!best || count <= best.count) best = { contains, count };
+  }
+
+  // `best` holds the lowest count of every candidate the search evaluated, so one
+  // over the ceiling means all of them were — there is no narrower substring left
+  // to fall back to, and the caller gets no term route at all.
+  return best && best.count <= MAX_NEIGHBOR_TERMS ? best : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -675,11 +830,14 @@ export class SmithsonianService {
    * failing call.
    *
    * `neighbors` then decides whether the indexed branch can offer a substitute
-   * term at all. Each candidate from {@link containsCandidates} is tested against
-   * the vocabulary already in hand, and only one that resolves to a term OTHER
-   * than the value is returned — so a hint naming it is naming a call with
-   * something to show. When none does, the caller has no term route to offer and
-   * says so instead of sending the caller back into the same value (issue #46).
+   * term at all. {@link tightestNeighbors} searches the vocabulary already in hand
+   * for the tightest substring that resolves to a term OTHER than the value, so a
+   * hint naming it is naming a call with something to show, and a narrow one
+   * (issue #47) — narrow being a bounded claim, since a substring listing more
+   * than {@link MAX_NEIGHBOR_TERMS} of the field is discarded as no better than
+   * browsing it (issue #48). When nothing survives that, the caller has no term
+   * route to offer and says so instead of sending the caller back into the same
+   * value (issue #46).
    */
   async describeTerm(
     field: string,
@@ -689,14 +847,8 @@ export class SmithsonianService {
     const vocabulary = await this.vocabulary(field, ctx);
     if (!vocabulary.includes(value)) return { indexed: false };
 
-    for (const contains of containsCandidates(value)) {
-      const needle = contains.toLowerCase();
-      const count = vocabulary.filter(
-        (term) => term !== value && term.toLowerCase().includes(needle),
-      ).length;
-      if (count > 0) return { indexed: true, neighbors: { contains, count } };
-    }
-    return { indexed: true };
+    const neighbors = tightestNeighbors(value, vocabulary);
+    return neighbors ? { indexed: true, neighbors } : { indexed: true };
   }
 }
 

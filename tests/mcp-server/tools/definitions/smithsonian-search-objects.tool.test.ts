@@ -435,6 +435,17 @@ describe('smithsonianSearchObjects', () => {
         // No substring lists a different term, so the hint offers no list_terms
         // route rather than one that returns the failing value (issue #46).
         expect(hint).not.toContain('contains:');
+        // The dropped-clause sentence claims only what the search establishes.
+        // MAX_NEIGHBOR_PROBES can stop it with fragments untried, so a universal over
+        // the value's fragments would be an overclaim (issue #47); and a fragment
+        // over MAX_NEIGHBOR_TERMS is discarded, so a value can reach this branch
+        // having found one and had it rejected as too broad (issue #48). Claiming no
+        // different term was found would be false for that value.
+        expect(hint).toContain(
+          `A bounded search of its fragments found no narrow set of other ${field} terms to browse`,
+        );
+        expect(hint).not.toMatch(/no fragment of it/i);
+        expect(hint).not.toMatch(/found no different/i);
         expect(hint).toContain('drop the filter and search on the query alone');
         expect(describeTerm).toHaveBeenCalledWith(field, value, ctx);
       },
@@ -445,10 +456,10 @@ describe('smithsonianSearchObjects', () => {
       [
         'topic',
         'Bell UH-1H Iroquois "Huey" Smokey III',
-        { contains: 'Bell', count: 234 },
-        '234 other topic terms',
+        { contains: 'Bell UH-1', count: 2 },
+        '2 other topic terms',
       ],
-      ['place', 'Nigeria, Kano', { contains: 'Nigeria', count: 1 }, '1 other place term'],
+      ['place', 'Nigeria, Kano', { contains: 'Nigeria', count: 1 }, 'the one other place term'],
     ] as const)(
       '%s: an indexed value with neighbors names the proven substring (issue #46)',
       async (field, value, neighbors, claim) => {

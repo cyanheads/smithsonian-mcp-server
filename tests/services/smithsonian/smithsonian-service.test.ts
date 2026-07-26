@@ -1016,7 +1016,7 @@ describe('SmithsonianService', () => {
       ).toEqual({ indexed: false });
     });
 
-    describe('neighbor substrings (issue #46)', () => {
+    describe('neighbor substrings (issues #46, #47, #48)', () => {
       it('keeps the value itself when it already lists other terms', async () => {
         // The short vocabularies (culture, place) work this way, and the pre-#46 hint
         // was correct for them — "Guiana" is inside "Guiana, French".
@@ -1031,7 +1031,7 @@ describe('SmithsonianService', () => {
         });
       });
 
-      it('falls back to the segment before an LCSH subdivision', async () => {
+      it('stops the cut at the shared head of an LCSH subdivision', async () => {
         // 'Quilting' shares a stem but not the substring, so it is not a neighbor —
         // the count is what a `contains: "Quilts"` call would return, minus the value.
         mockFetch({
@@ -1047,39 +1047,259 @@ describe('SmithsonianService', () => {
       it.each([
         ['(', 'Endeavour (OV-105)', ['Endeavour (OV-105)', 'Endeavour', 'Discovery'], 'Endeavour'],
         [',', 'Kano, Nigeria', ['Kano, Nigeria', 'Kano', 'Lagos'], 'Kano'],
-      ] as const)('cuts at the first %s separator', async (_sep, value, terms, contains) => {
-        mockFetch({ status: 200, responseCode: 1, response: { terms } });
-        expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
-          indexed: true,
-          neighbors: { contains, count: 1 },
-        });
-      });
+      ] as const)(
+        'stops where the head shared with a %s qualifier ends',
+        async (_sep, value, terms, contains) => {
+          mockFetch({ status: 200, responseCode: 1, response: { terms } });
+          expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
+            indexed: true,
+            neighbors: { contains, count: 1 },
+          });
+        },
+      );
 
-      it('falls back to the leading token when the value carries no separator', async () => {
-        // The issue's repro: the whole value and every separator cut resolve to
-        // nothing else, so the leading token is what the hint can name.
+      it('names the tightest working substring, not the first one that works', async () => {
+        // The issue #47 repro, and the assertion that separates the two behaviours: a
+        // leading-token ladder stops at 'Bell', which lists all six other terms here —
+        // two sibling helicopters and four accidents, half of them mid-word. Cutting
+        // one character further, inside 'UH-1H', lists only the two that answer the
+        // question. Both substrings "work"; only the longer one is tight.
         const value = 'Bell UH-1H Iroquois "Huey" Smokey III';
         mockFetch({
           status: 200,
           responseCode: 1,
-          response: { terms: [value, 'Bell UH-1B Iroquois', 'Bell 47', 'Aviation'] },
+          response: {
+            terms: [
+              value,
+              'Bell UH-1 Iroquois (Huey) Series',
+              'Bell UH-1B (HU-1B) Iroquois (Huey)',
+              'Bell 47',
+              'Bell X-1',
+              'Cerebellum',
+              'Abronia umbellata',
+            ],
+          },
         });
         expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
           indexed: true,
-          neighbors: { contains: 'Bell', count: 2 },
+          neighbors: { contains: 'Bell UH-1', count: 2 },
         });
       });
 
-      it('reports no neighbors when no candidate lists anything else', async () => {
-        // '"Yank"' is one live topic term in this state. Naming any substring of it
-        // would send the caller to a call that returns the failing value alone, so
-        // the recovery hint has to drop the substitute-term clause entirely.
+      it('cuts inside a word when the word boundary is too wide', async () => {
+        // 'Guiana' lists nothing else — 'Guianese' diverges at the sixth character —
+        // so the clause used to be dropped for a value one character from working.
         mockFetch({
           status: 200,
           responseCode: 1,
-          response: { terms: ['"Yank"', 'Quilts', 'Aviation'] },
+          response: { terms: ['Guiana', 'Guianese', 'French Guianese'] },
+        });
+        expect(await makeService().describeTerm('culture', 'Guiana', makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Guian', count: 2 },
+        });
+      });
+
+      it('reaches a window that starts inside the value, not just a leading cut', async () => {
+        // Every leading cut of this value dead-ends at 'Check', which lists an
+        // unrelated term; the fragment that shares a subject with the value sits in
+        // the middle and no prefix walk arrives at it.
+        const value = 'Check-list of North American Birds (Monograph)';
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: [value, 'Indians of North American', 'Check cashing services'] },
+        });
+        expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'of North American', count: 1 },
+        });
+      });
+
+      it('drops surrounding punctuation the rest of the vocabulary does not carry', async () => {
+        // A handful of live topic terms are quoted and nothing else is, so a candidate
+        // keeping the quotes can only ever match the value it came from.
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: ['"Yank"', 'Yankee', 'American Yankee (Airplane)'] },
         });
         expect(await makeService().describeTerm('topic', '"Yank"', makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Yank', count: 2 },
+        });
+      });
+
+      it('keeps a short tight substring over a longer one that lists more', async () => {
+        // 'African people' is longer than 'Yombe' and works, but it is a qualifier
+        // every term in the group shares — naming it would hand back the whole group
+        // and repeat the overshoot the search exists to remove.
+        const value = 'Yombe (African people)';
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: {
+            terms: [
+              value,
+              'Yombe (?)',
+              '!Kung (African people)',
+              'Aari (African people)',
+              'Ababda (African people)',
+            ],
+          },
+        });
+        expect(await makeService().describeTerm('culture', value, makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Yombe', count: 1 },
+        });
+      });
+
+      it('ends a candidate on the punctuation a word owns', async () => {
+        // A third of the live `place` vocabulary ends on punctuation. Requiring the
+        // last character to be alphanumeric put the cut one character short of the
+        // period this value owns and reached for the next-widest window instead — on
+        // the live vocabulary that is `New York` (907 other place terms) against the
+        // 1 the period lists. A word boundary — the end of the value, or the offset
+        // before whitespace — is a legal end, so the tight cut is reachable.
+        const value = 'New York. (N.Y.)';
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: {
+            terms: [value, 'New York. Harbor', 'New York (N.Y.)', 'New York City', 'New Yorkers'],
+          },
+        });
+        expect(await makeService().describeTerm('place', value, makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'New York.', count: 1 },
+        });
+      });
+
+      it('keeps a combining mark attached to the letter it modifies', async () => {
+        // Thousands of live terms arrive decomposed, so an accented letter is a base
+        // plus a mark and the mark is neither a letter nor a digit. Ending only on
+        // alphanumerics cut the mark off and silently named the unaccented form,
+        // which matches every term the accented one does and more. Escaped rather
+        // than typed so no editor can recompose the pair and void the case.
+        const value = 'Osia\u0304';
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: [value, 'Osia\u0304bad (India)', 'Osiander', 'Osiadly'] },
+        });
+        expect(await makeService().describeTerm('place', value, makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Osia\u0304', count: 1 },
+        });
+      });
+
+      it('never cuts a word open on its own leading bracket', async () => {
+        // 'Yombe (' would be tighter here — it lists 1 where 'Yombe' lists 3 — and it
+        // is still not a candidate, because that bracket is followed by a letter
+        // rather than whitespace or the end of the value. A hint naming a substring
+        // that opens a bracket it never closes reads as a malformed call.
+        const value = 'Yombe (African people)';
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: [value, 'Yombe (Congo)', 'Yombe language', 'Yombean'] },
+        });
+        expect(await makeService().describeTerm('culture', value, makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Yombe', count: 3 },
+        });
+      });
+
+      it('gives up rather than search an unbounded number of candidates', async () => {
+        // Each scan walks the whole vocabulary, so the search is capped. Here only the
+        // final word shares anything with the other term, and every earlier word costs
+        // one failed scan — past the cap the search stops and the clause is dropped,
+        // even though a candidate further along would have worked. The short control
+        // proves the value is otherwise resolvable.
+        const words = Array.from({ length: 100 }, (_, i) => `Qq${i}`);
+        const beyondCap = `${words.join(' ')} Wwtarget`;
+        const withinCap = `${words.slice(0, 3).join(' ')} Wwtarget`;
+        const ctx = makeTenantContext();
+
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: [beyondCap, 'Wwtarget alternative'] },
+        });
+        expect(await makeService().describeTerm('topic', beyondCap, ctx)).toEqual({
+          indexed: true,
+        });
+
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: [withinCap, 'Wwtarget alternative'] },
+        });
+        expect(await makeService().describeTerm('topic', withinCap, ctx)).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Wwtarget', count: 1 },
+        });
+      });
+
+      it('reports no neighbors when no fragment lists anything else', async () => {
+        // Naming any substring here would send the caller to a call that returns the
+        // failing value alone, so the recovery hint drops the substitute-term clause.
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: ['Zymurgy', 'Quilts', 'Aviation'] },
+        });
+        expect(await makeService().describeTerm('topic', 'Zymurgy', makeTenantContext())).toEqual({
+          indexed: true,
+        });
+      });
+
+      /**
+       * A vocabulary where the only working substring of 'Mzab' is its first
+       * character: `neighborCount` terms carry an M, none carries 'Mz', and the
+       * padding carries no M at all. The shape is the live one — 'Mzab' has no cut
+       * that lists anything, so the search bottoms out at 'M' (issue #48).
+       */
+      function mzabVocabulary(neighborCount: number, padding = 0): string[] {
+        return [
+          'Mzab',
+          ...Array.from({ length: neighborCount }, (_, i) => `M${i}xx`),
+          ...Array.from({ length: padding }, (_, i) => `Qq${i}`),
+        ];
+      }
+
+      it('drops a substring that lists more terms than the ceiling allows', async () => {
+        // 'M' names 801 of the 802 culture terms here. The call works and the count
+        // is honest, but as a next move it is worse than no clause at all, so the
+        // hint falls through to the branch that offers no term route.
+        mockFetch({ status: 200, responseCode: 1, response: { terms: mzabVocabulary(801) } });
+        expect(await makeService().describeTerm('culture', 'Mzab', makeTenantContext())).toEqual({
+          indexed: true,
+        });
+      });
+
+      it('names a substring sitting exactly on the ceiling', async () => {
+        // One term fewer than the case above, and the clause survives — the ceiling
+        // is 800 inclusive, and this pins it against a silent loosening.
+        mockFetch({ status: 200, responseCode: 1, response: { terms: mzabVocabulary(800) } });
+        expect(await makeService().describeTerm('culture', 'Mzab', makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'M', count: 800 },
+        });
+      });
+
+      it('measures the ceiling in terms, not as a share of the vocabulary', async () => {
+        // The same 900-term set inside a 20,000-term vocabulary is 4.5% of the field
+        // — under a 5%-of-vocabulary rule, and still 9 pages of smithsonian_list_terms
+        // at its 100-row cap. A share cannot bound the large vocabularies: the
+        // tightest cut of the live place term 'Gièvres' lists 5,512 other place
+        // terms and is only 4.8% of that field.
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: mzabVocabulary(900, 19_099) },
+        });
+        expect(await makeService().describeTerm('place', 'Mzab', makeTenantContext())).toEqual({
           indexed: true,
         });
       });
@@ -1155,7 +1375,12 @@ describe('SmithsonianService', () => {
       const ctx = makeTenantContext();
 
       await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
-      expect(await svc.describeTerm('unit_code', 'AAA', ctx)).toEqual({ indexed: true });
+      // 'AAA' resolves through a cut inside the code — 'AAG' shares its first two
+      // characters — which is a scan of the cached array, not a second download.
+      expect(await svc.describeTerm('unit_code', 'AAA', ctx)).toEqual({
+        indexed: true,
+        neighbors: { contains: 'AA', count: 1 },
+      });
       expect(await svc.describeTerm('unit_code', 'NOTACODE', ctx)).toEqual({ indexed: false });
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
