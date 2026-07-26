@@ -522,6 +522,43 @@ describe('SmithsonianService', () => {
       expect(full.media_summary.has_cc0_images).toBe(false);
     });
 
+    it('dedupes topics across the indexed and freetext blocks, first-seen order (issue #35)', () => {
+      // Real siris_sil_1161076 shape: the indexed facet is usually the trailing
+      // segment of the freetext LCSH string, and identical values appear in both,
+      // so the raw concatenation repeats terms verbatim.
+      const svc = makeService();
+      const raw: RawEDAN = {
+        title: 'Hopi Star Quilt',
+        unitCode: 'SIL',
+        content: {
+          descriptiveNonRepeating: { record_ID: 'siris_sil_1161076' },
+          indexedStructured: { topic: ['Hopi quilts', 'Star quilts', 'Quilts', 'History'] },
+          freetext: {
+            topic: [
+              { label: 'Topic', content: 'Quilts--History' },
+              { label: 'Topic', content: 'Indian quilts--History' },
+              { label: 'Topic', content: 'Star quilts' },
+              { label: 'Topic', content: 'Hopi quilts' },
+              { label: 'Topic', content: 'Indian quilts' },
+              { label: 'Topic', content: 'Quilts' },
+            ],
+          },
+        },
+      };
+      const full = svc.toFullObject(raw);
+      // Ten raw entries collapse to the distinct set, indexed block first. The
+      // subdivided LCSH forms are distinct strings from the bare facets, so both survive.
+      expect(full.topics).toEqual([
+        'Hopi quilts',
+        'Star quilts',
+        'Quilts',
+        'History',
+        'Quilts--History',
+        'Indian quilts--History',
+        'Indian quilts',
+      ]);
+    });
+
     it('excludes Dimensions-labeled physicalDescription entries from materials (issue #9)', () => {
       // Real freetext shape of nasm_A19740798000: a "Materials" entry alongside a
       // "Dimensions" entry. The measurement must land in `dimensions` only, never

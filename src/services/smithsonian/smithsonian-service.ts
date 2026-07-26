@@ -127,6 +127,15 @@ function collectContent(entries: RawFreetextEntry[] | undefined, labelFilter?: s
 }
 
 /**
+ * Drop empties and exact duplicates from a string list, keeping first-seen order.
+ * `Set` iteration is insertion-ordered, so the first occurrence of a repeated
+ * term holds its position.
+ */
+function distinct(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+/**
  * True when a physicalDescription label marks a measurement rather than material
  * prose. `Dimensions` and `Measurements` are the only dimension labels the live
  * vocabulary uses; both match here. Used to route an entry into `dimensions` and
@@ -226,8 +235,11 @@ function normalizeToFull(raw: RawEDAN): FullObject {
   // Culture
   const culture = (indexed?.culture ?? []).filter(Boolean);
 
-  // Topics
-  const topics = [...(indexed?.topic ?? []), ...collectContent(freetext?.topic)].filter(Boolean);
+  // Topics — the indexed facet is usually the trailing segment of the freetext
+  // LCSH string and identical values appear in both blocks, so the merge is
+  // deduped. Exact-match only: the subdivided form ("Quilts--History") is a
+  // distinct string from the bare facet ("Quilts") and both survive.
+  const topics = distinct([...(indexed?.topic ?? []), ...collectContent(freetext?.topic)]);
 
   // Exhibitions
   const exhibitions: Array<{ name: string; building?: string }> = [];
