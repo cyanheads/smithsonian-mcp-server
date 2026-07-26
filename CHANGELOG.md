@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-25
+
+Add a no_images error reason to smithsonian_get_media, dedupe get_object topics, and correct is_cc0/cc0_only description accuracy
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-25
 
 Cache term vocabulary with a TTL, add unit_code museum-name labels, and stop recovery hints looping on indexed-but-empty terms
