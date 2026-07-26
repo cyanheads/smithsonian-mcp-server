@@ -1,5 +1,5 @@
 /**
- * @fileoverview smithsonian_search_objects tool — full-text search across 19.4M Smithsonian objects.
+ * @fileoverview smithsonian_search_objects tool — full-text search across 14.5M Smithsonian objects.
  * @module mcp-server/tools/definitions/smithsonian-search-objects.tool
  */
 
@@ -111,7 +111,7 @@ const ObjectSummarySchema = z
 export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
   title: 'Search Smithsonian Objects',
   description:
-    'Recommended first step for open-ended or topic discovery: free-text search across 19.4 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, date term, or object type — use smithsonian_browse_category instead.',
+    'Recommended first step for open-ended or topic discovery: free-text search across 14.5 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, date term, or object type — use smithsonian_browse_category instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({

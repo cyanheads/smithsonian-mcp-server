@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-26
+
+Fix Lucene filter escaping, symmetric CC0 rendering in browse_category, and correct the stale 19.4M corpus count to 14.5M
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-26 · ⚠️ Breaking
 
 Rename search_objects/find_related date_decade filter to date and accept the full indexed date vocabulary, not just decades

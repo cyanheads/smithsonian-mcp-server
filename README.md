@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/smithsonian-mcp-server</h1>
-  <p><b>Search, explore, and retrieve CC0 media from 19.4 million Smithsonian Open Access objects across 20+ museums via MCP. STDIO or Streamable HTTP.</b>
+  <p><b>Search 14.5M Smithsonian Open Access objects across 20+ museums via MCP, and retrieve CC0 images for the 5.2M that carry openly-licensed media. STDIO or Streamable HTTP.</b>
   <div>6 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -41,7 +41,7 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 
 | Tool | Description |
 |:---|:---|
-| `smithsonian_search_objects` | Search across 19.4M objects by text query with optional filters (museum, type, date term, culture, place, online-only, CC0). Returns curated summaries with total count. |
+| `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, online-only, CC0). Returns curated summaries with total count. |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
 | `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
 | `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned, never an empty list — a distinct error reason names why, whether the object has nothing digitized, only non-image media, or only restricted images. |
@@ -52,7 +52,7 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 
 Full-text search with structured filters across the entire Smithsonian catalog.
 
-- Free-text search over 19.4M objects from 20+ museums
+- Free-text search over 14.5M objects from 20+ museums
 - Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, online-only, CC0-only
 - Returns curated summaries: title, date, museum, object type, thumbnail URL, CC0 flag, `record_id`
 - Use `start` + `rows` for standard pagination (offset-based, max 100 per page)
@@ -133,7 +133,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp
 
 Smithsonian-specific:
 
-- Wraps the [Smithsonian Open Access API](https://edan.si.edu/openaccess/apidocs/) (19.4M objects across 20+ museums) with a free `api.data.gov` key
+- Wraps the [Smithsonian Open Access API](https://edan.si.edu/openaccess/apidocs/) (14.5M objects across 20+ museums, 5.2M carrying CC0 media) with a free `api.data.gov` key
 - CC0 gating on `smithsonian_get_media` — only open-access images returned, never restricted content
 - Graceful degradation in `smithsonian_find_related` — a failure in one metadata signal doesn't abort the rest
 - Response normalization across heterogeneous museum metadata schemas

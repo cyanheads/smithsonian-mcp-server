@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** smithsonian-mcp-server
-**Version:** 0.3.0
+**Version:** 0.3.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.15`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/sdk` ^1.29.0
@@ -49,7 +49,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 import { tool, z } from '@cyanheads/mcp-ts-core';
 
 export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
-  description: 'Search across 19.4 million Smithsonian objects by text query and optional filters.',
+  description: 'Search across 14.5 million Smithsonian objects by text query and optional filters.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
   input: z.object({
     query: z.string().describe('Free-text search terms.'),

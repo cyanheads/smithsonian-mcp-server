@@ -27,7 +27,7 @@ await createApp({
   resources: [],
   prompts: [],
   instructions:
-    'Smithsonian Open Access API — 19.4M objects across 20+ museums.\n' +
+    'Smithsonian Open Access API — 14.5M objects across 20+ museums; 5.2M of them carry CC0 media.\n' +
     'Recommended workflow:\n' +
     '1. Start with smithsonian_search_objects for free-text or open-ended discovery.\n' +
     '2. Use smithsonian_list_terms to resolve exact museum (unit_code), culture, place, or date vocabulary — terms are a controlled vocabulary, often plural (e.g. "Paintings", not "Painting").\n' +

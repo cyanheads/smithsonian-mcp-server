@@ -1,6 +1,6 @@
 # smithsonian-mcp-server — Idea & Requirements
 
-Smithsonian Open Access — 19.4M objects across 20 museums and research centers, with deep metadata, provenance, and high-resolution open-access imagery.
+Smithsonian Open Access — 14.5M objects across 20 museums and research centers, with deep metadata, provenance, and high-resolution open-access imagery.
 
 | | |
 |---|---|
@@ -14,7 +14,7 @@ Smithsonian Open Access — 19.4M objects across 20 museums and research centers
 
 ## Overview
 
-Museum collections and natural history across the Smithsonian Institution's 20 museums and research centers — 19.4 million objects spanning art, natural-history specimens, aerospace artifacts, American history, African American culture, Indigenous collections, scientific instruments, and photography.
+Museum collections and natural history across the Smithsonian Institution's 20 museums and research centers — 14.5 million objects spanning art, natural-history specimens, aerospace artifacts, American history, African American culture, Indigenous collections, scientific instruments, and photography.
 
 The API earns a standalone server: a single source, but with massive coverage, deep metadata, high-resolution imagery, and cross-collection discovery an LLM can reason over in ways the raw catalog search can't.
 
@@ -51,7 +51,7 @@ Organized around discovery and research workflows, not raw endpoints.
 
 | Tool | Behavior |
 |:---|:---|
-| `smithsonian_search_objects` | Full-text across all 19.4M objects. Shortcut `query` for simple search; structured filters (museum, object_type, date_range, culture, place, medium, maker). Returns thumbnails, attribution, object IDs, and faceted counts so the agent narrows without a separate facet call. |
+| `smithsonian_search_objects` | Full-text across all 14.5M objects. Shortcut `query` for simple search; structured filters (museum, object_type, date_range, culture, place, medium, maker). Returns thumbnails, attribution, object IDs, and faceted counts so the agent narrows without a separate facet call. |
 | `smithsonian_get_object` | Full record by ID: title, description, date, materials, dimensions, provenance, exhibition history, unit, collection, credit line, image URLs (multi-resolution), related object IDs. |
 | `smithsonian_browse_category` | Guided browse by category. Mode: `museum` \| `culture` \| `period` \| `medium`. Returns a category overview with sample objects and counts — the "what does the Smithsonian have about X?" entry point. |
 | `smithsonian_find_related` | Given an object ID, find related items across collections via the API's relatedness data plus metadata similarity (culture, period, medium, maker, topic). Cross-museum discovery is the value-add. |
