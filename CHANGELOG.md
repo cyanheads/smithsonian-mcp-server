@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-26 · ⚠️ Breaking
+
+Rename search_objects/find_related date_decade filter to date and accept the full indexed date vocabulary, not just decades
+
 ## [0.2.2](changelog/0.2.x/0.2.2.md) — 2026-07-25
 
 Add a no_images error reason to smithsonian_get_media, dedupe get_object topics, and correct is_cc0/cc0_only description accuracy
