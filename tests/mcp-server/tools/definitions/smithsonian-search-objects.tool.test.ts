@@ -555,8 +555,9 @@ describe('smithsonianSearchObjects', () => {
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
     // Filters are passed as Lucene terms to embed in q — not as separate fq params
-    expect(calledParams.filters).toContain('unit_code:NASM');
-    expect(calledParams.filters).toContain('object_type:Aircraft');
+    expect(calledParams.filters).toContain('unit_code:"NASM"');
+    expect(calledParams.filters).toContain('object_type:"Aircraft"');
+    // Not luceneField calls — these two are intentional wildcards and stay unquoted.
     expect(calledParams.filters).toContain('media_usage:CC0');
     expect(calledParams.filters).toContain('online_media_type:*');
   });
@@ -700,9 +701,9 @@ describe('smithsonianSearchObjects', () => {
         await smithsonianSearchObjects.handler(input, ctx);
 
         const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-        expect(calledParams.filters).toContain(
-          date.includes(' ') ? `date:"${date}"` : `date:${date}`,
-        );
+        // Always quoted (issue #42) — an unquoted single-token value is parsed for
+        // Lucene syntax, so quoting is not conditional on the value containing a space.
+        expect(calledParams.filters).toContain(`date:"${date}"`);
       },
     );
 
@@ -750,7 +751,7 @@ describe('smithsonianSearchObjects', () => {
 
       const calledParams = searchFn.mock.calls[0]?.[0] as { query: string; filters: string[] };
       expect(calledParams.query).toBe('');
-      expect(calledParams.filters).toEqual(['unit_code:NASM']);
+      expect(calledParams.filters).toEqual(['unit_code:"NASM"']);
     });
 
     it('leaves a whitespace-only query untouched', async () => {
@@ -808,5 +809,71 @@ describe('smithsonianSearchObjects', () => {
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).not.toContain('**Date:**');
     expect(text).toContain('nmnh_NODATE');
+  });
+
+  describe('filter values are quoted and escaped (issue #42)', () => {
+    it('escapes a quote-bearing culture term instead of truncating the phrase', async () => {
+      // `smithsonian_list_terms { field: "culture", contains: "Tomb Age" }` returns this
+      // term verbatim as a pass-through-ready value. Unescaped, the inner quote closes
+      // the phrase early, EDAN matches nothing, and the caller is told a term with 3
+      // retrievable objects has none.
+      const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 3 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      await smithsonianSearchObjects.handler(
+        smithsonianSearchObjects.input.parse({
+          query: '',
+          filters: { culture: 'Early Iron Age, "Tomb Age"' },
+        }),
+        ctx,
+      );
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+      expect(calledParams.filters).toEqual(['culture:"Early Iron Age, \\"Tomb Age\\""']);
+    });
+
+    it('quotes a bare wildcard place term so it stays one literal term', async () => {
+      // `*` is a literal term in the `place` vocabulary. Emitted unquoted as `place:*`
+      // it becomes a wildcard over every record carrying a place — 12.4M hits reported
+      // as the total for a term that has 124.
+      const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 124 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      await smithsonianSearchObjects.handler(
+        smithsonianSearchObjects.input.parse({ query: '', filters: { place: '*' } }),
+        ctx,
+      );
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+      expect(calledParams.filters).toEqual(['place:"*"']);
+      expect(calledParams.filters).not.toContain('place:*');
+    });
+
+    it('leaves the two intentional wildcard literals unquoted', async () => {
+      // online_media_type:* and media_usage:CC0 are built as string literals, not via
+      // luceneField — the wildcard there is deliberate and must survive the fix.
+      const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      await smithsonianSearchObjects.handler(
+        smithsonianSearchObjects.input.parse({
+          query: 'aircraft',
+          filters: { online_only: true, cc0_only: true },
+        }),
+        ctx,
+      );
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+      expect(calledParams.filters).toEqual(['online_media_type:*', 'media_usage:CC0']);
+    });
   });
 });

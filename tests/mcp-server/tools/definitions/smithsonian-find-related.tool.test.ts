@@ -870,11 +870,12 @@ describe('smithsonianFindRelated', () => {
         filters: { date: period, object_type: 'Aircraft' },
       });
       // The continuation must reproduce the fan-out's own upstream call, so the
-      // fan-out quotes a multi-word date term exactly as the sibling tool would.
+      // fan-out quotes the date term exactly as the sibling tool would — always,
+      // not only when the term contains a space (issue #42).
       const fanOutFilters = searchFn.mock.calls
         .map((call) => (call[0] as { filters: string[] }).filters)
         .find((filters) => filters.some((f) => f.startsWith('date:')));
-      expect(fanOutFilters).toContain(period.includes(' ') ? `date:"${period}"` : `date:${period}`);
+      expect(fanOutFilters).toContain(`date:"${period}"`);
       // The whole continuation must parse as smithsonian_search_objects input.
       expect(() =>
         smithsonianSearchObjects.input.parse(periodSignal?.search_continuation),

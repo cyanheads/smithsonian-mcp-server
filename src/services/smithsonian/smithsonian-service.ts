@@ -367,9 +367,24 @@ function extractImageItems(media: RawMediaItem[]): ImageItem[] {
 // Query construction
 // ---------------------------------------------------------------------------
 
-/** Build a Lucene `field:value` term, quoting values that contain whitespace. */
+/**
+ * Build a Lucene `field:value` term as an always-quoted, escaped phrase.
+ *
+ * Both halves are load-bearing against the exact, pass-through-ready values
+ * `smithsonian_list_terms` hands the caller:
+ *
+ * - **Escaping `\` and `"`.** A term carrying a quote (`Early Iron Age, "Tomb Age"`)
+ *   otherwise closes the phrase at the inner quote and matches nothing, and a term
+ *   carrying a backslash (`Argentina \ Chile`) is read as an escape sequence.
+ * - **Always quoting.** An unquoted single-token value is parsed for Lucene syntax,
+ *   so the literal `place` term `*` becomes a wildcard matching every record with
+ *   any place — reporting 12.4M hits for a term that has 124.
+ *
+ * Quoting is inert for ordinary values: `unit_code:"NASM"`, `object_type:"Paintings"`,
+ * `date:"1960s"`, and `place:"//Karas"` all return the counts their unquoted forms did.
+ */
 export function luceneField(field: string, value: string): string {
-  return value.includes(' ') ? `${field}:"${value}"` : `${field}:${value}`;
+  return `${field}:"${value.replace(/[\\"]/g, '\\$&')}"`;
 }
 
 // ---------------------------------------------------------------------------

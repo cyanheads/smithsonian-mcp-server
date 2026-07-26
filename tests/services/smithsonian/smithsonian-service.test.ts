@@ -8,7 +8,7 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
-import { SmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import { luceneField, SmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
 import type {
   RawContentResponse,
   RawEDAN,
@@ -1129,5 +1129,48 @@ describe('SmithsonianService', () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// luceneField — Lucene term construction (issue #42)
+// ---------------------------------------------------------------------------
+
+describe('luceneField', () => {
+  it('quotes an ordinary single-token value', () => {
+    // Quoting is inert here: unit_code:"NASM" and unit_code:NASM return the same
+    // 1,020 objects upstream. It costs nothing and closes the wildcard hole below.
+    expect(luceneField('unit_code', 'NASM')).toBe('unit_code:"NASM"');
+  });
+
+  it('quotes a value containing spaces', () => {
+    // Unquoted, EDAN ends the field term at the first space and parses the trailing
+    // words as free text — the defect #32 fixed and this preserves.
+    expect(luceneField('culture', 'Plains Indian')).toBe('culture:"Plains Indian"');
+  });
+
+  it('escapes an embedded double quote', () => {
+    // `Early Iron Age, "Tomb Age"` is a live culture term. Unescaped, the inner quote
+    // closes the phrase and EDAN returns 0; escaped, it returns the term's 3 objects.
+    expect(luceneField('culture', 'Early Iron Age, "Tomb Age"')).toBe(
+      'culture:"Early Iron Age, \\"Tomb Age\\""',
+    );
+  });
+
+  it('escapes an embedded backslash', () => {
+    // `Argentina \ Chile` is a live place term; the backslash is otherwise read as
+    // an escape sequence and the term matches nothing.
+    expect(luceneField('place', 'Argentina \\ Chile')).toBe('place:"Argentina \\\\ Chile"');
+  });
+
+  it('neutralizes a bare wildcard value', () => {
+    // `*` is a literal term in the `place` vocabulary. Unquoted, `place:*` is a
+    // wildcard matching every record with any place — 12,378,789 against the 124 the
+    // term actually has, reported to the caller as that term's total.
+    expect(luceneField('place', '*')).toBe('place:"*"');
+  });
+
+  it('escapes both metacharacters in one value', () => {
+    expect(luceneField('topic', 'a\\b"c')).toBe('topic:"a\\\\b\\"c"');
   });
 });
