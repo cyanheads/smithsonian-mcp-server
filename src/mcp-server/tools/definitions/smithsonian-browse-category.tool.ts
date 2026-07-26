@@ -99,9 +99,9 @@ function categoryRecoveryHint(
       return `"${value}" is not an exact topic term. Resolve it with smithsonian_list_terms { field: "topic", contains: "${value}" }, then browse again with the exact value.`;
     case 'medium':
       if (objectTypes.length > 0) {
-        return `"${value}" is not an exact object_type term. Object types present for a free-text search of "${value}" — ${objectTypes.join(', ')}. Browse again with one of these exact terms (object_type is commonly plural, e.g. "Paintings").`;
+        return `"${value}" is not an exact object_type term. Object types present for a free-text search of "${value}" — ${objectTypes.join(', ')}. Browse again with one of these exact terms (object_type is commonly plural, e.g. "Paintings"). Casing variants are separate categories with separate totals, so if the one you pick comes back thin, browse its other casings too.`;
       }
-      return `"${value}" is not an exact object_type term, and object_type is not enumerable through smithsonian_list_terms. Run smithsonian_search_objects { query: "${value}" } and inspect the object_type values in the results (commonly plural, e.g. "Paintings") to find the exact term, then browse again with mode "medium".`;
+      return `"${value}" is not an exact object_type term, and object_type is not enumerable through smithsonian_list_terms. Run smithsonian_search_objects { query: "${value}" } and inspect the object_type values in the results (commonly plural, e.g. "Paintings") to find the exact term, then browse again with mode "medium". A sampled result set can show several casings of one concept and each is its own category, so browse the variants rather than assuming one covers it.`;
   }
 }
 
@@ -174,7 +174,7 @@ const SampleObjectSchema = z
 export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
   title: 'Browse Smithsonian by Category',
   description:
-    'Browse Smithsonian objects within one exact category — a single museum (mode "museum"), culture, indexed date term (mode "period"), object type (mode "medium"), or subject term (mode "topic"). The value must be an exact indexed category term, not free text: resolve museum, culture, period, and topic vocabulary with smithsonian_list_terms first (object_type is not enumerable there — harvest it from smithsonian_search_objects results). Returns the category total count, a page of matching objects, and a museum breakdown of that page; page the full category with start and rows. For open-ended or topic discovery, start with smithsonian_search_objects instead.',
+    'Browse Smithsonian objects within one exact category — a single museum (mode "museum"), culture, indexed date term (mode "period"), object type (mode "medium"), or subject term (mode "topic"). The value must be an exact indexed category term, not free text: resolve museum, culture, period, and topic vocabulary with smithsonian_list_terms first (object_type is not enumerable there — harvest it from smithsonian_search_objects results, and treat each casing as its own category, since a harvested object_type covers only the casing it was written in). Returns the category total count, a page of matching objects, and a museum breakdown of that page; page the full category with start and rows. For open-ended or topic discovery, start with smithsonian_search_objects instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -186,7 +186,7 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
     value: z
       .string()
       .describe(
-        'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: an indexed date term — commonly a decade ("1940s", "1860s"), but year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s") are indexed too. medium: object type, usually plural ("Paintings", "Aircraft"). topic: subject term ("Quilts", "Aviation"). Smithsonian uses a controlled vocabulary — for museum (unit_code), culture, period (date), and topic, call smithsonian_list_terms to find exact terms; medium (object_type) is not enumerable there, so harvest it from smithsonian_search_objects results.',
+        'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: an indexed date term — commonly a decade ("1940s", "1860s"), but year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s") are indexed too. medium: object type, usually plural ("Paintings", "Aircraft"). topic: subject term ("Quilts", "Aviation"). Smithsonian uses a controlled vocabulary — for museum (unit_code), culture, period (date), and topic, call smithsonian_list_terms to find exact terms; medium (object_type) is not enumerable there, so harvest it from smithsonian_search_objects results. Every mode matches its value exactly and case-sensitively, and for medium that split is load-bearing: casing variants are indexed as SEPARATE categories, each reporting its own total_count ("button" and "Button" are different categories, and neither casing is reliably the larger), so browse the variants of a harvested value rather than assuming one covers the concept.',
       ),
     rows: z
       .number()

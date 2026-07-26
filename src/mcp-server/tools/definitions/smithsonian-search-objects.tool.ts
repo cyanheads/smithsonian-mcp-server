@@ -77,7 +77,9 @@ function composeFilterHint(
   if (harvested.length > 0) {
     parts.push(
       `Values present for this query — ${harvested.join('; ')}. ` +
-        `Retry with one of these exact terms (object_type is commonly plural, e.g. "Paintings").`,
+        `Retry with one of these exact terms (object_type is commonly plural, e.g. "Paintings"). ` +
+        `object_type matches case-sensitively and indexes casing variants as separate categories, ` +
+        `so if a harvested value returns far fewer objects than the concept should, retry its other casings.`,
     );
   }
   return parts.join(' ');
@@ -104,7 +106,9 @@ const ObjectSummarySchema = z
     object_type: z
       .string()
       .optional()
-      .describe('Object type term (e.g. "Aircraft", "Paintings", "Photographs").'),
+      .describe(
+        'Object type term (e.g. "Aircraft", "Paintings", "Photographs"). Harvest it here to filter a later search, but it is case-sensitive and casing variants are separate categories upstream — this row carries one casing of the concept, not all of it.',
+      ),
     date: z
       .string()
       .optional()
@@ -152,7 +156,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .string()
           .optional()
           .describe(
-            'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search_objects results.',
+            'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search_objects results. Matched exactly and case-sensitively, and casing variants are indexed as SEPARATE categories — "button" and "Button" each hold their own records, and neither casing is reliably the larger — so probe a harvested value\'s other casings rather than assuming one covers the concept.',
           ),
         date: z
           .string()
@@ -250,7 +254,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'A filtered search matched nothing — most often a filter value outside the Smithsonian controlled vocabulary (e.g. a singular "Painting" instead of "Paintings").',
       recovery:
-        "Call smithsonian_list_terms with the relevant field (unit_code, culture, place, date, topic) and a contains substring to resolve a filter value to an exact vocabulary term, then retry. Note object_type and name are not enumerable — harvest object_type from search results, and take name from a smithsonian_find_related name signal, which carries the indexed form (smithsonian_get_object's makers[] is the free-text form and is often written differently).",
+        "Call smithsonian_list_terms with the relevant field (unit_code, culture, place, date, topic) and a contains substring to resolve a filter value to an exact vocabulary term, then retry. Note object_type and name are not enumerable — harvest object_type from search results, and take name from a smithsonian_find_related name signal, which carries the indexed form (smithsonian_get_object's makers[] is the free-text form and is often written differently). A harvested object_type is case-sensitive and its casing variants are separate categories, so retry the other casings before concluding the concept is empty.",
     },
   ],
 
