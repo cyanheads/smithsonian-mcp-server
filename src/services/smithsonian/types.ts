@@ -194,3 +194,28 @@ export interface ImageItem {
   screen_url?: string;
   thumbnail_url?: string;
 }
+
+/**
+ * Where a filter value stands in its field's term vocabulary, and — when the
+ * vocabulary holds it — a `contains` substring proven to list something else.
+ *
+ * Recovery hints on a zero-match search or browse read both halves: `indexed`
+ * separates a value that can be resolved through smithsonian_list_terms from one
+ * the index already enumerates, and `neighbors` is the only substring the hint
+ * may name, because it was tested against the vocabulary rather than assumed.
+ */
+export interface TermDescription {
+  /** True when the value is an exact, case-sensitive member of the vocabulary. */
+  indexed: boolean;
+  /**
+   * A substring that a `contains` query resolves to at least one term other than
+   * the value itself. Absent when no tested substring does, in which case a hint
+   * has no working term route to offer and must not name one.
+   */
+  neighbors?: {
+    /** The substring to pass as smithsonian_list_terms `contains`. */
+    contains: string;
+    /** How many vocabulary terms other than the value contain it. */
+    count: number;
+  };
+}

@@ -11,6 +11,7 @@ import {
   luceneField,
   type SmithsonianService,
 } from '@/services/smithsonian/smithsonian-service.js';
+import type { TermDescription } from '@/services/smithsonian/types.js';
 
 /** The category dimension a browse targets. */
 type BrowseMode = 'museum' | 'culture' | 'period' | 'medium' | 'topic';
@@ -41,28 +42,35 @@ const MAX_OBJECT_TYPE_CANDIDATES = 12;
  * browse category is an exact indexed facet, so a zero match means the value did
  * not resolve to retrievable objects, not that an object is missing (issue #31).
  *
- * For museum, culture, period, and topic, `indexed` splits the two ways that happens.
- * A value outside the vocabulary is resolvable, so the hint names the literal
- * smithsonian_list_terms call that resolves it. A value the index enumerates but
- * that matches no object — 14 of the 48 unit codes and a long tail of culture
- * terms are in this state — is NOT resolvable: list_terms hands the same value
- * back and the caller loops through the identical failure (issue #33). That
- * branch says the term is indexed and empty, and routes somewhere that can
- * succeed. medium's object_type is not enumerable upstream, so it never gets a
- * vocabulary check; `objectTypes`, harvested from a free-text re-query, names
- * candidates directly and falls back to routing the caller to that same search
- * when the harvest comes back empty. Never auto-selects a candidate: the hint
- * lists terms and the caller picks the intended one.
+ * For museum, culture, period, and topic, `term.indexed` splits the two ways that
+ * happens. A value outside the vocabulary is resolvable, so the hint names the
+ * literal smithsonian_list_terms call that resolves it. A value the index
+ * enumerates but that matches no object — 14 of the 48 unit codes and a long tail
+ * of culture terms are in this state — is NOT resolvable: list_terms hands the
+ * same value back and the caller loops through the identical failure (issue #33).
+ * That branch says the term is indexed and empty, and routes somewhere that can
+ * succeed. Where that route is a `contains` search — culture and topic, the two
+ * vocabularies too large to browse whole — it names `term.neighbors.contains`, a
+ * substring the service proved lists other terms, and drops the clause when there
+ * is none rather than handing back the failing value (issue #46). museum and
+ * period route to the unfiltered vocabulary (48 unit codes, ~200 date terms), so
+ * neither ever depended on a substring. medium's object_type is not enumerable
+ * upstream, so it never gets a vocabulary check; `objectTypes`, harvested from a
+ * free-text re-query, names candidates directly and falls back to routing the
+ * caller to that same search when the harvest comes back empty. Never
+ * auto-selects a candidate: the hint lists terms and the caller picks the
+ * intended one.
  */
 function categoryRecoveryHint(
   mode: BrowseMode,
   value: string,
-  indexed: boolean,
+  term: TermDescription,
   objectTypes: string[],
 ): string {
+  const neighbors = term.neighbors;
   switch (mode) {
     case 'museum':
-      if (indexed) {
+      if (term.indexed) {
         return `"${value}" is an indexed Smithsonian unit code, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a different unit (smithsonian_list_terms { field: "unit_code" } lists all 48 codes with their museum names), or search the collection directly with smithsonian_search_objects.`;
       }
       // `contains` matches each code's museum name as well as the code itself
@@ -70,18 +78,22 @@ function categoryRecoveryHint(
       // — no separate branch for a spaced value.
       return `"${value}" is not an exact Smithsonian unit code. Resolve it to a real code with smithsonian_list_terms { field: "unit_code", contains: "${value}" }, which matches museum names as well as codes, then browse again with the exact value.`;
     case 'culture':
-      if (indexed) {
-        return `"${value}" is an indexed culture term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a related term from smithsonian_list_terms { field: "culture", contains: "${value}" }, or search the collection directly with smithsonian_search_objects.`;
+      if (term.indexed) {
+        return neighbors
+          ? `"${value}" is an indexed culture term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse one of the ${neighbors.count} other culture ${neighbors.count === 1 ? 'term' : 'terms'} from smithsonian_list_terms { field: "culture", contains: "${neighbors.contains}" }, or search the collection directly with smithsonian_search_objects.`
+          : `"${value}" is an indexed culture term, but it currently matches no retrievable objects — resolving it again returns the same value, and neither it nor a leading segment of it lists a different culture term. Search the collection directly with smithsonian_search_objects.`;
       }
       return `"${value}" is not an exact culture term. Resolve it with smithsonian_list_terms { field: "culture", contains: "${value}" }, then browse again with the exact value.`;
     case 'period':
-      if (indexed) {
+      if (term.indexed) {
         return `"${value}" is an indexed date term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a different term from smithsonian_list_terms { field: "date" }, or search the collection directly with smithsonian_search_objects.`;
       }
       return `"${value}" matched no indexed date term. Resolve an indexed value with smithsonian_list_terms { field: "date", contains: "${value}" }, then browse again with the exact value.`;
     case 'topic':
-      if (indexed) {
-        return `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a related term from smithsonian_list_terms { field: "topic", contains: "${value}" }, or search the collection directly with smithsonian_search_objects.`;
+      if (term.indexed) {
+        return neighbors
+          ? `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse one of the ${neighbors.count} other topic ${neighbors.count === 1 ? 'term' : 'terms'} from smithsonian_list_terms { field: "topic", contains: "${neighbors.contains}" }, or search the collection directly with smithsonian_search_objects.`
+          : `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value, and neither it nor a leading segment of it lists a different topic term. Search the collection directly with smithsonian_search_objects.`;
       }
       return `"${value}" is not an exact topic term. Resolve it with smithsonian_list_terms { field: "topic", contains: "${value}" }, then browse again with the exact value.`;
     case 'medium':
@@ -120,24 +132,25 @@ async function harvestObjectTypes(
 }
 
 /**
- * Whether the failed value is an exact member of the mode's term vocabulary —
- * the branch `categoryRecoveryHint` needs to tell an unresolvable value from a
- * resolvable one. medium's object_type is not enumerable upstream, so it is
- * never checked. Best-effort and failure-path only, like `harvestObjectTypes`:
- * a throwing lookup yields false and the resolve-it hint stands, which is the
- * behavior that predates the check.
+ * Where the failed value sits in the mode's term vocabulary — the branch
+ * `categoryRecoveryHint` needs to tell an unresolvable value from a resolvable
+ * one, plus the substring that lists neighbors when one exists. medium's
+ * object_type is not enumerable upstream, so it is never checked. Best-effort and
+ * failure-path only, like `harvestObjectTypes`: a throwing lookup yields the
+ * unindexed answer and the resolve-it hint stands, which is the behavior that
+ * predates the check.
  */
-async function isIndexedCategoryValue(
+async function describeCategoryValue(
   svc: SmithsonianService,
   mode: BrowseMode,
   value: string,
   ctx: RequestContextLike,
-): Promise<boolean> {
-  if (mode === 'medium') return false;
+): Promise<TermDescription> {
+  if (mode === 'medium') return { indexed: false };
   try {
-    return await svc.isIndexedTerm(MODE_FIELD[mode], value, ctx);
+    return await svc.describeTerm(MODE_FIELD[mode], value, ctx);
   } catch {
-    return false;
+    return { indexed: false };
   }
 }
 
@@ -283,15 +296,15 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
     // the literal next call that resolves the value rather than treating the
     // object as missing.
     if (rowCount === 0) {
-      const [objectTypes, indexed] = await Promise.all([
+      const [objectTypes, term] = await Promise.all([
         input.mode === 'medium' ? harvestObjectTypes(svc, input.value, ctx) : [],
-        isIndexedCategoryValue(svc, input.mode, input.value, ctx),
+        describeCategoryValue(svc, input.mode, input.value, ctx),
       ]);
       throw ctx.fail(
         'invalid_category',
         `No Smithsonian objects match ${input.mode} category "${input.value}".`,
         {
-          recovery: { hint: categoryRecoveryHint(input.mode, input.value, indexed, objectTypes) },
+          recovery: { hint: categoryRecoveryHint(input.mode, input.value, term, objectTypes) },
           mode: input.mode,
           value: input.value,
         },

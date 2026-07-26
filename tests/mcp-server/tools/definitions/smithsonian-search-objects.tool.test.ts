@@ -8,7 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
-import type { ObjectSummary } from '@/services/smithsonian/types.js';
+import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
 
 function makeObjectSummary(id = 'nasm_TEST001'): ObjectSummary {
   return {
@@ -27,18 +27,17 @@ function makeObjectSummary(id = 'nasm_TEST001'): ObjectSummary {
 /**
  * Stand in for the service on the filtered-zero path, where the handler consults the
  * term vocabulary for each routable filter to tell an unresolvable value from a
- * resolvable one (issue #33). `indexed` is the answer that check returns; passing it
- * explicitly keeps every filtered-zero test on a deliberate branch.
+ * resolvable one (issue #33) and to find a substring that lists other terms
+ * (issue #46). `term` is the answer that lookup returns; passing it explicitly keeps
+ * every filtered-zero test on a deliberate branch.
  */
 function makeFilteredZeroService(
   search: ReturnType<typeof vi.fn>,
-  indexed: boolean | Error = false,
+  term: TermDescription | Error = { indexed: false },
 ): svcModule.SmithsonianService {
-  const isIndexedTerm =
-    indexed instanceof Error
-      ? vi.fn().mockRejectedValue(indexed)
-      : vi.fn().mockResolvedValue(indexed);
-  return { search, isIndexedTerm } as unknown as svcModule.SmithsonianService;
+  const describeTerm =
+    term instanceof Error ? vi.fn().mockRejectedValue(term) : vi.fn().mockResolvedValue(term);
+  return { search, describeTerm } as unknown as svcModule.SmithsonianService;
 }
 
 describe('smithsonianSearchObjects', () => {
@@ -417,10 +416,10 @@ describe('smithsonianSearchObjects', () => {
     ] as const)(
       '%s: an indexed value is named as exact, not as unresolved',
       async (filter, filters, field, value) => {
-        const isIndexedTerm = vi.fn().mockResolvedValue(true);
+        const describeTerm = vi.fn().mockResolvedValue({ indexed: true });
         vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
           search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-          isIndexedTerm,
+          describeTerm,
         } as unknown as svcModule.SmithsonianService);
 
         const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
@@ -433,13 +432,55 @@ describe('smithsonianSearchObjects', () => {
         expect(hint).toContain('resolving it again returns the same value');
         // The dead-end the old hint produced for every zero match.
         expect(hint).not.toContain('matched nothing — resolve it to an exact term');
-        expect(isIndexedTerm).toHaveBeenCalledWith(field, value, ctx);
+        // No substring lists a different term, so the hint offers no list_terms
+        // route rather than one that returns the failing value (issue #46).
+        expect(hint).not.toContain('contains:');
+        expect(hint).toContain('drop the filter and search on the query alone');
+        expect(describeTerm).toHaveBeenCalledWith(field, value, ctx);
+      },
+    );
+
+    it.each([
+      ['culture', 'Guiana, French', { contains: 'Guiana', count: 17 }, '17 other culture terms'],
+      [
+        'topic',
+        'Bell UH-1H Iroquois "Huey" Smokey III',
+        { contains: 'Bell', count: 234 },
+        '234 other topic terms',
+      ],
+      ['place', 'Nigeria, Kano', { contains: 'Nigeria', count: 1 }, '1 other place term'],
+    ] as const)(
+      '%s: an indexed value with neighbors names the proven substring (issue #46)',
+      async (field, value, neighbors, claim) => {
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+          makeFilteredZeroService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), {
+            indexed: true,
+            neighbors,
+          }),
+        );
+
+        const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+        const input = smithsonianSearchObjects.input.parse({
+          query: 'basket',
+          filters: { [field]: value },
+        });
+        const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
+
+        const hint = err.data?.recovery?.hint as string;
+        expect(hint).toContain(claim);
+        expect(hint).toContain(
+          `smithsonian_list_terms { field: "${field}", contains: "${neighbors.contains}" }`,
+        );
+        // The substring is the service's, never the failing value echoed back.
+        expect(hint).not.toContain(`contains: "${value}"`);
       },
     );
 
     it('keeps the resolve-it hint for a value outside the vocabulary', async () => {
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
-        makeFilteredZeroService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), false),
+        makeFilteredZeroService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), {
+          indexed: false,
+        }),
       );
 
       const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
@@ -459,9 +500,9 @@ describe('smithsonianSearchObjects', () => {
       // must carry both statements, not collapse to whichever was checked first.
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
         search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-        isIndexedTerm: vi
+        describeTerm: vi
           .fn()
-          .mockImplementation((field: string) => Promise.resolve(field === 'culture')),
+          .mockImplementation((field: string) => Promise.resolve({ indexed: field === 'culture' })),
       } as unknown as svcModule.SmithsonianService);
 
       const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
@@ -502,10 +543,10 @@ describe('smithsonianSearchObjects', () => {
     it('never consults the vocabulary for unit_code or object_type', async () => {
       // Those two resolve through the unfiltered result harvest, not list_terms, so
       // they have no routable entry to check.
-      const isIndexedTerm = vi.fn().mockResolvedValue(true);
+      const describeTerm = vi.fn().mockResolvedValue({ indexed: true });
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
         search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-        isIndexedTerm,
+        describeTerm,
       } as unknown as svcModule.SmithsonianService);
 
       const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
@@ -515,17 +556,17 @@ describe('smithsonianSearchObjects', () => {
       });
       await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
-      expect(isIndexedTerm).not.toHaveBeenCalled();
+      expect(describeTerm).not.toHaveBeenCalled();
     });
 
     it('never consults the vocabulary for name, keeping the static contract hint', async () => {
       // `name` is not enumerable through smithsonian_list_terms and is absent from
       // ObjectSummary, so it has neither a routable entry nor a harvest. The static
       // contract recovery stands, and it names where exact values do come from.
-      const isIndexedTerm = vi.fn().mockResolvedValue(true);
+      const describeTerm = vi.fn().mockResolvedValue({ indexed: true });
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
         search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-        isIndexedTerm,
+        describeTerm,
       } as unknown as svcModule.SmithsonianService);
 
       const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
@@ -535,7 +576,7 @@ describe('smithsonianSearchObjects', () => {
       });
       const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
-      expect(isIndexedTerm).not.toHaveBeenCalled();
+      expect(describeTerm).not.toHaveBeenCalled();
       const expectedHint = smithsonianSearchObjects.errors?.find(
         (e) => e.reason === 'invalid_filter',
       )?.recovery;

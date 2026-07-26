@@ -26,6 +26,7 @@ import type {
   RawMediaItem,
   RawSearchResponse,
   RawTermsResponse,
+  TermDescription,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -387,6 +388,26 @@ export function luceneField(field: string, value: string): string {
   return `${field}:"${value.replace(/[\\"]/g, '\\$&')}"`;
 }
 
+/**
+ * `contains` substrings to try for a term, widest first: the value itself, the
+ * segment before its first structural separator, then its leading token.
+ *
+ * The whole value is first because it is the substring a caller would write, and
+ * on the short vocabularies (`culture`, `place`) it already lists neighbors —
+ * "Guiana" is inside "Guiana, French". Where it fails is the long, fully-qualified
+ * end of `topic`, whose terms carry LCSH subdivisions ("Quilts--History") and
+ * qualifiers ('Bell UH-1H Iroquois "Huey" Smokey III'); cutting at `--`, `(`, or
+ * `,` recovers the shared head, and the leading token is the last resort when the
+ * value carries no separator at all. Each is only a candidate — {@link
+ * SmithsonianService.describeTerm} tests it against the vocabulary before any hint
+ * names it.
+ */
+function containsCandidates(value: string): string[] {
+  const cut = value.search(/--|[(,]/);
+  const candidates = [value, cut > 0 ? value.slice(0, cut) : '', value.split(/\s+/)[0] ?? ''];
+  return [...new Set(candidates.map((c) => c.trim()).filter(Boolean))];
+}
+
 // ---------------------------------------------------------------------------
 // SmithsonianService
 // ---------------------------------------------------------------------------
@@ -638,20 +659,44 @@ export class SmithsonianService {
   }
 
   /**
-   * True when `value` is an exact member of the field's term vocabulary.
+   * Place `value` in the field's term vocabulary, and — when it is a member —
+   * find a `contains` substring that lists other terms.
    *
-   * Exact and case-sensitive, matching how EDAN itself resolves a term: `NMAfA`
-   * is real and `NMAFA` matches nothing. The `contains` filter on {@link listTerms}
-   * cannot stand in — it is a case-insensitive substring match, so it reports a
-   * hit for a wrong-case value and for a fragment that is not itself a term.
+   * Membership is exact and case-sensitive, matching how EDAN itself resolves a
+   * term: `NMAfA` is real and `NMAFA` matches nothing. The `contains` filter on
+   * {@link listTerms} cannot stand in — it is a case-insensitive substring match,
+   * so it reports a hit for a wrong-case value and for a fragment that is not
+   * itself a term.
    *
-   * Separates the two zero-match failures the recovery hints otherwise conflate:
-   * a value outside the vocabulary (resolvable through smithsonian_list_terms)
-   * from one the index enumerates but that matches no retrievable object, where
-   * resolving it again returns the caller to the same failing call.
+   * Membership separates the two zero-match failures the recovery hints otherwise
+   * conflate: a value outside the vocabulary (resolvable through
+   * smithsonian_list_terms) from one the index enumerates but that matches no
+   * retrievable object, where resolving it again returns the caller to the same
+   * failing call.
+   *
+   * `neighbors` then decides whether the indexed branch can offer a substitute
+   * term at all. Each candidate from {@link containsCandidates} is tested against
+   * the vocabulary already in hand, and only one that resolves to a term OTHER
+   * than the value is returned — so a hint naming it is naming a call with
+   * something to show. When none does, the caller has no term route to offer and
+   * says so instead of sending the caller back into the same value (issue #46).
    */
-  async isIndexedTerm(field: string, value: string, ctx: RequestContextLike): Promise<boolean> {
-    return (await this.vocabulary(field, ctx)).includes(value);
+  async describeTerm(
+    field: string,
+    value: string,
+    ctx: RequestContextLike,
+  ): Promise<TermDescription> {
+    const vocabulary = await this.vocabulary(field, ctx);
+    if (!vocabulary.includes(value)) return { indexed: false };
+
+    for (const contains of containsCandidates(value)) {
+      const needle = contains.toLowerCase();
+      const count = vocabulary.filter(
+        (term) => term !== value && term.toLowerCase().includes(needle),
+      ).length;
+      if (count > 0) return { indexed: true, neighbors: { contains, count } };
+    }
+    return { indexed: true };
   }
 }
 

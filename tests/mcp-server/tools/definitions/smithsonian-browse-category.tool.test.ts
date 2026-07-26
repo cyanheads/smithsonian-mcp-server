@@ -8,7 +8,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianBrowseCategory } from '@/mcp-server/tools/definitions/smithsonian-browse-category.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
-import type { ObjectSummary } from '@/services/smithsonian/types.js';
+import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
 
 /**
  * Fixture rows alternate two codes from the live `unit_code` vocabulary. A bare
@@ -29,19 +29,18 @@ function makeSamples(count = 3): ObjectSummary[] {
 /**
  * Stand in for the service on the zero-match path, where the handler consults the
  * term vocabulary to tell an unresolvable category value from a resolvable one
- * (issue #33). `indexed` is the answer that check returns; passing it explicitly
- * keeps every zero-match test on a deliberate branch rather than on the
- * best-effort catch that a missing method would otherwise fall into.
+ * (issue #33) and to find a substring that lists other terms (issue #46). `term`
+ * is the answer that lookup returns; passing it explicitly keeps every zero-match
+ * test on a deliberate branch rather than on the best-effort catch that a missing
+ * method would otherwise fall into.
  */
 function makeZeroMatchService(
   search: ReturnType<typeof vi.fn>,
-  indexed: boolean | Error = false,
+  term: TermDescription | Error = { indexed: false },
 ): svcModule.SmithsonianService {
-  const isIndexedTerm =
-    indexed instanceof Error
-      ? vi.fn().mockRejectedValue(indexed)
-      : vi.fn().mockResolvedValue(indexed);
-  return { search, isIndexedTerm } as unknown as svcModule.SmithsonianService;
+  const describeTerm =
+    term instanceof Error ? vi.fn().mockRejectedValue(term) : vi.fn().mockResolvedValue(term);
+  return { search, describeTerm } as unknown as svcModule.SmithsonianService;
 }
 
 /**
@@ -421,10 +420,10 @@ describe('smithsonianBrowseCategory', () => {
     ] as const)(
       '%s mode: an indexed value is named as empty, not as unresolvable',
       async (mode, value, field, claim) => {
-        const isIndexedTerm = vi.fn().mockResolvedValue(true);
+        const describeTerm = vi.fn().mockResolvedValue({ indexed: true });
         vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
           search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-          isIndexedTerm,
+          describeTerm,
         } as unknown as svcModule.SmithsonianService);
 
         const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
@@ -437,10 +436,70 @@ describe('smithsonianBrowseCategory', () => {
         expect(hint).toContain('matches no retrievable objects');
         // The dead-end the old hint produced: "resolve it, then browse again".
         expect(hint).not.toContain('then browse again with the exact value');
+        // No neighbor substring exists here, so the hint must not name a contains
+        // search at all — least of all one carrying the failing value (issue #46).
+        expect(hint).not.toContain('contains:');
         // Routed somewhere that can succeed instead of back into the same call.
         expect(hint).toContain('smithsonian_search_objects');
         // The membership test runs against the mode's own indexed field.
-        expect(isIndexedTerm).toHaveBeenCalledWith(field, value, ctx);
+        expect(describeTerm).toHaveBeenCalledWith(field, value, ctx);
+      },
+    );
+
+    it.each([
+      ['culture', 'Guiana, French', { contains: 'Guiana', count: 17 }, '17 other culture terms'],
+      [
+        'topic',
+        'Bell UH-1H Iroquois "Huey" Smokey III',
+        { contains: 'Bell', count: 234 },
+        '234 other topic terms',
+      ],
+      ['topic', 'Quilts--History', { contains: 'Quilts', count: 1 }, '1 other topic term'],
+    ] as const)(
+      '%s mode: an indexed value with neighbors routes to the proven substring (issue #46)',
+      async (mode, value, neighbors, claim) => {
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+          makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), {
+            indexed: true,
+            neighbors,
+          }),
+        );
+
+        const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+        const input = smithsonianBrowseCategory.input.parse({ mode, value });
+        const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
+
+        const hint = recoveryHint(err);
+        expect(hint).toContain(`contains: "${neighbors.contains}"`);
+        expect(hint).toContain(claim);
+        // The substring is the service's, never the failing value echoed back.
+        expect(hint).not.toContain(`contains: "${value}"`);
+      },
+    );
+
+    it.each([
+      ['museum', 'FSA', 'unit_code'],
+      ['period', '1210s', 'date'],
+    ] as const)(
+      '%s mode routes to the unfiltered vocabulary, with or without neighbors',
+      async (mode, value, field) => {
+        // Both vocabularies are small enough to list whole (48 unit codes, ~200 date
+        // terms), so neither branch ever depended on a substring — a neighbor answer
+        // must not introduce one.
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+          makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), {
+            indexed: true,
+            neighbors: { contains: value.slice(0, 2), count: 5 },
+          }),
+        );
+
+        const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+        const input = smithsonianBrowseCategory.input.parse({ mode, value });
+        const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
+
+        const hint = recoveryHint(err);
+        expect(hint).toContain(`smithsonian_list_terms { field: "${field}" }`);
+        expect(hint).not.toContain('contains:');
       },
     );
 
@@ -453,7 +512,9 @@ describe('smithsonianBrowseCategory', () => {
       '%s mode: a value outside the vocabulary still gets the resolve-it hint',
       async (mode, value, claim) => {
         vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
-          makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), false),
+          makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }), {
+            indexed: false,
+          }),
         );
 
         const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
@@ -468,17 +529,17 @@ describe('smithsonianBrowseCategory', () => {
     );
 
     it('never consults the vocabulary for medium — object_type is not enumerable', async () => {
-      const isIndexedTerm = vi.fn().mockResolvedValue(true);
+      const describeTerm = vi.fn().mockResolvedValue({ indexed: true });
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
         search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
-        isIndexedTerm,
+        describeTerm,
       } as unknown as svcModule.SmithsonianService);
 
       const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
       const input = smithsonianBrowseCategory.input.parse({ mode: 'medium', value: 'Painting' });
       const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
 
-      expect(isIndexedTerm).not.toHaveBeenCalled();
+      expect(describeTerm).not.toHaveBeenCalled();
       // A true answer would otherwise have flipped the hint; medium keeps its harvest.
       expect(recoveryHint(err)).toContain('smithsonian_search_objects { query: "Painting" }');
     });

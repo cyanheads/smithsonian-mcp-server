@@ -985,7 +985,7 @@ describe('SmithsonianService', () => {
     });
   });
 
-  describe('isIndexedTerm()', () => {
+  describe('describeTerm()', () => {
     const VOCAB = ['AAA', 'AAG', 'NASM', 'NMAfA'];
 
     it('is an exact membership test — a substring of a term is not a term', async () => {
@@ -993,8 +993,8 @@ describe('SmithsonianService', () => {
       mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      expect(await svc.isIndexedTerm('unit_code', 'AAA', ctx)).toBe(true);
-      expect(await svc.isIndexedTerm('unit_code', 'AA', ctx)).toBe(false);
+      expect((await svc.describeTerm('unit_code', 'AAA', ctx)).indexed).toBe(true);
+      expect((await svc.describeTerm('unit_code', 'AA', ctx)).indexed).toBe(false);
     });
 
     it('matches case-sensitively, as EDAN itself resolves a term', async () => {
@@ -1003,15 +1003,100 @@ describe('SmithsonianService', () => {
       mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      expect(await svc.isIndexedTerm('unit_code', 'NMAfA', ctx)).toBe(true);
-      expect(await svc.isIndexedTerm('unit_code', 'NMAFA', ctx)).toBe(false);
+      expect((await svc.describeTerm('unit_code', 'NMAfA', ctx)).indexed).toBe(true);
+      expect((await svc.describeTerm('unit_code', 'NMAFA', ctx)).indexed).toBe(false);
     });
 
-    it('returns false for a value outside the vocabulary', async () => {
+    it('reports no neighbors for a value outside the vocabulary', async () => {
+      // An unindexed value takes the resolve-it hint, which passes the value itself
+      // as the substring — so there is nothing to prove and nothing to return.
       mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
-      expect(await makeService().isIndexedTerm('unit_code', 'NOTACODE', makeTenantContext())).toBe(
-        false,
-      );
+      expect(
+        await makeService().describeTerm('unit_code', 'NOTACODE', makeTenantContext()),
+      ).toEqual({ indexed: false });
+    });
+
+    describe('neighbor substrings (issue #46)', () => {
+      it('keeps the value itself when it already lists other terms', async () => {
+        // The short vocabularies (culture, place) work this way, and the pre-#46 hint
+        // was correct for them — "Guiana" is inside "Guiana, French".
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: ['Guiana', 'Guiana, French', 'French Guiana', 'Aztecs'] },
+        });
+        expect(await makeService().describeTerm('culture', 'Guiana', makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Guiana', count: 2 },
+        });
+      });
+
+      it('falls back to the segment before an LCSH subdivision', async () => {
+        // 'Quilting' shares a stem but not the substring, so it is not a neighbor —
+        // the count is what a `contains: "Quilts"` call would return, minus the value.
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: ['Quilts--History', 'Quilts', 'Quilting', 'Aviation'] },
+        });
+        expect(
+          await makeService().describeTerm('topic', 'Quilts--History', makeTenantContext()),
+        ).toEqual({ indexed: true, neighbors: { contains: 'Quilts', count: 1 } });
+      });
+
+      it.each([
+        ['(', 'Endeavour (OV-105)', ['Endeavour (OV-105)', 'Endeavour', 'Discovery'], 'Endeavour'],
+        [',', 'Kano, Nigeria', ['Kano, Nigeria', 'Kano', 'Lagos'], 'Kano'],
+      ] as const)('cuts at the first %s separator', async (_sep, value, terms, contains) => {
+        mockFetch({ status: 200, responseCode: 1, response: { terms } });
+        expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains, count: 1 },
+        });
+      });
+
+      it('falls back to the leading token when the value carries no separator', async () => {
+        // The issue's repro: the whole value and every separator cut resolve to
+        // nothing else, so the leading token is what the hint can name.
+        const value = 'Bell UH-1H Iroquois "Huey" Smokey III';
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: [value, 'Bell UH-1B Iroquois', 'Bell 47', 'Aviation'] },
+        });
+        expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Bell', count: 2 },
+        });
+      });
+
+      it('reports no neighbors when no candidate lists anything else', async () => {
+        // '"Yank"' is one live topic term in this state. Naming any substring of it
+        // would send the caller to a call that returns the failing value alone, so
+        // the recovery hint has to drop the substitute-term clause entirely.
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: ['"Yank"', 'Quilts', 'Aviation'] },
+        });
+        expect(await makeService().describeTerm('topic', '"Yank"', makeTenantContext())).toEqual({
+          indexed: true,
+        });
+      });
+
+      it('counts matches case-insensitively and never counts the value itself', async () => {
+        // The count has to mean what smithsonian_list_terms { contains } would return
+        // minus the failing value, and that filter is case-insensitive.
+        mockFetch({
+          status: 200,
+          responseCode: 1,
+          response: { terms: ['Quilts', "quilts of Gee's Bend", 'Hopi quilts', 'Aviation'] },
+        });
+        expect(await makeService().describeTerm('topic', 'Quilts', makeTenantContext())).toEqual({
+          indexed: true,
+          neighbors: { contains: 'Quilts', count: 2 },
+        });
+      });
     });
   });
 
@@ -1061,16 +1146,17 @@ describe('SmithsonianService', () => {
       expect(fetchedUrls[1]).toContain('/terms/culture');
     });
 
-    it('shares the cached vocabulary with isIndexedTerm — the check adds no fetch', async () => {
-      // The membership check runs on the recovery path of every zero-match browse
-      // and search; against an uncached vocabulary it would pay a full download.
+    it('shares the cached vocabulary with describeTerm — the check adds no fetch', async () => {
+      // The membership check and the neighbor scan both run on the recovery path of
+      // every zero-match browse and search, off the array the cache already holds;
+      // against an uncached vocabulary each would pay a full download.
       const fetchMock = mockTermsFetch(['AAA', 'AAG', 'NASM']);
       const svc = makeService();
       const ctx = makeTenantContext();
 
       await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
-      expect(await svc.isIndexedTerm('unit_code', 'AAA', ctx)).toBe(true);
-      expect(await svc.isIndexedTerm('unit_code', 'NOTACODE', ctx)).toBe(false);
+      expect(await svc.describeTerm('unit_code', 'AAA', ctx)).toEqual({ indexed: true });
+      expect(await svc.describeTerm('unit_code', 'NOTACODE', ctx)).toEqual({ indexed: false });
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });

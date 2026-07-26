@@ -6,6 +6,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
+import type { TermDescription } from '@/services/smithsonian/types.js';
 
 /**
  * Collect distinct, defined string values in first-seen order, capped so the
@@ -31,24 +32,35 @@ function distinctValues(values: Array<string | undefined>, cap = 12): string[] {
  * unfiltered harvest. Returns '' when neither applies, so the caller keeps the static
  * contract hint.
  *
- * Each routable filter carries `indexed` — whether the value is an exact member of
- * its vocabulary. Sending a caller to resolve a value the index already enumerates
- * dead-ends them on the same value and the same failure (issue #33), so an indexed
- * value gets told what its zero match actually means instead.
+ * Each routable filter carries its {@link TermDescription}. `indexed` splits the
+ * two zero matches: sending a caller to resolve a value the index already
+ * enumerates dead-ends them on the same value and the same failure (issue #33),
+ * so an indexed value gets told what its zero match actually means instead.
+ * `neighbors` then decides whether that branch can name a substitute term —
+ * passing the failing value as the `contains` substring lists only itself on the
+ * long, fully-qualified end of the vocabulary, so the clause is dropped unless the
+ * service found a substring that lists something else (issue #46).
  */
 function composeFilterHint(
-  routableFilters: Array<{ field: string; value: string; indexed: boolean }>,
+  routableFilters: Array<{ field: string; value: string } & TermDescription>,
   objectTypes: string[],
   unitCodes: string[],
 ): string {
   const parts: string[] = [];
-  for (const { field, value, indexed } of routableFilters) {
+  for (const { field, value, indexed, neighbors } of routableFilters) {
+    if (!indexed) {
+      parts.push(
+        `Your ${field} filter "${value}" matched nothing — resolve it to an exact term with ` +
+          `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`,
+      );
+      continue;
+    }
+    const indexedEmpty = `Your ${field} filter "${value}" is an exact term in the "${field}" vocabulary, so resolving it again returns the same value — it either has no retrievable objects at all or does not overlap your query and other filters.`;
     parts.push(
-      indexed
-        ? `Your ${field} filter "${value}" is an exact term in the "${field}" vocabulary, so resolving it again returns the same value — it either has no retrievable objects at all or does not overlap your query and other filters. Drop it, or pick a different term from ` +
-            `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`
-        : `Your ${field} filter "${value}" matched nothing — resolve it to an exact term with ` +
-            `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`,
+      neighbors
+        ? `${indexedEmpty} Drop it, or pick one of the ${neighbors.count} other ${field} ${neighbors.count === 1 ? 'term' : 'terms'} from ` +
+            `smithsonian_list_terms { field: "${field}", contains: "${neighbors.contains}" }.`
+        : `${indexedEmpty} Neither the value nor a leading segment of it lists a different ${field} term, so drop the filter and search on the query alone.`,
     );
   }
   const harvested: string[] = [];
@@ -295,14 +307,18 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
         if (f?.date) routable.push({ field: 'date', value: f.date });
         if (f?.topic) routable.push({ field: 'topic', value: f.topic });
 
-        // Whether each routable value is already an exact vocabulary term, which
-        // decides between "resolve it" and "it resolves to itself" (issue #33).
-        // Best-effort and failure-path only: a throwing lookup reads as not
-        // indexed, keeping the resolve-it hint that predates the check.
+        // Where each routable value sits in its vocabulary, which decides between
+        // "resolve it" and "it resolves to itself" (issue #33), plus the substring
+        // that lists neighbors when one exists (issue #46). Resolved here because
+        // composeFilterHint is synchronous. Best-effort and failure-path only: a
+        // throwing lookup reads as not indexed, keeping the resolve-it hint that
+        // predates the check.
         const routableFilters = await Promise.all(
           routable.map(async (r) => ({
             ...r,
-            indexed: await svc.isIndexedTerm(r.field, r.value, ctx).catch(() => false),
+            ...(await svc
+              .describeTerm(r.field, r.value, ctx)
+              .catch((): TermDescription => ({ indexed: false }))),
           })),
         );
 
