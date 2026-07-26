@@ -97,6 +97,81 @@ describe('smithsonianGetMedia', () => {
     });
   });
 
+  it('throws no_images when the object has media but none of it is an image (issue #34)', async () => {
+    // Real siris_sil_893158 shape: mediaCount 2, both items type "Scanned books".
+    // extractImageItems keeps only 'Images'/untyped, so this falls between no_media
+    // (mediaCount is non-zero) and not_cc0 (there are no images to be restricted).
+    const raw: RawEDAN = {
+      id: 'ld1-scanned',
+      title: 'Senkeiban zushiki',
+      content: {
+        descriptiveNonRepeating: {
+          record_ID: 'siris_sil_893158',
+          metadata_usage: { access: 'CC0' },
+          online_media: {
+            mediaCount: 2,
+            media: [
+              { id: 'a', type: 'Scanned books', usage: { access: 'CC0' } },
+              { id: 'b', type: 'Scanned books', usage: { access: 'CC0' } },
+            ],
+          },
+        },
+      },
+    };
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(raw),
+      isCC0: vi.fn().mockReturnValue(true),
+      toImageItems: vi.fn().mockReturnValue([]),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
+    const input = smithsonianGetMedia.input.parse({ id: 'siris_sil_893158' });
+    await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'no_images',
+        media_count: 2,
+        media_types: ['Scanned books'],
+        record_id: 'siris_sil_893158',
+      },
+    });
+  });
+
+  it('no_images recovery hint names the media types present and routes to get_object', async () => {
+    // Real dpo_3d_200012 shape: a single 3d_voyager item. The hint has to name the
+    // type the object DOES carry — a static hint can't, so it is built at the throw site.
+    const raw: RawEDAN = {
+      id: 'ld1-3d',
+      title: 'Cassiopeia A Supernova Remnant',
+      content: {
+        descriptiveNonRepeating: {
+          record_ID: 'dpo_3d_200012',
+          metadata_usage: { access: 'CC0' },
+          online_media: {
+            mediaCount: 1,
+            media: [{ id: 'x', type: '3d_voyager', usage: { access: 'CC0' } }],
+          },
+        },
+      },
+    };
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(raw),
+      isCC0: vi.fn().mockReturnValue(true),
+      toImageItems: vi.fn().mockReturnValue([]),
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
+    const input = smithsonianGetMedia.input.parse({ id: 'dpo_3d_200012' });
+    const err = await smithsonianGetMedia.handler(input, ctx).then(
+      () => null,
+      (e: unknown) => e as { data?: { recovery?: { hint?: string } } },
+    );
+    const hint = err?.data?.recovery?.hint ?? '';
+    expect(hint).toContain('3d_voyager');
+    expect(hint).toContain('smithsonian_get_object');
+    expect(hint).toContain('media_summary');
+  });
+
   it('throws not_cc0 when object has images but none are CC0', async () => {
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       getContent: vi.fn().mockResolvedValue(makeCc0Raw(1, false)),
