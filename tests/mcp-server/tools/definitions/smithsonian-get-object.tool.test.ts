@@ -5,8 +5,8 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { FullObject } from '@/services/smithsonian/types.js';
@@ -158,5 +158,77 @@ describe('smithsonianGetObject', () => {
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('nmnh_SPARSE');
     expect(text).toContain('Sparse Object');
+  });
+
+  describe('upstream markup and entities (issue #49)', () => {
+    // The real service over a stubbed fetch, not a stand-in: the decode happens
+    // inside normalizeToFull, so only the live projection proves it reaches the
+    // tool's own output and rendered text.
+    beforeEach(() => {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 200,
+            responseCode: 1,
+            response: {
+              id: 'ld1-markup',
+              title: 'A nonpotential model for the Sun&#39;s open magnetic flux',
+              unitCode: 'SLA_SRO',
+              url: 'edanmdm:slasro_92924',
+              content: {
+                descriptiveNonRepeating: {
+                  record_ID: 'slasro_92924',
+                  unit_code: 'SLA_SRO',
+                  metadata_usage: { access: 'CC0' },
+                },
+                freetext: {
+                  notes: [
+                    {
+                      label: 'Summary',
+                      content:
+                        'Yeates, A. R. 2010. "<a href="http://adsabs.harvard.edu/abs/2010JGRA">A nonpotential model</a>." <em>JGR</em> 115.',
+                    },
+                  ],
+                },
+              },
+            },
+          }),
+        }),
+      );
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it('returns decoded title and tag-free description', async () => {
+      const ctx = createMockContext({ errors: smithsonianGetObject.errors });
+      const input = smithsonianGetObject.input.parse({ id: 'slasro_92924' });
+      const result = await smithsonianGetObject.handler(input, ctx);
+
+      expect(result.title).toBe("A nonpotential model for the Sun's open magnetic flux");
+      expect(result.description).toBe('Yeates, A. R. 2010. "A nonpotential model." JGR 115.');
+    });
+
+    it('renders the decoded text in format() too — both wire surfaces agree', async () => {
+      const ctx = createMockContext({ errors: smithsonianGetObject.errors });
+      const input = smithsonianGetObject.input.parse({ id: 'slasro_92924' });
+      const result = await smithsonianGetObject.handler(input, ctx);
+      const text = smithsonianGetObject.format!(result)
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('');
+
+      expect(text).toContain("Sun's open magnetic flux");
+      expect(text).not.toContain('&#39;');
+      expect(text).not.toContain('<a href');
+    });
   });
 });

@@ -5,8 +5,12 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createInMemoryStorage,
+  createMockContext,
+  getEnrichment,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
@@ -1314,5 +1318,88 @@ describe('smithsonianFindRelated', () => {
     expect(text).toContain('nasm_TEST001');
     expect(text).toContain('0'); // related count
     expect(blocks).toHaveLength(1);
+  });
+
+  describe('upstream markup and entities (issue #49)', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it('decodes both the anchor title and every related title, in output and format()', async () => {
+      // The real service over a stubbed fetch, dispatched by endpoint: the anchor
+      // arrives through getContent/toSummary and the related rows through search,
+      // and both projections must decode.
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation((url: string) => {
+          const anchor = url.includes('/content/');
+          const body = anchor
+            ? {
+                status: 200,
+                responseCode: 1,
+                response: {
+                  id: 'ld1-anchor',
+                  title: 'The Sun&#39;s Open Magnetic Flux',
+                  unitCode: 'SLA_SRO',
+                  url: 'edanmdm:slasro_92924',
+                  content: {
+                    descriptiveNonRepeating: {
+                      record_ID: 'slasro_92924',
+                      unit_code: 'SLA_SRO',
+                      metadata_usage: { access: 'CC0' },
+                    },
+                    indexedStructured: { culture: ['American'] },
+                  },
+                },
+              }
+            : {
+                status: 200,
+                responseCode: 1,
+                response: {
+                  rows: [
+                    {
+                      id: 'ld1-related',
+                      title: 'Pregnant Women&#39;s Concerns Regarding COVID-19',
+                      unitCode: 'SLA_SRO',
+                      url: 'edanmdm:slasro_171906',
+                      content: {
+                        descriptiveNonRepeating: {
+                          record_ID: 'slasro_171906',
+                          unit_code: 'SLA_SRO',
+                          metadata_usage: { access: 'CC0' },
+                        },
+                      },
+                    },
+                  ],
+                  rowCount: 1,
+                },
+              };
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          });
+        }),
+      );
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+
+      const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+      const input = smithsonianFindRelated.input.parse({ id: 'slasro_92924' });
+      const result = await smithsonianFindRelated.handler(input, ctx);
+
+      expect(result.anchor.title).toBe("The Sun's Open Magnetic Flux");
+      expect(result.related[0]?.title).toBe("Pregnant Women's Concerns Regarding COVID-19");
+      const text = smithsonianFindRelated.format!(result)
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('');
+      expect(text).toContain("The Sun's Open Magnetic Flux");
+      expect(text).toContain("Pregnant Women's Concerns");
+      expect(text).not.toContain('&#39;');
+    });
   });
 });

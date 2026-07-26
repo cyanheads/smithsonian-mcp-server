@@ -110,6 +110,87 @@ function museumName(unitCode: string | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
+// Upstream text normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Tags that separate lines rather than sit inside one, replaced with a space so
+ * the words on either side stay apart. Every other tag is dropped outright,
+ * which is what turns an anchor into its link text and keeps `H<sub>2</sub>O`
+ * as `H2O` rather than `H 2 O`. `<br>` and `<p>` are the two EDAN emits;
+ * `<div>` and `<li>` cost nothing to cover and would jam words without it.
+ */
+const LINE_BREAKING_TAG = /<\/?(?:br|p|div|li)\b[^>]*>/gi;
+
+/**
+ * An HTML tag: `<`, an optional `/`, then a name opening on an ASCII letter.
+ * That letter is what leaves a bare `<` in a real title alone — `Depth <20 m`
+ * opens on a digit and `1856 < 1857` on a space, so neither is read as a tag
+ * and neither loses the text that follows it.
+ */
+const HTML_TAG = /<\/?[a-zA-Z][^>]*>/g;
+
+/**
+ * The five predefined XML entities plus `&nbsp;`. EDAN's live output uses
+ * `&amp;` and `&quot;` from this set (and the numeric `&#39;`); the rest are
+ * the standard companions. A name outside the table is left exactly as written
+ * — dropping it would lose text, where keeping it costs one unreadable token.
+ */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  nbsp: ' ',
+  quot: '"',
+};
+
+/** A character reference: named, decimal (`&#39;`), or hexadecimal (`&#x27;`). */
+const CHARACTER_REFERENCE = /&(#\d+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g;
+
+/**
+ * Resolve one character reference, returning the raw match unchanged when it
+ * does not resolve: a name outside {@link NAMED_ENTITIES}, or a code point that
+ * cannot be encoded — past `0x10FFFF`, or a lone surrogate, which would leave
+ * the field unserializable.
+ */
+function decodeCharacterReference(match: string, body: string): string {
+  if (!body.startsWith('#')) return NAMED_ENTITIES[body.toLowerCase()] ?? match;
+  const hex = body[1] === 'x' || body[1] === 'X';
+  const code = Number.parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10);
+  if (!Number.isInteger(code) || code > 0x10ffff) return match;
+  if (code >= 0xd800 && code <= 0xdfff) return match;
+  return String.fromCodePoint(code);
+}
+
+/**
+ * Render upstream EDAN text as plain text — markup removed, character
+ * references decoded (issue #49).
+ *
+ * The consumer of these fields is a language model, so an anchor tag or an
+ * undecoded `&#39;` is noise it will quote back verbatim (`Women&#39;s`).
+ * Records under `SLA_SRO` carry an `<a href>` citation in nearly every
+ * description, and entity-bearing titles appear across the corpus.
+ *
+ * **Strip, then decode — in that order, once.** Decoding first would turn
+ * `&lt;b&gt;`, which is an object title that talks ABOUT a tag, into a tag the
+ * strip pass then deletes. Stripping first leaves it as the literal `<b>` the
+ * catalog wrote. For the same reason there is exactly one decode pass: `&amp;#39;`
+ * resolves to `&#39;` and stops there.
+ *
+ * Text carrying no markup is returned byte-identical — the whitespace collapse
+ * runs only where a tag was actually removed, so a legitimately bare ampersand
+ * or angle bracket, and the line structure of an unmarked-up note, both survive.
+ */
+export function toPlainText(value: string): string {
+  const stripped = value.includes('<')
+    ? value.replace(LINE_BREAKING_TAG, ' ').replace(HTML_TAG, '')
+    : value;
+  const text = stripped === value ? value : stripped.replace(/\s+/g, ' ').trim();
+  return text.replace(CHARACTER_REFERENCE, decodeCharacterReference);
+}
+
+// ---------------------------------------------------------------------------
 // Normalization helpers
 // ---------------------------------------------------------------------------
 
@@ -169,7 +250,7 @@ function normalizeToSummary(raw: RawEDAN): ObjectSummary {
   const thumbnailUrl = firstThumbnail(raw);
   return {
     record_id: recordId,
-    title: raw.title ?? '',
+    title: toPlainText(raw.title ?? ''),
     unit_code: unitCode,
     museum_name: museumName(unitCode),
     ...(objectType !== undefined && { object_type: objectType }),
@@ -276,11 +357,11 @@ function normalizeToFull(raw: RawEDAN): FullObject {
   const thumbnailUrl = firstThumbnail(raw);
   return {
     record_id: recordId,
-    title: raw.title ?? '',
+    title: toPlainText(raw.title ?? ''),
     unit_code: unitCode,
     museum_name: museumName(unitCode),
     dates,
-    ...(description !== undefined && { description }),
+    ...(description !== undefined && { description: toPlainText(description) }),
     makers,
     materials,
     dimensions,
@@ -567,6 +648,39 @@ function tightestNeighbors(
 // SmithsonianService
 // ---------------------------------------------------------------------------
 
+/** Per-request options for {@link SmithsonianService.get}. */
+interface GetOptions {
+  /**
+   * Marks a path whose resource is a collection that exists for as long as the
+   * service does — `/search` and `/terms/{field}`. A 404 on one of those is
+   * never a statement about the requested resource: the api.data.gov edge
+   * fronting EDAN answers every path with the Cloud Foundry router's
+   * `unknown_route` 404 once a route mapping is dropped, so the request never
+   * reached the application and no change to the caller's input can succeed.
+   *
+   * Set here, that 404 is rewrapped as `ServiceUnavailable` INSIDE the retry
+   * closure, which is what makes the fix a fix (issue #51): the caller gets an
+   * upstream-outage code instead of a caller-fault `NotFound`, and the call
+   * lands back in `withRetry`'s transient set so it retries with backoff.
+   * Rewrapping after `search()` / `vocabulary()` return would correct the code
+   * and silently drop the retry.
+   *
+   * `/content/{id}` omits it — a 404 there is a genuine missing record.
+   */
+  collectionEndpoint?: boolean;
+  /**
+   * Non-2xx statuses that are an expected outcome for this call, logged at
+   * `debug` instead of `error` (the status-mapped throw is unchanged). Only
+   * getContent passes this — a missing object is a real 404 from EDAN, and a
+   * bad object ID is a routine client mistake, not a server-side fault worth
+   * an error-level line in the digest. search/listTerms omit it: a 404 there
+   * is an outage, handled by {@link GetOptions.collectionEndpoint}.
+   */
+  expectedStatuses?: number[];
+  /** Request headers merged over `Accept` — every call site passes the API key here. */
+  headers?: Record<string, string>;
+}
+
 export class SmithsonianService {
   constructor(private readonly storage: StorageService) {}
 
@@ -574,25 +688,32 @@ export class SmithsonianService {
   private get<T extends { error?: { code?: string; message?: string } }>(
     url: string,
     ctx: RequestContextLike,
-    extraHeaders?: Record<string, string>,
-    /**
-     * Non-2xx statuses that are an expected outcome for this call, logged at
-     * `debug` instead of `error` (the status-mapped throw is unchanged). Only
-     * getContent passes this — a missing object is a real 404 from EDAN, and a
-     * bad object ID is a routine client mistake, not a server-side fault worth
-     * an error-level line in the digest. search/listTerms omit it: a 404 there
-     * would be genuinely unexpected.
-     */
-    expectedStatuses?: number[],
+    options: GetOptions = {},
   ): Promise<T> {
     return withRetry(
       async () => {
         const signal = (ctx as { signal?: AbortSignal }).signal;
-        const response = await fetchWithTimeout(url, 15_000, ctx, {
-          headers: { Accept: 'application/json', ...extraHeaders },
-          ...(signal && { signal }),
-          ...(expectedStatuses && { expectedStatuses }),
-        });
+        let response: Response;
+        try {
+          response = await fetchWithTimeout(url, 15_000, ctx, {
+            headers: { Accept: 'application/json', ...options.headers },
+            ...(signal && { signal }),
+            ...(options.expectedStatuses && { expectedStatuses: options.expectedStatuses }),
+          });
+        } catch (err: unknown) {
+          if (
+            options.collectionEndpoint &&
+            err instanceof McpError &&
+            err.code === JsonRpcErrorCode.NotFound
+          ) {
+            throw serviceUnavailable(
+              'The Smithsonian API is not routing requests — a collection endpoint that exists whenever the service is up returned HTTP 404. This is an upstream outage, not a missing record.',
+              { ...err.data, reason: 'upstream_unavailable' },
+              { cause: err },
+            );
+          }
+          throw err;
+        }
         const raw = (await response.json()) as T;
 
         // The API returns HTTP 200 with an error body for key/rate issues.
@@ -666,7 +787,10 @@ export class SmithsonianService {
     const url = `${base}?${qs.toString()}`;
 
     // Pass API key as header (not query param) so it never appears in logs or errors.
-    const raw = await this.get<RawSearchResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
+    const raw = await this.get<RawSearchResponse>(url, ctx, {
+      headers: { 'X-Api-Key': cfg.apiKey },
+      collectionEndpoint: true,
+    });
     const rows = (raw.response?.rows ?? []).map(normalizeToSummary);
     return { rows, rowCount: raw.response?.rowCount ?? rows.length };
   }
@@ -694,7 +818,10 @@ export class SmithsonianService {
       // EDAN returns a real HTTP 404 for a missing object; expect it so a bad ID
       // logs at debug, not as a server error. The NotFound throw still fires and
       // is rewrapped below with the caller's recovery hint.
-      raw = await this.get<RawContentResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey }, [404]);
+      raw = await this.get<RawContentResponse>(url, ctx, {
+        headers: { 'X-Api-Key': cfg.apiKey },
+        expectedStatuses: [404],
+      });
     } catch (err: unknown) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
@@ -764,7 +891,10 @@ export class SmithsonianService {
     }
 
     const url = `${cfg.baseUrl}/terms/${encodeURIComponent(field)}`;
-    const raw = await this.get<RawTermsResponse>(url, ctx, { 'X-Api-Key': cfg.apiKey });
+    const raw = await this.get<RawTermsResponse>(url, ctx, {
+      headers: { 'X-Api-Key': cfg.apiKey },
+      collectionEndpoint: true,
+    });
     const terms = raw.response?.terms ?? [];
 
     if (ttl > 0) await this.storage.set(key, terms, ctx, { ttl });

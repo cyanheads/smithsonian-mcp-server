@@ -4,8 +4,12 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createInMemoryStorage,
+  createMockContext,
+  getEnrichment,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianBrowseCategory } from '@/mcp-server/tools/definitions/smithsonian-browse-category.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
@@ -905,5 +909,60 @@ describe('smithsonianBrowseCategory', () => {
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
     expect(calledParams.filters).toEqual(['culture:"*"']);
+  });
+
+  describe('upstream markup and entities (issue #49)', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it('decodes sample titles in output and format() — the real service, not a stand-in', async () => {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 200,
+            responseCode: 1,
+            response: {
+              rows: [
+                {
+                  id: 'ld1-markup',
+                  title: 'Pregnant Women&#39;s Concerns &amp; Vaccination',
+                  unitCode: 'SLA_SRO',
+                  url: 'edanmdm:slasro_171906',
+                  content: {
+                    descriptiveNonRepeating: {
+                      record_ID: 'slasro_171906',
+                      unit_code: 'SLA_SRO',
+                      metadata_usage: { access: 'CC0' },
+                    },
+                  },
+                },
+              ],
+              rowCount: 1,
+            },
+          }),
+        }),
+      );
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+
+      const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+      const input = smithsonianBrowseCategory.input.parse({ mode: 'museum', value: 'SLA_SRO' });
+      const result = await smithsonianBrowseCategory.handler(input, ctx);
+
+      expect(result.sample_objects[0]?.title).toBe("Pregnant Women's Concerns & Vaccination");
+      const text = smithsonianBrowseCategory.format!(result)
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('');
+      expect(text).toContain("Pregnant Women's Concerns & Vaccination");
+      expect(text).not.toContain('&#39;');
+      expect(text).not.toContain('&amp;');
+    });
   });
 });

@@ -4,8 +4,13 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  createInMemoryStorage,
+  createMockContext,
+  getEnrichment,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
@@ -1020,6 +1025,93 @@ describe('smithsonianSearchObjects', () => {
 
       const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
       expect(calledParams.filters).toEqual(['online_media_type:*', 'media_usage:CC0']);
+    });
+  });
+
+  describe('live service projections', () => {
+    // These run the real service over a stubbed fetch. The stand-in used
+    // everywhere else returns already-normalized summaries, so it cannot show
+    // what the upstream payload turns into.
+    function useLiveService(fetchImpl: ReturnType<typeof vi.fn>) {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      vi.stubGlobal('fetch', fetchImpl);
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+    }
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it('decodes entities in every result title, in output and format() alike (issue #49)', async () => {
+      useLiveService(
+        vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            status: 200,
+            responseCode: 1,
+            response: {
+              rows: [
+                {
+                  id: 'ld1-markup',
+                  title: 'Pregnant Women&#39;s Concerns Regarding COVID-19',
+                  unitCode: 'SLA_SRO',
+                  url: 'edanmdm:slasro_171906',
+                  content: {
+                    descriptiveNonRepeating: {
+                      record_ID: 'slasro_171906',
+                      unit_code: 'SLA_SRO',
+                      metadata_usage: { access: 'CC0' },
+                    },
+                  },
+                },
+              ],
+              rowCount: 1,
+            },
+          }),
+        }),
+      );
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      const input = smithsonianSearchObjects.input.parse({ query: 'covid' });
+      const result = await smithsonianSearchObjects.handler(input, ctx);
+
+      expect(result.objects[0]?.title).toBe("Pregnant Women's Concerns Regarding COVID-19");
+      const text = smithsonianSearchObjects.format!(result)
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('');
+      expect(text).toContain("Pregnant Women's Concerns");
+      expect(text).not.toContain('&#39;');
+    });
+
+    it('reports a host-level 404 as an outage, never as no_results (issue #51)', async () => {
+      // Every path 404s — the edge is not routing, so no query change can succeed.
+      // no_results would send the caller off to fix spelling that was already fine.
+      useLiveService(
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          statusText: 'Not Found',
+          headers: { get: () => null },
+          text: async () => "404 Not Found: Requested route ('api.si.edu') does not exist.",
+        }),
+      );
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      const input = smithsonianSearchObjects.input.parse({ query: 'aircraft' });
+
+      vi.useFakeTimers();
+      const promise = smithsonianSearchObjects.handler(input, ctx).catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const err = (await promise) as { code: number; data?: Record<string, unknown> };
+      vi.useRealTimers();
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data?.reason).toBe('upstream_unavailable');
+      expect(err.data?.reason).not.toBe('no_results');
     });
   });
 });

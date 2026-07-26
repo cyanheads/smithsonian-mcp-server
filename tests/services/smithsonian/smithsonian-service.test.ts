@@ -8,7 +8,11 @@ import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
-import { luceneField, SmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import {
+  luceneField,
+  SmithsonianService,
+  toPlainText,
+} from '@/services/smithsonian/smithsonian-service.js';
 import type {
   RawContentResponse,
   RawEDAN,
@@ -1441,6 +1445,171 @@ describe('SmithsonianService', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
   });
+
+  describe('markup and entities in projected text (issue #49)', () => {
+    /** A record whose title and Summary note carry the upstream markup verbatim. */
+    function makeMarkupRecord(): RawEDAN {
+      return {
+        id: 'ld1-markup',
+        title: 'A nonpotential model for the Sun&#39;s open magnetic flux',
+        unitCode: 'SLA_SRO',
+        type: 'edanmdm',
+        url: 'edanmdm:slasro_92924',
+        content: {
+          descriptiveNonRepeating: {
+            record_ID: 'slasro_92924',
+            unit_code: 'SLA_SRO',
+            metadata_usage: { access: 'CC0' },
+          },
+          freetext: {
+            notes: [
+              {
+                label: 'Summary',
+                content:
+                  'Yeates, A. R. 2010. "<a href="http://adsabs.harvard.edu/abs/2010JGRA">A nonpotential model for the Sun&#39;s open magnetic flux</a>." <em>JGR</em> 115.',
+              },
+            ],
+          },
+        },
+      };
+    }
+
+    it('search() decodes the title on every summary row', async () => {
+      mockFetch({
+        status: 200,
+        responseCode: 1,
+        response: { rows: [makeMarkupRecord()], rowCount: 1 },
+      });
+      const svc = makeService();
+      const result = await svc.search({ query: 'sun', rows: 10, start: 0 }, makeTenantContext());
+
+      expect(result.rows[0]?.title).toBe("A nonpotential model for the Sun's open magnetic flux");
+      expect(result.rows[0]?.title).not.toContain('&#39;');
+    });
+
+    it('toFullObject() decodes the title and strips markup from the description', () => {
+      const full = makeService().toFullObject(makeMarkupRecord());
+
+      expect(full.title).toBe("A nonpotential model for the Sun's open magnetic flux");
+      expect(full.description).toBe(
+        'Yeates, A. R. 2010. "A nonpotential model for the Sun\'s open magnetic flux." JGR 115.',
+      );
+      expect(full.description).not.toContain('<a href');
+      expect(full.description).not.toContain('adsabs.harvard.edu');
+    });
+
+    it('toSummary() and toFullObject() agree on the same record', () => {
+      const svc = makeService();
+      const raw = makeMarkupRecord();
+      expect(svc.toSummary(raw).title).toBe(svc.toFullObject(raw).title);
+    });
+
+    it('leaves a title whose ampersand and angle bracket are real intact', () => {
+      const raw: RawEDAN = { ...makeMarkupRecord(), title: 'Barnes & Noble, depth <20 m' };
+      expect(makeService().toSummary(raw).title).toBe('Barnes & Noble, depth <20 m');
+    });
+  });
+
+  describe('host-level 404 on a collection endpoint (issue #51)', () => {
+    /**
+     * The failure the api.data.gov edge produces when the route mapping for
+     * api.si.edu is dropped: the Cloud Foundry router answers EVERY path with a
+     * 404 and its own body, so the request never reaches EDAN.
+     */
+    function mockRouterFetch() {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        headers: { get: () => null },
+        text: async () => "404 Not Found: Requested route ('api.si.edu') does not exist.",
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    /** Run to rejection with the backoff delays skipped. */
+    async function runWithFakeTimers<T>(start: () => Promise<T>): Promise<unknown> {
+      vi.useFakeTimers();
+      try {
+        const promise = start().catch((e: unknown) => e);
+        await vi.runAllTimersAsync();
+        return await promise;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+
+    it('search() surfaces a host 404 as ServiceUnavailable, not NotFound', async () => {
+      mockRouterFetch();
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      const err = (await runWithFakeTimers(() =>
+        svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx),
+      )) as { code: number; message: string; data?: Record<string, unknown> };
+
+      // /search exists whenever the service is up, so a 404 there is an outage —
+      // NotFound would blame the caller for input no change can fix.
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.code).not.toBe(JsonRpcErrorCode.NotFound);
+      expect(err.message).toMatch(/not routing requests/i);
+      expect(err.data?.reason).toBe('upstream_unavailable');
+      // The upstream status survives the rewrap for diagnostics.
+      expect(err.data?.status).toBe(404);
+    });
+
+    it('search() retries the host 404 with backoff — the point of the reclassification', async () => {
+      const fetchMock = mockRouterFetch();
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      const err = (await runWithFakeTimers(() =>
+        svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx),
+      )) as { data?: Record<string, unknown> };
+
+      // ServiceUnavailable is in withRetry's transient set: 1 initial attempt +
+      // 3 retries. A rewrap AFTER search() returns would yield the right code
+      // here and a single fetch — which is the regression this asserts against.
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(err.data?.retryAttempts).toBe(4);
+    });
+
+    it('listTerms() surfaces a host 404 as ServiceUnavailable and retries', async () => {
+      const fetchMock = mockRouterFetch();
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      const err = (await runWithFakeTimers(() =>
+        svc.listTerms({ field: 'culture', start: 0, rows: 50 }, ctx),
+      )) as { code: number; data?: Record<string, unknown> };
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data?.reason).toBe('upstream_unavailable');
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+    });
+
+    it('describeTerm() rides the same vocabulary path, so it reclassifies too', async () => {
+      mockRouterFetch();
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      const err = (await runWithFakeTimers(() => svc.describeTerm('culture', 'Aztecs', ctx))) as {
+        code: number;
+      };
+
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    });
+
+    it('leaves the content endpoint alone — a per-ID 404 stays NotFound and is not retried', async () => {
+      const fetchMock = mockRouterFetch();
+      const svc = makeService();
+      const ctx = makeTenantContext();
+      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
+
+      // /content/{id} addresses one record, so its 404 is a genuine miss the
+      // caller can act on. NotFound is non-transient — a single attempt.
+      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(err.data?.reason).toBe('not_found');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1483,5 +1652,90 @@ describe('luceneField', () => {
 
   it('escapes both metacharacters in one value', () => {
     expect(luceneField('topic', 'a\\b"c')).toBe('topic:"a\\\\b\\"c"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toPlainText — markup stripping and entity decoding (issue #49)
+// ---------------------------------------------------------------------------
+
+describe('toPlainText', () => {
+  it('decodes a numeric entity to its character', () => {
+    // The live title of slasro_92924.
+    expect(toPlainText('A nonpotential model for the Sun&#39;s open magnetic flux')).toBe(
+      "A nonpotential model for the Sun's open magnetic flux",
+    );
+  });
+
+  it('decodes a hexadecimal entity', () => {
+    expect(toPlainText('Women&#x27;s Suffrage')).toBe("Women's Suffrage");
+  });
+
+  it('decodes &amp; to a bare ampersand', () => {
+    // The case a tag-stripping HTML sanitizer alone leaves unfixed: it re-escapes
+    // the ampersand it just decoded, because it targets safe HTML re-serialization
+    // rather than plain text.
+    expect(toPlainText('Arts &amp; Crafts')).toBe('Arts & Crafts');
+  });
+
+  it('reduces an anchor to its link text and drops the URL', () => {
+    expect(
+      toPlainText(
+        'Yeates, A. R. 2010. "<a href="http://adsabs.harvard.edu/abs/2010JGRA">A nonpotential model</a>." <em>JGR</em> 115.',
+      ),
+    ).toBe('Yeates, A. R. 2010. "A nonpotential model." JGR 115.');
+  });
+
+  it('keeps an inline tag from splitting the word it sits inside', () => {
+    // <sub>/<sup> mark up a formula, not a word break — H2O, never "H 2 O".
+    expect(toPlainText('H<sub>2</sub>O and E=mc<sup>2</sup>')).toBe('H2O and E=mc2');
+  });
+
+  it('separates the lines a <br> or <p> was holding apart', () => {
+    expect(toPlainText('Line one<br>Line two<p>Line three</p>')).toBe(
+      'Line one Line two Line three',
+    );
+  });
+
+  it('leaves a legitimately bare ampersand untouched', () => {
+    // R&D is not a character reference, so nothing resolves and nothing escapes.
+    expect(toPlainText('R&D Laboratory, Barnes & Noble')).toBe('R&D Laboratory, Barnes & Noble');
+  });
+
+  it('leaves bare angle brackets untouched — they are not tags', () => {
+    // A `<` followed by a space or a digit cannot open a tag, so the text after
+    // it must survive rather than being eaten up to the next `>`.
+    expect(toPlainText('Specimens < 5 mm > 2 mm')).toBe('Specimens < 5 mm > 2 mm');
+    expect(toPlainText('Depth <20 m, salinity >30 ppt')).toBe('Depth <20 m, salinity >30 ppt');
+  });
+
+  it('decodes exactly once — never twice', () => {
+    // &amp;#39; is a title that quotes an entity. One pass yields the entity;
+    // a second would yield an apostrophe and silently rewrite the catalog.
+    expect(toPlainText('The entity &amp;#39; is an apostrophe')).toBe(
+      'The entity &#39; is an apostrophe',
+    );
+  });
+
+  it('does not re-strip a tag that a decode produced', () => {
+    // Strip runs before decode, so a title ABOUT a tag keeps it.
+    expect(toPlainText('The &lt;b&gt; element')).toBe('The <b> element');
+  });
+
+  it('leaves an unknown named entity as written rather than dropping text', () => {
+    expect(toPlainText('Alpha &fakeentity; Omega')).toBe('Alpha &fakeentity; Omega');
+  });
+
+  it('leaves a lone surrogate reference alone — it cannot be encoded', () => {
+    expect(toPlainText('bad &#55296; reference')).toBe('bad &#55296; reference');
+  });
+
+  it('returns unmarked-up text byte-identical, line structure included', () => {
+    const note = '  Line one\n\n  Line two  ';
+    expect(toPlainText(note)).toBe(note);
+  });
+
+  it('handles the empty string', () => {
+    expect(toPlainText('')).toBe('');
   });
 });

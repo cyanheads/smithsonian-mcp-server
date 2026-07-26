@@ -3,8 +3,13 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-list-terms.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  createInMemoryStorage,
+  createMockContext,
+  getEnrichment,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 
@@ -339,6 +344,50 @@ describe('smithsonianListTerms', () => {
       const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
       const termLines = text.split('\n').filter((line) => line.startsWith('- '));
       expect(termLines).toEqual(['- `Aztecs`', '- `Roman`']);
+    });
+  });
+
+  describe('host-level 404 on the terms endpoint (issue #51)', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it('reports an outage, distinguishable from the empty-vocabulary path', async () => {
+      // The real service over a stubbed fetch — the reclassification lives in the
+      // service's retry closure, so a service stand-in cannot exercise it.
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          statusText: 'Not Found',
+          headers: { get: () => null },
+          text: async () => "404 Not Found: Requested route ('api.si.edu') does not exist.",
+        }),
+      );
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+
+      const ctx = createMockContext({
+        errors: smithsonianListTerms.errors,
+        tenantId: 'test-tenant',
+      });
+      const input = smithsonianListTerms.input.parse({ field: 'culture' });
+
+      vi.useFakeTimers();
+      const promise = smithsonianListTerms.handler(input, ctx).catch((e: unknown) => e);
+      await vi.runAllTimersAsync();
+      const err = (await promise) as { code: number; data?: Record<string, unknown> };
+      vi.useRealTimers();
+
+      // /terms/{field} exists whenever the service does, so this is never a
+      // statement about `culture` — and never the tool's own no_terms.
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data?.reason).toBe('upstream_unavailable');
+      expect(err.data?.reason).not.toBe('no_terms');
     });
   });
 });
