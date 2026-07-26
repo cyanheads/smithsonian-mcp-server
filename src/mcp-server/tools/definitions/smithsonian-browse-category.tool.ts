@@ -251,8 +251,9 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
 
     // The category IS the query: the mode's field constraint is embedded in q as a
     // Lucene field:value term (EDAN has no fq param) with no free-text base query.
-    // luceneField's quoting is load-bearing — an unquoted multi-word value ends the
-    // field term at the first space and leaks its trailing words back out as free text.
+    // luceneField's quoting and escaping are load-bearing — an unquoted value ends
+    // the field term at the first space and leaks its trailing words back out as free
+    // text, and an unquoted single-token `*` becomes a wildcard over the whole field.
     const filters = [luceneField(MODE_FIELD[input.mode], input.value)];
 
     ctx.log.info('Browsing Smithsonian category', {
@@ -357,7 +358,7 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
     lines.push(`**Sample:** ${result.sample_objects.length} objects\n`);
     for (const obj of result.sample_objects) {
       lines.push(
-        `- **${obj.title}** (${obj.unit_code}) — ID: \`${obj.record_id}\`${obj.is_cc0 ? ' · CC0' : ''}`,
+        `- **${obj.title}** (${obj.unit_code}) — ID: \`${obj.record_id}\` · **CC0:** ${obj.is_cc0 ? 'Yes' : 'No'}`,
       );
       if (obj.thumbnail_url) lines.push(`  Thumbnail: ${obj.thumbnail_url}`);
     }

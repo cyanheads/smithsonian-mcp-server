@@ -234,9 +234,9 @@ describe('smithsonianBrowseCategory', () => {
       );
 
       const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-      expect(calledParams.filters).toContain(
-        value.includes(' ') ? `date:"${value}"` : `date:${value}`,
-      );
+      // Always quoted (issue #42) — an unquoted single-token value is parsed for
+      // Lucene syntax, so quoting is not conditional on the value containing a space.
+      expect(calledParams.filters).toContain(`date:"${value}"`);
     },
   );
 
@@ -280,7 +280,7 @@ describe('smithsonianBrowseCategory', () => {
     await smithsonianBrowseCategory.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toContain('date:1940s');
+    expect(calledParams.filters).toContain('date:"1940s"');
     expect(calledParams.query).toBe('');
   });
 
@@ -295,7 +295,7 @@ describe('smithsonianBrowseCategory', () => {
     await smithsonianBrowseCategory.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toContain('unit_code:NASM');
+    expect(calledParams.filters).toContain('unit_code:"NASM"');
     // Museum mode uses the filter only — no free-text query
     expect(calledParams.query).toBe('');
   });
@@ -317,7 +317,7 @@ describe('smithsonianBrowseCategory', () => {
     await smithsonianBrowseCategory.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toEqual([`unit_code:${code}`]);
+    expect(calledParams.filters).toEqual([`unit_code:"${code}"`]);
     expect(calledParams.query).toBe('');
   });
 
@@ -333,7 +333,7 @@ describe('smithsonianBrowseCategory', () => {
     await smithsonianBrowseCategory.handler(input, ctx);
 
     const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toEqual(['unit_code:NMAfA']);
+    expect(calledParams.filters).toEqual(['unit_code:"NMAfA"']);
   });
 
   it('a full museum name is filtered, never free-texted, and fails with museum recovery (issues #26, #31)', async () => {
@@ -732,5 +732,81 @@ describe('smithsonianBrowseCategory', () => {
     expect(text).toContain('500');
     expect(text).toContain('nasm_TEST001');
     expect(text).toContain('NASM');
+  });
+
+  it('format renders is_cc0 on both branches, matching the sibling tools (issue #45)', () => {
+    // content[] must carry the same information as structuredContent. Rendering the
+    // marker only when true made is_cc0: false indistinguishable from a field the
+    // renderer never covered — the one branch-asymmetric rendering in the surface.
+    const [cc0Sample, restrictedSample] = makeSamples(2);
+    const output = {
+      mode: 'museum',
+      value: 'NMAI',
+      total_count: 2,
+      sample_objects: [
+        {
+          record_id: cc0Sample!.record_id,
+          title: cc0Sample!.title,
+          unit_code: cc0Sample!.unit_code,
+          is_cc0: true,
+        },
+        {
+          record_id: restrictedSample!.record_id,
+          title: restrictedSample!.title,
+          unit_code: restrictedSample!.unit_code,
+          is_cc0: false,
+        },
+      ],
+      museum_breakdown: [],
+    };
+    const text = smithsonianBrowseCategory.format!(output)
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+
+    const cc0Line = text.split('\n').find((l) => l.includes(cc0Sample!.record_id)) ?? '';
+    const restrictedLine =
+      text.split('\n').find((l) => l.includes(restrictedSample!.record_id)) ?? '';
+    expect(cc0Line).toContain('**CC0:** Yes');
+    expect(restrictedLine).toContain('**CC0:** No');
+  });
+
+  it('escapes quote- and backslash-bearing category values (issue #42)', async () => {
+    // `smithsonian_list_terms` hands these back as exact, pass-through-ready terms.
+    // Unescaped, the inner quote closes the phrase early and EDAN matches nothing.
+    const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(1), rowCount: 3 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+    await smithsonianBrowseCategory.handler(
+      smithsonianBrowseCategory.input.parse({
+        mode: 'culture',
+        value: 'Early Iron Age, "Tomb Age"',
+      }),
+      ctx,
+    );
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    expect(calledParams.filters).toEqual(['culture:"Early Iron Age, \\"Tomb Age\\""']);
+  });
+
+  it('neutralizes a wildcard category value instead of matching the whole field (issue #42)', async () => {
+    // `*` is a literal term in the `place` vocabulary and appears in others. Unquoted,
+    // `unit_code:*` matches every record carrying the field and reports that count as
+    // the category total.
+    const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(1), rowCount: 124 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+    await smithsonianBrowseCategory.handler(
+      smithsonianBrowseCategory.input.parse({ mode: 'culture', value: '*' }),
+      ctx,
+    );
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    expect(calledParams.filters).toEqual(['culture:"*"']);
   });
 });
