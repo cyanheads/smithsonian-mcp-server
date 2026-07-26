@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-07-26
+
+Add topic and name as filterable facets; find_related's named-party signal now labels roles from the catalog instead of hardcoding maker
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-26
 
 Fix Lucene filter escaping, symmetric CC0 rendering in browse_category, and correct the stale 19.4M corpus count to 14.5M
