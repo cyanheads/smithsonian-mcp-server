@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "smithsonian-mcp-server",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "license": "Apache-2.0",
   "description": "Search 14.5M Smithsonian Open Access objects across 20+ museums via MCP, and retrieve CC0 images for the 5.2M that carry openly-licensed media. STDIO or Streamable HTTP.",
   "author": { "name": "cyanheads" },
