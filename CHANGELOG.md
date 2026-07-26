@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.5](changelog/0.3.x/0.3.5.md) — 2026-07-26
+
+Object titles and descriptions decode HTML entities and markup, host-level 404s on search/terms retry as outages instead of failing as not-found
+
 ## [0.3.4](changelog/0.3.x/0.3.4.md) — 2026-07-26
 
 Neighbor-substring recovery hints now search for the tightest narrow substring instead of trying three fixed candidates
