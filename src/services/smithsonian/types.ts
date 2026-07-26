@@ -64,10 +64,19 @@ export interface RawFreetext {
   topic?: RawFreetextEntry[];
 }
 
+/**
+ * An `indexedStructured.name` entry. Usually the indexed value as a bare string,
+ * but bibliographic and authority records (Smithsonian Research Online, Libraries,
+ * archives) wrap it in an object that carries the same value under `content`
+ * alongside provenance — `{ type: "author" }`, `{ VIAF: "…" }`. Every other
+ * `indexedStructured` field is a plain `string[]`.
+ */
+export type RawIndexedName = string | { content?: string };
+
 export interface RawIndexedStructured {
   culture?: string[];
   date?: string[];
-  name?: string[];
+  name?: RawIndexedName[];
   object_type?: string[];
   online_media_type?: string[];
   place?: string[];
