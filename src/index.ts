@@ -31,7 +31,7 @@ await createApp({
     'Recommended workflow:\n' +
     '1. Start with smithsonian_search_objects for free-text or open-ended discovery.\n' +
     '2. Use smithsonian_list_terms to resolve exact museum (unit_code), culture, place, or date vocabulary — terms are a controlled vocabulary, often plural (e.g. "Paintings", not "Painting").\n' +
-    '3. Use smithsonian_browse_category to page objects within one known exact category (a single museum, culture, decade, or object type).\n' +
+    '3. Use smithsonian_browse_category to page objects within one known exact category (a single museum, culture, date term, or object type).\n' +
     '4. Continue with smithsonian_get_object (catalog metadata), smithsonian_get_media (CC0 image URLs), or smithsonian_find_related (cross-collection discovery) by record_id.\n' +
     '- Requires SMITHSONIAN_API_KEY (free from https://api.data.gov/signup).',
   setup(core) {

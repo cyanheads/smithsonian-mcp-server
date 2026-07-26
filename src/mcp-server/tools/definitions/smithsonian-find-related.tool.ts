@@ -80,10 +80,7 @@ const SearchContinuationSchema = z
           .string()
           .optional()
           .describe('smithsonian_search_objects filters.object_type value.'),
-        date_decade: z
-          .string()
-          .optional()
-          .describe('smithsonian_search_objects filters.date_decade value.'),
+        date: z.string().optional().describe('smithsonian_search_objects filters.date value.'),
       })
       .optional()
       .describe(
@@ -275,29 +272,23 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const objType = objectTypes[0];
     if (period || objType) {
       const filters = [
-        period && `date:${period}`,
+        period && luceneField('date', period),
         objType && luceneField('object_type', objType),
       ].filter((x): x is string => Boolean(x));
       const signal = [period && `period: ${period}`, objType && `type: ${objType}`]
         .filter(Boolean)
         .join(', ');
-      // smithsonian_search_objects's date_decade only accepts the "NNNNs" shape, but EDAN
-      // indexes date terms in many others (year ranges, BCE values). When the period
-      // isn't decade-shaped the structured filter can't carry it, so the continuation
-      // falls back to the fan-out's exact Lucene expression — smithsonian_search_objects
-      // forwards `query` verbatim when no filters accompany it, reproducing the
-      // identical upstream q either way.
-      const decade = period && /^\d{4}s$/.test(period) ? period : undefined;
-      const continuation: z.infer<typeof SearchContinuationSchema> =
-        period && !decade
-          ? { query: filters.join(' AND ') }
-          : {
-              query: '',
-              filters: {
-                ...(decade && { date_decade: decade }),
-                ...(objType && { object_type: objType }),
-              },
-            };
+      // smithsonian_search_objects's `date` filter accepts any indexed date term — the
+      // year ranges, century, and BCE forms EDAN indexes alongside decades — so the
+      // structured filter carries every period this fan-out can produce and the
+      // continuation is the same shape regardless of the term's shape.
+      const continuation: z.infer<typeof SearchContinuationSchema> = {
+        query: '',
+        filters: {
+          ...(period && { date: period }),
+          ...(objType && { object_type: objType }),
+        },
+      };
       fanOuts.push({ query: '', filters, signal, continuation });
     }
 
@@ -521,8 +512,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         if (c.filters?.culture) filterArgs.push(`culture: ${JSON.stringify(c.filters.culture)}`);
         if (c.filters?.object_type)
           filterArgs.push(`object_type: ${JSON.stringify(c.filters.object_type)}`);
-        if (c.filters?.date_decade)
-          filterArgs.push(`date_decade: ${JSON.stringify(c.filters.date_decade)}`);
+        if (c.filters?.date) filterArgs.push(`date: ${JSON.stringify(c.filters.date)}`);
         const filterArg = filterArgs.length > 0 ? `, filters: { ${filterArgs.join(', ')} }` : '';
         lines.push(`- **${s.signal}** — ${s.row_count} upstream matches`);
         lines.push(

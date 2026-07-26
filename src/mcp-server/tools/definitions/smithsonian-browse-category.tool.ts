@@ -15,9 +15,6 @@ import {
 /** The category dimension a browse targets. */
 type BrowseMode = 'museum' | 'culture' | 'period' | 'medium';
 
-/** The `NNNNs` decade shape a period value must take, e.g. "1940s". */
-const DECADE_PATTERN = /^\d{4}s$/;
-
 /**
  * The indexed EDAN field each browse mode constrains. Every mode applies its value
  * as one literal term against this field — no shape gate and no case folding, not
@@ -78,9 +75,9 @@ function categoryRecoveryHint(
       return `"${value}" is not an exact culture term. Resolve it with smithsonian_list_terms { field: "culture", contains: "${value}" }, then browse again with the exact value.`;
     case 'period':
       if (indexed) {
-        return `"${value}" is an indexed decade, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a different decade from smithsonian_list_terms { field: "date" }, or search the collection directly with smithsonian_search_objects.`;
+        return `"${value}" is an indexed date term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a different term from smithsonian_list_terms { field: "date" }, or search the collection directly with smithsonian_search_objects.`;
       }
-      return `"${value}" matched no indexed decade. Resolve an indexed value with smithsonian_list_terms { field: "date", contains: "${value}" }, then browse again with the exact value.`;
+      return `"${value}" matched no indexed date term. Resolve an indexed value with smithsonian_list_terms { field: "date", contains: "${value}" }, then browse again with the exact value.`;
     case 'medium':
       if (objectTypes.length > 0) {
         return `"${value}" is not an exact object_type term. Object types present for a free-text search of "${value}" — ${objectTypes.join(', ')}. Browse again with one of these exact terms (object_type is commonly plural, e.g. "Paintings").`;
@@ -157,51 +154,34 @@ const SampleObjectSchema = z
 export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
   title: 'Browse Smithsonian by Category',
   description:
-    'Browse Smithsonian objects within one exact category — a single museum (mode "museum"), culture, decade (mode "period"), or object type (mode "medium"). The value must be an exact indexed category term, not free text: resolve museum, culture, and period vocabulary with smithsonian_list_terms first (object_type is not enumerable there — harvest it from smithsonian_search_objects results). Returns the category total count, a page of matching objects, and a museum breakdown of that page; page the full category with start and rows. For open-ended or topic discovery, start with smithsonian_search_objects instead.',
+    'Browse Smithsonian objects within one exact category — a single museum (mode "museum"), culture, indexed date term (mode "period"), or object type (mode "medium"). The value must be an exact indexed category term, not free text: resolve museum, culture, and period vocabulary with smithsonian_list_terms first (object_type is not enumerable there — harvest it from smithsonian_search_objects results). Returns the category total count, a page of matching objects, and a museum breakdown of that page; page the full category with start and rows. For open-ended or topic discovery, start with smithsonian_search_objects instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
-  input: z
-    .object({
-      mode: z
-        .enum(['museum', 'culture', 'period', 'medium'])
-        .describe(
-          'Browse dimension: "museum" (by unit code), "culture" (by culture term), "period" (by decade like "1940s"), "medium" (by object type like "Paintings").',
-        ),
-      value: z
-        .string()
-        .describe(
-          'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: a decade in "NNNNs" form ("1940s", "1860s"), required for that mode. medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for museum (unit_code), culture, and period (date), call smithsonian_list_terms to find exact terms; medium (object_type) is not enumerable there, so harvest it from smithsonian_search_objects results.',
-        ),
-      rows: z
-        .number()
-        .int()
-        .min(1)
-        .max(50)
-        .default(10)
-        .describe('Number of sample objects to return (default 10, max 50).'),
-      start: z
-        .number()
-        .int()
-        .min(0)
-        .default(0)
-        .describe('Pagination offset — 0-indexed. Page contiguously with start = page × rows.'),
-    })
-    /**
-     * `value` is polymorphic across the four modes, so the decade format can't be a
-     * field-level `.regex()` the way smithsonian_search_objects constrains its
-     * dedicated date_decade input. Validating it here rejects a malformed period
-     * ("1940", "40s", "1940S") at the schema boundary rather than letting it reach
-     * upstream as a guaranteed-zero query that surfaces as invalid_category.
-     */
-    .superRefine((input, ctx) => {
-      if (input.mode === 'period' && !DECADE_PATTERN.test(input.value)) {
-        ctx.addIssue({
-          code: 'custom',
-          path: ['value'],
-          message: `Period values must be a decade in "NNNNs" form, e.g. "1940s" — received "${input.value}".`,
-        });
-      }
-    }),
+  input: z.object({
+    mode: z
+      .enum(['museum', 'culture', 'period', 'medium'])
+      .describe(
+        'Browse dimension: "museum" (by unit code), "culture" (by culture term), "period" (by indexed date term like "1940s" or "500-1500"), "medium" (by object type like "Paintings").',
+      ),
+    value: z
+      .string()
+      .describe(
+        'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: an indexed date term — commonly a decade ("1940s", "1860s"), but year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s") are indexed too. medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for museum (unit_code), culture, and period (date), call smithsonian_list_terms to find exact terms; medium (object_type) is not enumerable there, so harvest it from smithsonian_search_objects results.',
+      ),
+    rows: z
+      .number()
+      .int()
+      .min(1)
+      .max(50)
+      .default(10)
+      .describe('Number of sample objects to return (default 10, max 50).'),
+    start: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Pagination offset — 0-indexed. Page contiguously with start = page × rows.'),
+  }),
 
   output: z.object({
     mode: z

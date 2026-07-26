@@ -16,7 +16,7 @@
 
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
-| `smithsonian_search_objects` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date_decade, culture, place, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
+| `smithsonian_search_objects` | Full-text search across 19.4M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date, culture, place, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms, plus a `labels` map of museum names for `unit_code`; `contains` narrows the vocabulary by a case-insensitive substring, matching the museum name as well as the code for `unit_code`. Each field's vocabulary is cached (`SMITHSONIAN_TERMS_CACHE_TTL_SECONDS`) since upstream returns the whole set on every call. | `field` (unit_code, culture, place, date, online_media_type), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
 | `smithsonian_get_object` | Normalized metadata projection by ID: title, description, dates, materials, dimensions, exhibition, credit, and a media summary (count + CC0 image count). | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_browse_category` | Paginated browse within one exact category. Mode: `museum` \| `culture` \| `period` \| `medium`; `value` must be an exact indexed category term, not free text. Searches a constrained query internally and returns the category total, a page of matching objects, and a museum breakdown of that page. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `invalid_category` (ValidationError) |
@@ -94,14 +94,14 @@ Each step is independently testable.
 
 ### `smithsonian_search_objects`
 
-**Description:** Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, decade, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
+**Description:** Search across 19.4 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
 
 **Input:**
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`).
 - `filters?: object` — Optional structured filters:
   - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. Matched exactly and case-sensitively (`"NMAfA"` carries a lowercase f); `smithsonian_list_terms` with `field: "unit_code"` enumerates the live vocabulary.
   - `object_type?: string` — object type term from `indexedStructured.object_type` (e.g. `"Paintings"`, `"Photographs"`, `"Aircraft"`).
-  - `date_decade?: string` — decade string from `indexedStructured.date` (e.g. `"1920s"`, `"1960s"`).
+  - `date?: string` — indexed date term from `indexedStructured.date`. Commonly a decade (`"1920s"`, `"1960s"`), but the vocabulary also carries year ranges (`"500-1500"`), century terms (`"21st century"`), and BCE forms (`"-2500"`, `"BCE 1000s"`) — 128 of the 201 indexed terms are not decade-shaped, so no shape gate is applied.
   - `culture?: string` — culture term from `indexedStructured.culture` (e.g. `"Plains Indian"`).
   - `place?: string` — geographic place from `indexedStructured.place` (e.g. `"United States of America"`).
   - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to records carrying an indexed `online_media_type` value. That vocabulary covers digitized surrogates (finding aids, catalog cards, scanned books, full text, electronic resources) alongside images, 3D models, and video; the surrogate types often have no deliverable media attached, so a match can still report `has_media: false`. `has_media` reads `descriptiveNonRepeating.online_media` — a separate upstream signal — and is what predicts a `smithsonian_get_media` outcome.
@@ -116,7 +116,7 @@ Each step is independently testable.
 
 **Errors:**
 - `no_results` (NotFound) — the query and filters match nothing at all (`rowCount === 0`). Recovery: broaden the query, remove filters, or check spelling. Deliberately keyed to the true match count rather than the page-local length, so a deep `start` against a query with real matches is never told to check its spelling.
-- `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: a culture/place/date_decade value is checked against its vocabulary first, and the hint branches on the answer — a value outside it routes to `smithsonian_list_terms { field, contains: <value> }`, while a value the index already enumerates is named as exact (resolving it returns the same value) and the caller is told to drop it or pick a different term. For object_type/unit_code, exact co-occurring values are harvested into the hint. Then retry with an exact term.
+- `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: a culture/place/date value is checked against its vocabulary first, and the hint branches on the answer — a value outside it routes to `smithsonian_list_terms { field, contains: <value> }`, while a value the index already enumerates is named as exact (resolving it returns the same value) and the caller is told to drop it or pick a different term. For object_type/unit_code, exact co-occurring values are harvested into the hint. Then retry with an exact term.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -157,14 +157,14 @@ Each step is independently testable.
 
 ### `smithsonian_browse_category`
 
-**Description:** Browse Smithsonian objects within one exact category. Returns the category total count, the requested page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes: `museum` (by unit code), `culture` (by culture term), `period` (by decade, e.g. "1920s"), `medium` (by object type). Every mode matches an exact indexed facet value — `smithsonian_search_objects` is the entry point for open-ended or topic discovery, and `smithsonian_list_terms` is the preparation step that resolves museum, culture, and date vocabulary.
+**Description:** Browse Smithsonian objects within one exact category. Returns the category total count, the requested page of matching objects, and a breakdown of which museums those page objects come from. Four browse modes: `museum` (by unit code), `culture` (by culture term), `period` (by indexed date term, e.g. "1920s" or "500-1500"), `medium` (by object type). Every mode matches an exact indexed facet value — `smithsonian_search_objects` is the entry point for open-ended or topic discovery, and `smithsonian_list_terms` is the preparation step that resolves museum, culture, and date vocabulary.
 
 **Input:**
 - `mode: "museum" | "culture" | "period" | "medium"` — browse dimension.
 - `value: string` — category value appropriate to the mode:
   - `museum`: unit code (`"NASM"`, `"NMNHBIRDS"`), applied verbatim as a `unit_code` filter — matched exactly and case-sensitively, never as a museum name
   - `culture`: culture term (`"Aztec"`, `"Sioux"`, `"Japanese"`)
-  - `period`: decade in `"NNNNs"` form (`"1940s"`, `"1860s"`) — validated on the input object for this mode only, since `value` is polymorphic across modes and can't carry a field-level pattern
+  - `period`: indexed date term (`"1940s"`, `"500-1500"`, `"21st century"`, `"-2500"`) — no shape gate, since most of the indexed `date` vocabulary is not decade-shaped
   - `medium`: object type, usually plural (`"Paintings"`, `"Aircraft"`)
 - `rows?: number` — sample objects to return (default 10, max 50).
 - `start?: number` — pagination offset into the category's match set (default 0, 0-indexed). Page contiguously with `start = page × rows`; the category query and upstream ordering are identical across pages, so adjacent pages reconstruct the full set gap-free. A `start` past the end returns a successful empty page, not an error.

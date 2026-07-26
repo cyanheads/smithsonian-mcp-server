@@ -349,21 +349,20 @@ describe('smithsonianSearchObjects', () => {
     expect(searchFn).toHaveBeenCalledTimes(1);
   });
 
-  it('routes a bad date_decade filter to the list_terms "date" field (issue #21)', async () => {
-    // date_decade maps to the list_terms `date` field — not a literal "date_decade" field.
+  it('routes a bad date filter to the list_terms "date" field (issue #21)', async () => {
     const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(makeFilteredZeroService(searchFn));
 
     const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
     const input = smithsonianSearchObjects.input.parse({
       query: 'car',
-      filters: { date_decade: '1820s' },
+      filters: { date: '1820s' },
     });
     const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
     expect(err.data?.reason).toBe('invalid_filter');
     const hint = err.data?.recovery?.hint as string;
-    expect(hint).toContain('date_decade filter "1820s"');
+    expect(hint).toContain('date filter "1820s"');
     expect(hint).toContain('field: "date", contains: "1820s"');
   });
 
@@ -406,13 +405,13 @@ describe('smithsonianSearchObjects', () => {
      * The two branches of the same filtered zero, per routable filter. `indexed: true`
      * is a value the vocabulary enumerates: `smithsonian_list_terms { contains }`
      * returns it verbatim, so a hint routing there loops the caller through the
-     * identical failing search. Only culture, place, and date_decade route to
+     * identical failing search. Only culture, place, and date route to
      * list_terms — unit_code and object_type resolve through the result harvest.
      */
     it.each([
       ['culture', { culture: 'Guiana' }, 'culture', 'Guiana'],
       ['place', { place: 'Nigeria' }, 'place', 'Nigeria'],
-      ['date_decade', { date_decade: '1210s' }, 'date', '1210s'],
+      ['date', { date: '1210s' }, 'date', '1210s'],
     ] as const)(
       '%s: an indexed value is named as exact, not as unresolved',
       async (filter, filters, field, value) => {
@@ -682,17 +681,94 @@ describe('smithsonianSearchObjects', () => {
     expect(() => smithsonianSearchObjects.input.parse({ query: 'test', rows: 101 })).toThrow();
   });
 
-  it('rejects a date_decade outside the "NNNNs" format at the schema boundary', () => {
-    // The decade format is advertised as a JSON Schema pattern, so a bare year or a
-    // decade word is refused before it reaches upstream as a zero-result query.
-    for (const date_decade of ['1920', '20s', '1920S', 'nineteen-twenties']) {
+  describe('date filter accepts the whole indexed vocabulary (issue #36)', () => {
+    /**
+     * 128 of the 201 terms `smithsonian_list_terms { field: "date" }` enumerates are
+     * not decade-shaped, so every one of these is a real, matchable value the former
+     * `"NNNNs"` gate refused at the schema boundary.
+     */
+    it.each(['-2500', '500-1500', 'BCE 1000s', '21st century', '999-700 BC', '300s'])(
+      'passes the non-decade term %s through to the upstream query',
+      async (date) => {
+        const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+          search: searchFn,
+        } as unknown as svcModule.SmithsonianService);
+
+        const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+        const input = smithsonianSearchObjects.input.parse({ query: 'test', filters: { date } });
+        await smithsonianSearchObjects.handler(input, ctx);
+
+        const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+        expect(calledParams.filters).toContain(
+          date.includes(' ') ? `date:"${date}"` : `date:${date}`,
+        );
+      },
+    );
+
+    it('still accepts a decade term', () => {
       expect(() =>
-        smithsonianSearchObjects.input.parse({ query: 'test', filters: { date_decade } }),
-      ).toThrow();
-    }
-    expect(() =>
-      smithsonianSearchObjects.input.parse({ query: 'test', filters: { date_decade: '1920s' } }),
-    ).not.toThrow();
+        smithsonianSearchObjects.input.parse({ query: 'test', filters: { date: '1920s' } }),
+      ).not.toThrow();
+    });
+  });
+
+  describe('empty query (issue #39)', () => {
+    it('substitutes the match-all term when there is no query and no filters', async () => {
+      // An entirely empty q is the one input EDAN answers with a raw 400. `*` is the
+      // match-all the API accepts, so "everything" resolves instead of failing at the
+      // transport layer.
+      const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 14 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      const input = smithsonianSearchObjects.input.parse({ query: '', rows: 3 });
+      await smithsonianSearchObjects.handler(input, ctx);
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { query: string; filters: string[] };
+      expect(calledParams.query).toBe('*');
+      expect(calledParams.filters).toEqual([]);
+    });
+
+    it('leaves an empty query with filters on the filters-only path', async () => {
+      // Filters alone already assemble a non-empty q upstream, so this call works
+      // today — the substitution must not reach it and turn the filtered browse into
+      // a match-all ANDed with the filters.
+      const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 5 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      const input = smithsonianSearchObjects.input.parse({
+        query: '',
+        filters: { unit_code: 'NASM' },
+      });
+      await smithsonianSearchObjects.handler(input, ctx);
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { query: string; filters: string[] };
+      expect(calledParams.query).toBe('');
+      expect(calledParams.filters).toEqual(['unit_code:NASM']);
+    });
+
+    it('leaves a whitespace-only query untouched', async () => {
+      // Upstream answers a whitespace query with a clean zero, which the handler
+      // already surfaces as no_results — no substitution needed.
+      const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      const input = smithsonianSearchObjects.input.parse({ query: '   ' });
+      const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
+      expect(calledParams.query).toBe('   ');
+      expect(err.data?.reason).toBe('no_results');
+    });
   });
 
   it('format renders record_id, title, museum, and CC0 status', () => {

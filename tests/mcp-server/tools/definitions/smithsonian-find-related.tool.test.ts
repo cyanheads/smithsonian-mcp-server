@@ -830,51 +830,57 @@ describe('smithsonianFindRelated', () => {
     // maker and topic are plain free-text queries with no filters at all.
     expect(bySignal.get('maker: Lockheed')).toEqual({ query: 'Lockheed' });
     expect(bySignal.get('topic: Aviation')).toEqual({ query: 'Aviation' });
-    // period+type carries both constraints structurally when the date is decade-shaped.
+    // period+type carries both constraints structurally.
     expect(bySignal.get('period: 1960s, type: Aircraft')).toEqual({
       query: '',
-      filters: { date_decade: '1960s', object_type: 'Aircraft' },
+      filters: { date: '1960s', object_type: 'Aircraft' },
     });
   });
 
-  it('falls back to exact Lucene when the period is not decade-shaped (issue #18)', async () => {
-    // smithsonian_search_objects's date_decade only accepts "NNNNs", but most EDAN date terms
-    // are other shapes (year ranges, BCE values). The structured filter cannot carry
-    // those, so the continuation must degrade to the fan-out's exact Lucene rather
-    // than advertise an input the sibling tool rejects.
-    const anchorRaw = makeAnchorRaw();
-    anchorRaw.content!.indexedStructured!.date = ['1000-1099'];
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
-      toSummary: vi.fn().mockReturnValue({
-        record_id: 'nasm_TEST001',
-        title: 'Anchor',
-        unit_code: 'NASM',
-        museum_name: 'National Air and Space Museum',
-        is_cc0: true,
-        has_media: true,
-      }),
-      search: vi.fn().mockResolvedValue({ rows: [], rowCount: 1 }),
-    } as unknown as svcModule.SmithsonianService);
+  it.each([['1000-1099'], ['-2500'], ['BCE 1000s'], ['21st century']])(
+    'carries the non-decade period %s structurally in the continuation (issue #36)',
+    async (period) => {
+      // The `date` filter accepts any indexed date term, so the continuation is the
+      // same structured shape whatever the term looks like — no raw-Lucene fallback.
+      const anchorRaw = makeAnchorRaw();
+      anchorRaw.content!.indexedStructured!.date = [period];
+      const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        getContent: vi.fn().mockResolvedValue(anchorRaw),
+        toSummary: vi.fn().mockReturnValue({
+          record_id: 'nasm_TEST001',
+          title: 'Anchor',
+          unit_code: 'NASM',
+          museum_name: 'National Air and Space Museum',
+          is_cc0: true,
+          has_media: true,
+        }),
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
-    const result = await smithsonianFindRelated.handler(
-      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
-      ctx,
-    );
+      const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+      const result = await smithsonianFindRelated.handler(
+        smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+        ctx,
+      );
 
-    const periodSignal = result.signals.find((s) => s.signal.startsWith('period:'));
-    // The exact q the fan-out sent — smithsonian_search_objects forwards `query` verbatim
-    // when no filters accompany it, so this reproduces the identical upstream call.
-    expect(periodSignal?.search_continuation).toEqual({
-      query: 'date:1000-1099 AND object_type:Aircraft',
-    });
-    // The whole continuation must parse as smithsonian_search_objects input; the rejected
-    // date_decade shape is exactly what this fallback exists to avoid.
-    expect(() =>
-      smithsonianSearchObjects.input.parse(periodSignal?.search_continuation),
-    ).not.toThrow();
-  });
+      const periodSignal = result.signals.find((s) => s.signal.startsWith('period:'));
+      expect(periodSignal?.search_continuation).toEqual({
+        query: '',
+        filters: { date: period, object_type: 'Aircraft' },
+      });
+      // The continuation must reproduce the fan-out's own upstream call, so the
+      // fan-out quotes a multi-word date term exactly as the sibling tool would.
+      const fanOutFilters = searchFn.mock.calls
+        .map((call) => (call[0] as { filters: string[] }).filters)
+        .find((filters) => filters.some((f) => f.startsWith('date:')));
+      expect(fanOutFilters).toContain(period.includes(' ') ? `date:"${period}"` : `date:${period}`);
+      // The whole continuation must parse as smithsonian_search_objects input.
+      expect(() =>
+        smithsonianSearchObjects.input.parse(periodSignal?.search_continuation),
+      ).not.toThrow();
+    },
+  );
 
   it('every signal continuation parses as smithsonian_search_objects input (issue #18)', async () => {
     // The disclosure is only useful if the sibling tool accepts it verbatim.
@@ -1043,7 +1049,7 @@ describe('smithsonianFindRelated', () => {
           row_count: 12,
           search_continuation: {
             query: '',
-            filters: { date_decade: '1960s', object_type: 'Aircraft' },
+            filters: { date: '1960s', object_type: 'Aircraft' },
           },
         },
       ],
@@ -1055,7 +1061,7 @@ describe('smithsonianFindRelated', () => {
     expect(text).toContain('smithsonian_search_objects');
     expect(text).toContain('culture: "American"');
     // Both filter keys of the same continuation render together, not as alternatives.
-    expect(text).toContain('date_decade: "1960s"');
+    expect(text).toContain('date: "1960s"');
     expect(text).toContain('object_type: "Aircraft"');
   });
 

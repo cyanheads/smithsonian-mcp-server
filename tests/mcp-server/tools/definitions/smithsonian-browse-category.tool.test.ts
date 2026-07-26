@@ -198,8 +198,8 @@ describe('smithsonianBrowseCategory', () => {
   });
 
   it('throws invalid_category with the period-mode recovery hint on a true zero-match (issue #31)', async () => {
-    // A well-formed decade that simply isn't indexed. The "NNNNs" requirement is enforced
-    // at the schema boundary, so the hint carries only the resolution step.
+    // A value shaped like an indexed term that simply isn't one — the hint carries
+    // the resolution step.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
       makeZeroMatchService(vi.fn().mockResolvedValue({ rows: [], rowCount: 0 })),
     );
@@ -214,29 +214,39 @@ describe('smithsonianBrowseCategory', () => {
     );
   });
 
-  it.each([['1940'], ['40s'], ['1940S'], ['1940-1949'], ['nineteen forties']])(
-    'rejects period value %s at the schema boundary (issue #31)',
-    (value) => {
-      // `value` is polymorphic across the four modes, so the decade format can't be a
-      // field-level .regex() — it is validated on the input object for period only. A
-      // malformed value is rejected before it reaches upstream as a guaranteed-zero query.
+  it.each([['500-1500'], ['-2500'], ['BCE 1000s'], ['21st century'], ['999-700 BC'], ['300s']])(
+    'accepts the non-decade period value %s and applies it as a date term (issue #36)',
+    async (value) => {
+      // 128 of the 201 indexed `date` terms are not decade-shaped. The former "NNNNs"
+      // gate rejected every one of them before the value could reach upstream.
+      const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(1), rowCount: 1 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
       const parsed = smithsonianBrowseCategory.input.safeParse({ mode: 'period', value });
-      expect(parsed.success).toBe(false);
-      const issue = parsed.error?.issues[0];
-      expect(issue?.path).toEqual(['value']);
-      expect(issue?.message).toContain('NNNNs');
+      expect(parsed.success).toBe(true);
+
+      const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+      await smithsonianBrowseCategory.handler(
+        smithsonianBrowseCategory.input.parse({ mode: 'period', value }),
+        ctx,
+      );
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+      expect(calledParams.filters).toContain(
+        value.includes(' ') ? `date:"${value}"` : `date:${value}`,
+      );
     },
   );
 
-  it('accepts a well-formed decade and leaves the other modes unconstrained (issue #31)', () => {
+  it('leaves every mode unconstrained in shape (issue #36)', () => {
+    for (const mode of ['museum', 'culture', 'period', 'medium'] as const) {
+      expect(smithsonianBrowseCategory.input.safeParse({ mode, value: '1940' }).success).toBe(true);
+    }
     expect(
       smithsonianBrowseCategory.input.safeParse({ mode: 'period', value: '1860s' }).success,
     ).toBe(true);
-    // Only period carries the decade shape — a museum code or object type may look like
-    // anything the vocabulary contains.
-    for (const mode of ['museum', 'culture', 'medium'] as const) {
-      expect(smithsonianBrowseCategory.input.safeParse({ mode, value: '1940' }).success).toBe(true);
-    }
   });
 
   it('embeds culture filter in q for culture mode', async () => {
@@ -385,7 +395,7 @@ describe('smithsonianBrowseCategory', () => {
     it.each([
       ['museum', 'FSA', 'unit_code', 'indexed Smithsonian unit code'],
       ['culture', 'Guiana', 'culture', 'indexed culture term'],
-      ['period', '1210s', 'date', 'indexed decade'],
+      ['period', '1210s', 'date', 'indexed date term'],
     ] as const)(
       '%s mode: an indexed value is named as empty, not as unresolvable',
       async (mode, value, field, claim) => {
@@ -415,7 +425,7 @@ describe('smithsonianBrowseCategory', () => {
     it.each([
       ['museum', 'NOTACODE', 'is not an exact Smithsonian unit code'],
       ['culture', 'Guianaa', 'is not an exact culture term'],
-      ['period', '1210s', 'matched no indexed decade'],
+      ['period', '1210s', 'matched no indexed date term'],
     ] as const)(
       '%s mode: a value outside the vocabulary still gets the resolve-it hint',
       async (mode, value, claim) => {

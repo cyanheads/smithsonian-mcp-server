@@ -25,15 +25,7 @@ function distinctValues(values: Array<string | undefined>, cap = 12): string[] {
 }
 
 /**
- * Search-filter field → the smithsonian_list_terms field that enumerates its
- * vocabulary. These three are absent from ObjectSummary, so a filtered-zero can't
- * harvest them from result summaries — they route to list_terms with a `contains`
- * substring instead. `date_decade` maps to the list_terms `date` field.
- */
-const LIST_TERMS_FIELD = { culture: 'culture', place: 'place', date_decade: 'date' } as const;
-
-/**
- * Compose the filtered-zero recovery hint. culture/place/date_decade values route to
+ * Compose the filtered-zero recovery hint. culture/place/date values route to
  * smithsonian_list_terms with a `contains` substring (their vocabulary isn't in result
  * summaries); object_type/unit_code values ARE in summaries, so they're named from the
  * unfiltered harvest. Returns '' when neither applies, so the caller keeps the static
@@ -45,17 +37,17 @@ const LIST_TERMS_FIELD = { culture: 'culture', place: 'place', date_decade: 'dat
  * value gets told what its zero match actually means instead.
  */
 function composeFilterHint(
-  routableFilters: Array<{ filter: string; field: string; value: string; indexed: boolean }>,
+  routableFilters: Array<{ field: string; value: string; indexed: boolean }>,
   objectTypes: string[],
   unitCodes: string[],
 ): string {
   const parts: string[] = [];
-  for (const { filter, field, value, indexed } of routableFilters) {
+  for (const { field, value, indexed } of routableFilters) {
     parts.push(
       indexed
-        ? `Your ${filter} filter "${value}" is an exact term in the "${field}" vocabulary, so resolving it again returns the same value — it either has no retrievable objects at all or does not overlap your query and other filters. Drop it, or pick a different term from ` +
+        ? `Your ${field} filter "${value}" is an exact term in the "${field}" vocabulary, so resolving it again returns the same value — it either has no retrievable objects at all or does not overlap your query and other filters. Drop it, or pick a different term from ` +
             `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`
-        : `Your ${filter} filter "${value}" matched nothing — resolve it to an exact term with ` +
+        : `Your ${field} filter "${value}" matched nothing — resolve it to an exact term with ` +
             `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`,
     );
   }
@@ -97,7 +89,7 @@ const ObjectSummarySchema = z
       .string()
       .optional()
       .describe(
-        'Decade-level date the catalog indexes for the object (e.g. "1960s"). Sparse — omitted when the record has no indexed date.',
+        'Indexed date term for the object — commonly a decade ("1960s"), but the vocabulary also carries year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s"). Sparse — omitted when the record has no indexed date.',
       ),
     thumbnail_url: z
       .string()
@@ -119,7 +111,7 @@ const ObjectSummarySchema = z
 export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
   title: 'Search Smithsonian Objects',
   description:
-    'Recommended first step for open-ended or topic discovery: free-text search across 19.4 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, decade, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, decade, or object type — use smithsonian_browse_category instead.',
+    'Recommended first step for open-ended or topic discovery: free-text search across 19.4 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, date term, or object type — use smithsonian_browse_category instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -142,12 +134,11 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .describe(
             'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search_objects results.',
           ),
-        date_decade: z
+        date: z
           .string()
-          .regex(/^\d{4}s$/, 'Decade must be in "NNNNs" format, e.g. "1920s".')
           .optional()
           .describe(
-            'Decade filter (e.g. "1920s", "1960s"). Must match the "NNNNs" format exactly. Indexed decades are enumerable via smithsonian_list_terms (field "date").',
+            'Indexed date term. Decades ("1920s", "1960s") are the most common form, but the vocabulary also carries year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s"). The value must be an exact term — the full set is enumerable via smithsonian_list_terms (field "date").',
           ),
         culture: z
           .string()
@@ -240,22 +231,28 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     const f = input.filters;
     if (f?.unit_code) filters.push(luceneField('unit_code', f.unit_code));
     if (f?.object_type) filters.push(luceneField('object_type', f.object_type));
-    if (f?.date_decade) filters.push(luceneField('date', f.date_decade));
+    if (f?.date) filters.push(luceneField('date', f.date));
     if (f?.culture) filters.push(luceneField('culture', f.culture));
     if (f?.place) filters.push(luceneField('place', f.place));
     if (f?.online_only) filters.push('online_media_type:*');
     if (f?.cc0_only) filters.push('media_usage:CC0');
 
+    // EDAN rejects an entirely empty q with a raw 400 (issue #39). Filters alone
+    // already assemble a non-empty q, so only a query-less, filter-less call needs
+    // the match-all term the API accepts — that reads as "everything", which is
+    // what an empty search asks for, instead of a transport-level fetch failure.
+    const query = !input.query && filters.length === 0 ? '*' : input.query;
+
     const rows = Math.min(input.rows, 100);
     ctx.log.info('Searching Smithsonian', {
-      query: input.query,
+      query,
       rows,
       start: input.start,
       filters,
     });
 
     const { rows: objects, rowCount } = await svc.search(
-      { query: input.query, rows, start: input.start, filters },
+      { query, rows, start: input.start, filters },
       ctx,
     );
 
@@ -269,24 +266,17 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       // controlled vocabulary — surface the actionable invalid_filter reason
       // (recovery points at smithsonian_list_terms) rather than generic no_results.
       if (filters.length > 0) {
-        // culture/place/date_decade values aren't present in ObjectSummary, so a
-        // result harvest can't resolve them — route each to smithsonian_list_terms
-        // with a `contains` substring instead. object_type/unit_code ARE in summaries,
-        // so those are harvested from one unfiltered re-query and named in the hint.
-        // Harvesting is best-effort and failure-path only: any error or an empty
-        // re-query keeps the static contract hint, so it never turns a clean
-        // invalid_filter into a crash.
-        const routable: Array<{ filter: string; field: string; value: string }> = [];
-        if (f?.culture)
-          routable.push({ filter: 'culture', field: LIST_TERMS_FIELD.culture, value: f.culture });
-        if (f?.place)
-          routable.push({ filter: 'place', field: LIST_TERMS_FIELD.place, value: f.place });
-        if (f?.date_decade)
-          routable.push({
-            filter: 'date_decade',
-            field: LIST_TERMS_FIELD.date_decade,
-            value: f.date_decade,
-          });
+        // culture/place/date values aren't present in ObjectSummary, so a result
+        // harvest can't resolve them — route each to smithsonian_list_terms with a
+        // `contains` substring instead (each filter's name is also its list_terms
+        // field). object_type/unit_code ARE in summaries, so those are harvested from
+        // one unfiltered re-query and named in the hint. Harvesting is best-effort and
+        // failure-path only: any error or an empty re-query keeps the static contract
+        // hint, so it never turns a clean invalid_filter into a crash.
+        const routable: Array<{ field: string; value: string }> = [];
+        if (f?.culture) routable.push({ field: 'culture', value: f.culture });
+        if (f?.place) routable.push({ field: 'place', value: f.place });
+        if (f?.date) routable.push({ field: 'date', value: f.date });
 
         // Whether each routable value is already an exact vocabulary term, which
         // decides between "resolve it" and "it resolves to itself" (issue #33).
