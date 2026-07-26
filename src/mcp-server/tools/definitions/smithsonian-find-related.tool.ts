@@ -39,7 +39,11 @@ const RelatedObjectSchema = z
         'Full museum name. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
       ),
     thumbnail_url: z.string().optional().describe('Thumbnail URL if available.'),
-    is_cc0: z.boolean().describe('True when the object is CC0 open access.'),
+    is_cc0: z
+      .boolean()
+      .describe(
+        'True when the object metadata is CC0 (open access). The Smithsonian Open Access corpus is CC0 throughout, so this flag rarely varies and cannot gate an image download — read thumbnail_url for that.',
+      ),
     similarity_signals: z
       .array(
         z

@@ -606,6 +606,21 @@ describe('smithsonianSearchObjects', () => {
     expect(description).not.toMatch(/objects that have any online media/i);
   });
 
+  it('cc0_only describes itself as a media-presence filter, not a license filter (issue #40)', () => {
+    // media_usage:CC0 marks a record as HAVING CC0 media, not as being CC0-licensed —
+    // the records it excludes are CC0 too, just undigitized. The advertised description
+    // is the whole fix here; assert the substantive claim, not the exact prose.
+    const jsonSchema = z.toJSONSchema(smithsonianSearchObjects.input) as {
+      properties: {
+        filters: { properties: { cc0_only: { description?: string } } };
+      };
+    };
+    const description = jsonSchema.properties.filters.properties.cc0_only.description ?? '';
+    expect(description).toContain('media_usage:CC0');
+    expect(description).toContain('has_media');
+    expect(description).not.toMatch(/restrict to CC0 open-access objects/i);
+  });
+
   it('quotes multi-word filter values in Lucene terms', async () => {
     const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({

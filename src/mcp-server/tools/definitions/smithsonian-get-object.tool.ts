@@ -106,7 +106,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     is_cc0: z
       .boolean()
       .describe(
-        'True when the object metadata is CC0 (open access). Call smithsonian_get_media to get images.',
+        'True when the object metadata is CC0 (open access). The Smithsonian Open Access corpus is CC0 throughout, so this flag rarely varies — read media_summary.has_cc0_images to predict whether smithsonian_get_media returns images.',
       ),
     record_link: z
       .string()

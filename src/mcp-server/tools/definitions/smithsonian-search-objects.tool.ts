@@ -106,7 +106,7 @@ const ObjectSummarySchema = z
     is_cc0: z
       .boolean()
       .describe(
-        'True when the object metadata is CC0 (open access). Use smithsonian_get_media for CC0 image downloads.',
+        'True when the object metadata is CC0 (open access). The Smithsonian Open Access corpus is CC0 throughout, so this flag rarely varies and cannot gate an image download — read has_media for that.',
       ),
     has_media: z
       .boolean()
@@ -171,7 +171,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .boolean()
           .optional()
           .describe(
-            'When true, restrict to CC0 open-access objects. Useful before calling smithsonian_get_media.',
+            'When true, restrict to records that have CC0-licensed media attached (the Lucene term media_usage:CC0). This selects on media presence, not license status — the roughly 9.2M records it excludes are CC0 too, they simply have nothing digitized. Read has_media on each result to decide whether smithsonian_get_media will return anything.',
           ),
       })
       .optional()
