@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -41,19 +41,20 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 
 | Tool | Description |
 |:---|:---|
-| `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, online-only, CC0). Returns curated summaries with total count. |
-| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
+| `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, topic, name, online-only, CC0). Returns curated summaries with total count. |
+| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type, topic). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
 | `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
 | `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned, never an empty list — a distinct error reason names why, whether the object has nothing digitized, only non-image media, or only restricted images. |
-| `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
-| `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, maker, topic, and period signals. |
+| `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium, topic) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
+| `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, named-party, topic, and period signals. |
 
 ### `smithsonian_search_objects`
 
 Full-text search with structured filters across the entire Smithsonian catalog.
 
 - Free-text search over 14.5M objects from 20+ museums
-- Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, online-only, CC0-only
+- Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, subject topic, named party (`name`), online-only, CC0-only
+- `topic` and `name` are hard indexed constraints, not free text — `topic: "Quilts"` matches 1,134 objects where the bare word matches 2,677, and `name: "Warhol, Andy"` matches 421 against 715
 - Returns curated summaries: title, date, museum, object type, thumbnail URL, CC0 flag, `record_id`
 - Use `start` + `rows` for standard pagination (offset-based, max 100 per page)
 
@@ -63,12 +64,12 @@ Full-text search with structured filters across the entire Smithsonian catalog.
 
 Enumerate the valid term vocabulary for an indexed filter field before applying filters.
 
-- Supported fields: `unit_code`, `culture`, `place`, `date`, `online_media_type`
+- Supported fields: `unit_code`, `culture`, `place`, `date`, `online_media_type`, `topic`
 - Returns the field's distinct term values as a page of the full vocabulary — no per-term object counts are available upstream
 - Smithsonian uses a controlled vocabulary (terms are often plural, e.g. `Paintings` not `Painting`) — grounding filter values here avoids empty results
 - Pass `contains` to filter the vocabulary by a case-insensitive substring — resolve a guessed value (e.g. `greek` → `Greek, Attic`) to its exact term(s) in one call, or confirm absence with an empty result
 - For `unit_code`, a `labels` map returns each code's museum name and `contains` matches that name as well as the code, so `National Air and Space` resolves to `NASM` in one call
-- Paginate with `start` + `rows` (default 50 per page, max 100); large vocabularies like `place` have 100k+ terms
+- Paginate with `start` + `rows` (default 50 per page, max 100); the largest vocabularies are `topic` (133k terms) and `place` (114k), so pair those with `contains`
 - Each field's vocabulary is cached for `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` (default 1 hour) — upstream ignores paging and returns the whole set on every call, so paging a large vocabulary uncached re-downloads it each time
 - `object_type` is not enumerable upstream — discover object-type values from the `object_type` field in `smithsonian_search_objects` results
 
@@ -99,8 +100,8 @@ CC0-gated image access at multiple resolutions.
 
 Paginated browse within one exact category. For open-ended or topic discovery, use `smithsonian_search_objects` instead.
 
-- Four modes: `museum` (by unit code, e.g. `"NASM"` — matched exactly, not by museum name), `culture` (e.g. `"Aztecs"`), `period` (indexed date term, e.g. `"1940s"` or `"500-1500"`), `medium` (object type, e.g. `"Paintings"`)
-- `value` must be an exact indexed category term — resolve `museum`, `culture`, and `period` vocabulary with `smithsonian_list_terms` first; `object_type` is not enumerable there, so harvest it from `smithsonian_search_objects` results
+- Five modes: `museum` (by unit code, e.g. `"NASM"` — matched exactly, not by museum name), `culture` (e.g. `"Aztecs"`), `period` (indexed date term, e.g. `"1940s"` or `"500-1500"`), `medium` (object type, e.g. `"Paintings"`), `topic` (subject term, e.g. `"Quilts"`)
+- `value` must be an exact indexed category term — resolve `museum`, `culture`, `period`, and `topic` vocabulary with `smithsonian_list_terms` first; `object_type` is not enumerable there, so harvest it from `smithsonian_search_objects` results
 - Returns total count, a page of sample objects, and a museum breakdown showing which institutions hold matching items (computed from the current page)
 - Use `start` + `rows` for standard pagination (offset-based, `start = page × rows`, max 50 per page) — adjacent pages retrieve the objects a capped sample omits
 - A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint. A value outside the vocabulary gets the exact `smithsonian_list_terms` call that resolves it; a value the index enumerates but that matches no objects is named as such and routed elsewhere, since resolving it returns the same value
@@ -111,7 +112,9 @@ Paginated browse within one exact category. For open-ended or topic discovery, u
 
 Cross-collection discovery via shared metadata signals.
 
-- Matches the anchor's culture, maker, topic, and period+type metadata signals against the wider catalog
+- Matches the anchor's culture, named-party, topic, and period+type metadata signals against the wider catalog
+- The named-party signal carries the catalog's own role for the party (`maker`, `collector`, `donor`, `issuing authority`, …) rather than a fixed `maker` label, prefers the indexed `name` facet as a hard filter when the record has one, and is dropped when its value only repeats the culture signal
+- The topic signal is a hard `topic:` filter, so every object it tags carries that subject term rather than merely mentioning the word
 - Surfaces related objects from across collections, each tagged with the metadata signals that connected it to the anchor
 - Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
 - `similarity_signals` on each result show every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them

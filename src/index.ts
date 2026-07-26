@@ -30,8 +30,8 @@ await createApp({
     'Smithsonian Open Access API — 14.5M objects across 20+ museums; 5.2M of them carry CC0 media.\n' +
     'Recommended workflow:\n' +
     '1. Start with smithsonian_search_objects for free-text or open-ended discovery.\n' +
-    '2. Use smithsonian_list_terms to resolve exact museum (unit_code), culture, place, or date vocabulary — terms are a controlled vocabulary, often plural (e.g. "Paintings", not "Painting").\n' +
-    '3. Use smithsonian_browse_category to page objects within one known exact category (a single museum, culture, date term, or object type).\n' +
+    '2. Use smithsonian_list_terms to resolve exact museum (unit_code), culture, place, date, or topic vocabulary — terms are a controlled vocabulary, often plural (e.g. "Paintings", not "Painting").\n' +
+    '3. Use smithsonian_browse_category to page objects within one known exact category (a single museum, culture, date term, object type, or topic).\n' +
     '4. Continue with smithsonian_get_object (catalog metadata), smithsonian_get_media (CC0 image URLs), or smithsonian_find_related (cross-collection discovery) by record_id.\n' +
     '- Requires SMITHSONIAN_API_KEY (free from https://api.data.gov/signup).',
   setup(core) {

@@ -405,13 +405,15 @@ describe('smithsonianSearchObjects', () => {
      * The two branches of the same filtered zero, per routable filter. `indexed: true`
      * is a value the vocabulary enumerates: `smithsonian_list_terms { contains }`
      * returns it verbatim, so a hint routing there loops the caller through the
-     * identical failing search. Only culture, place, and date route to
-     * list_terms — unit_code and object_type resolve through the result harvest.
+     * identical failing search. Only culture, place, date, and topic route to
+     * list_terms — unit_code and object_type resolve through the result harvest, and
+     * name is neither enumerable nor present in summaries.
      */
     it.each([
       ['culture', { culture: 'Guiana' }, 'culture', 'Guiana'],
       ['place', { place: 'Nigeria' }, 'place', 'Nigeria'],
       ['date', { date: '1210s' }, 'date', '1210s'],
+      ['topic', { topic: 'Quilts' }, 'topic', 'Quilts'],
     ] as const)(
       '%s: an indexed value is named as exact, not as unresolved',
       async (filter, filters, field, value) => {
@@ -515,6 +517,35 @@ describe('smithsonianSearchObjects', () => {
 
       expect(isIndexedTerm).not.toHaveBeenCalled();
     });
+
+    it('never consults the vocabulary for name, keeping the static contract hint', async () => {
+      // `name` is not enumerable through smithsonian_list_terms and is absent from
+      // ObjectSummary, so it has neither a routable entry nor a harvest. The static
+      // contract recovery stands, and it names where exact values do come from.
+      const isIndexedTerm = vi.fn().mockResolvedValue(true);
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+        isIndexedTerm,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      const input = smithsonianSearchObjects.input.parse({
+        query: 'soup can',
+        filters: { name: 'Warhol, Andrew' },
+      });
+      const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
+
+      expect(isIndexedTerm).not.toHaveBeenCalled();
+      const expectedHint = smithsonianSearchObjects.errors?.find(
+        (e) => e.reason === 'invalid_filter',
+      )?.recovery;
+      expect(err.data?.recovery?.hint).toBe(expectedHint);
+      // The reliable source is the find_related name signal — it carries the indexed
+      // form. makers[] is the free-text form of the same parties, written differently
+      // often enough that pointing there alone dead-ends the caller.
+      expect(expectedHint).toContain('smithsonian_find_related');
+      expect(expectedHint).toContain('makers[]');
+    });
   });
 
   it('non-truncated result validates against the effective output schema (issue #13)', async () => {
@@ -560,6 +591,28 @@ describe('smithsonianSearchObjects', () => {
     // Not luceneField calls — these two are intentional wildcards and stay unquoted.
     expect(calledParams.filters).toContain('media_usage:CC0');
     expect(calledParams.filters).toContain('online_media_type:*');
+  });
+
+  it('embeds topic and name as hard Lucene field terms', async () => {
+    // Both are indexed facets, so each is a hard constraint rather than free text:
+    // topic:"Quilts" matches 1,134 objects where the bare word matches 2,677, and
+    // name:"Warhol, Andy" matches 421 against 715.
+    const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    await smithsonianSearchObjects.handler(
+      smithsonianSearchObjects.input.parse({
+        query: '',
+        filters: { topic: 'Quilts', name: 'Warhol, Andy' },
+      }),
+      ctx,
+    );
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    expect(calledParams.filters).toEqual(['topic:"Quilts"', 'name:"Warhol, Andy"']);
   });
 
   it('online_only matches the index field, so a result may report has_media false (issue #28)', async () => {
@@ -833,6 +886,47 @@ describe('smithsonianSearchObjects', () => {
 
       const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
       expect(calledParams.filters).toEqual(['culture:"Early Iron Age, \\"Tomb Age\\""']);
+    });
+
+    it('escapes a quote-bearing name value instead of truncating the phrase', async () => {
+      // A named party can carry a quoted alias ('Smith, John "Jack"'). Unescaped, the
+      // inner quote closes the phrase early and the trailing words leak back out as
+      // free text, so the filter stops being a hard constraint on `name`.
+      const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 2 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      await smithsonianSearchObjects.handler(
+        smithsonianSearchObjects.input.parse({
+          query: '',
+          filters: { name: 'Smith, John "Jack"' },
+        }),
+        ctx,
+      );
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+      expect(calledParams.filters).toEqual(['name:"Smith, John \\"Jack\\""']);
+    });
+
+    it('escapes a quote-bearing topic term — 80 of the 133k topic terms carry one', async () => {
+      const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 5 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      await smithsonianSearchObjects.handler(
+        smithsonianSearchObjects.input.parse({
+          query: '',
+          filters: { topic: 'Operation "Overlord"' },
+        }),
+        ctx,
+      );
+
+      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+      expect(calledParams.filters).toEqual(['topic:"Operation \\"Overlord\\""']);
     });
 
     it('quotes a bare wildcard place term so it stays one literal term', async () => {

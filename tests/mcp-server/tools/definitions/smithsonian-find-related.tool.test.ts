@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
-import type { ObjectSummary, RawEDAN } from '@/services/smithsonian/types.js';
+import type { ObjectSummary, RawEDAN, RawIndexedName } from '@/services/smithsonian/types.js';
 
 function makeAnchorRaw(id = 'nasm_TEST001'): RawEDAN {
   return {
@@ -251,7 +251,7 @@ describe('smithsonianFindRelated', () => {
     // Verify each signal contributes at least one result
     const signalsRepresented = new Set(result.related.flatMap((r) => r.similarity_signals));
     expect(signalsRepresented.has('culture: American')).toBe(true);
-    expect(signalsRepresented.has('maker: Lockheed')).toBe(true);
+    expect(signalsRepresented.has('manufacturer: Lockheed')).toBe(true);
     expect(signalsRepresented.has('topic: Aviation')).toBe(true);
   });
 
@@ -333,7 +333,7 @@ describe('smithsonianFindRelated', () => {
     const searchFn = vi
       .fn()
       .mockResolvedValueOnce({ rows: [shared], rowCount: 1 }) // culture: American
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // maker: Lockheed
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 }) // manufacturer: Lockheed
       .mockResolvedValueOnce({ rows: [shared], rowCount: 1 }) // topic: Aviation
       .mockResolvedValue({ rows: [], rowCount: 0 }); // period + type
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
@@ -771,7 +771,7 @@ describe('smithsonianFindRelated', () => {
         return Promise.resolve({ rows: [row('culture_1')], rowCount: 14662 });
       if (params.query === 'Lockheed')
         return Promise.resolve({ rows: [row('maker_1')], rowCount: 199 });
-      if (params.query === 'Aviation')
+      if (params.filters?.some((f) => f.startsWith('topic:')))
         return Promise.resolve({ rows: [row('topic_1')], rowCount: 63 });
       return Promise.resolve({ rows: [row('period_1')], rowCount: 12 });
     });
@@ -827,9 +827,14 @@ describe('smithsonianFindRelated', () => {
       query: '',
       filters: { culture: 'American' },
     });
-    // maker and topic are plain free-text queries with no filters at all.
-    expect(bySignal.get('maker: Lockheed')).toEqual({ query: 'Lockheed' });
-    expect(bySignal.get('topic: Aviation')).toEqual({ query: 'Aviation' });
+    // A freetext-sourced named party stays a plain free-text query with no filters,
+    // labeled from the entry's own label rather than a hardcoded "maker" (issue #43).
+    expect(bySignal.get('manufacturer: Lockheed')).toEqual({ query: 'Lockheed' });
+    // topic is an indexed facet, so its fan-out is a filter, not free text (issue #44).
+    expect(bySignal.get('topic: Aviation')).toEqual({
+      query: '',
+      filters: { topic: 'Aviation' },
+    });
     // period+type carries both constraints structurally.
     expect(bySignal.get('period: 1960s, type: Aircraft')).toEqual({
       query: '',
@@ -944,7 +949,7 @@ describe('smithsonianFindRelated', () => {
     );
 
     expect(result.signals.map((s) => s.signal)).not.toContain('culture: American');
-    expect(result.signals.map((s) => s.signal)).toContain('maker: Lockheed');
+    expect(result.signals.map((s) => s.signal)).toContain('manufacturer: Lockheed');
     // search_signals_used still lists every fan-out attempted.
     expect(result.search_signals_used).toContain('culture: American');
   });
@@ -1000,6 +1005,220 @@ describe('smithsonianFindRelated', () => {
     );
   });
 
+  describe('named-party signal (issue #43)', () => {
+    /**
+     * Run the handler against an anchor whose name blocks are set by the caller, and
+     * hand back the resulting signals plus every upstream call the fan-out issued.
+     * The service is stubbed to a fixed empty result so only signal construction is
+     * under test.
+     */
+    async function signalsFor(anchor: {
+      culture?: string[];
+      indexedNames?: RawIndexedName[];
+      freetextNames?: Array<{ label?: string; content?: string }>;
+    }) {
+      const anchorRaw = makeAnchorRaw();
+      if (anchor.culture) anchorRaw.content!.indexedStructured!.culture = anchor.culture;
+      if (anchor.indexedNames) anchorRaw.content!.indexedStructured!.name = anchor.indexedNames;
+      anchorRaw.content!.freetext!.name = anchor.freetextNames ?? [];
+      const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 4 });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        getContent: vi.fn().mockResolvedValue(anchorRaw),
+        toSummary: vi.fn().mockReturnValue({
+          record_id: 'nasm_TEST001',
+          title: 'Anchor',
+          unit_code: 'NASM',
+          museum_name: 'National Air and Space Museum',
+          is_cc0: true,
+          has_media: true,
+        }),
+        search: searchFn,
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+      const result = await smithsonianFindRelated.handler(
+        smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+        ctx,
+      );
+      return {
+        result,
+        calls: searchFn.mock.calls.map((c) => c[0] as { query: string; filters: string[] }),
+      };
+    }
+
+    it.each([
+      ['Collector', 'collector: Krieger, Herbert W.'],
+      ['Donor Name', 'donor name: Smithsonian Institution'],
+      ['issuing authority', 'issuing authority: United States Post Office'],
+    ])('labels a %s entry from its own label, never as a maker', async (label, expected) => {
+      // EDAN uses freetext.name for any named party — a collector, a donor, an issuing
+      // authority — and maker is a minority of them. The hardcoded label asserted a
+      // maker relationship the catalog never claimed.
+      const value = expected.slice(expected.indexOf(': ') + 2);
+      const { result } = await signalsFor({ freetextNames: [{ label, content: value }] });
+
+      expect(result.search_signals_used).toContain(expected);
+      expect(result.search_signals_used.some((s) => s.startsWith('maker:'))).toBe(false);
+    });
+
+    it('skips a first entry that duplicates the culture filter and takes the next distinct one', async () => {
+      // The NMAI_230201 shape, minus the indexed name: freetext.name[0] is the
+      // Culture/People entry, whose value the culture fan-out already runs as a hard
+      // filter. Re-running it as free text spends a slot on a duplicate and presents
+      // the culture as a named party.
+      const donor = 'Major J. A. L. Möller (Jacob A.L. Möller/Monty Möller), Non-Indian, 1883-1957';
+      const { result, calls } = await signalsFor({
+        culture: ['Dene (Northern Athabascan)'],
+        freetextNames: [
+          { label: 'Culture/People', content: 'Dene (Northern Athabascan)' },
+          { label: 'Previous owner', content: donor },
+          { label: 'Donor', content: donor },
+        ],
+      });
+
+      expect(result.search_signals_used).toContain('culture: Dene (Northern Athabascan)');
+      expect(result.search_signals_used).toContain(`previous owner: ${donor}`);
+      // The pre-fix output: the culture value relabeled as a maker and re-run as free
+      // text, matching 1,604 records against the culture filter's 194.
+      expect(result.search_signals_used).not.toContain('maker: Dene (Northern Athabascan)');
+      expect(calls.some((c) => c.query === 'Dene (Northern Athabascan)')).toBe(false);
+    });
+
+    it('leaves the slot unused when every candidate duplicates the culture filter', async () => {
+      // Nothing distinct is left to fan out on, so the signal is dropped rather than
+      // emitted as a redundant restatement of the culture filter.
+      const { result } = await signalsFor({
+        culture: ['Dene (Northern Athabascan)'],
+        freetextNames: [
+          { label: 'Culture/People', content: 'Dene (Northern Athabascan)' },
+          { label: 'Associated Name', content: 'Dene (Northern Athabascan)' },
+        ],
+      });
+
+      expect(result.search_signals_used).toEqual([
+        'culture: Dene (Northern Athabascan)',
+        'topic: Aviation',
+        'period: 1960s, type: Aircraft',
+      ]);
+    });
+
+    it('prefers indexedStructured.name as a hard name: filter over the freetext entries', async () => {
+      // The indexed block is the hard-filterable counterpart: name:"Warhol, Andy"
+      // matches 421 records against 715 for the same string as free text. It carries no
+      // positional correspondence to freetext.name — on NMAI_230201 three freetext
+      // entries yield one indexed name drawn from entries [1]/[2] — so it takes the
+      // slot outright rather than being paired with any entry.
+      const { result, calls } = await signalsFor({
+        culture: ['Dene (Northern Athabascan)'],
+        indexedNames: ['Möller, Major J. A. L.'],
+        freetextNames: [
+          { label: 'Culture/People', content: 'Dene (Northern Athabascan)' },
+          { label: 'Donor', content: 'Major J. A. L. Möller (…), Non-Indian, 1883-1957' },
+        ],
+      });
+
+      expect(result.search_signals_used).toContain('name: Möller, Major J. A. L.');
+      const nameCall = calls.find((c) => c.filters.some((f) => f.startsWith('name:')));
+      expect(nameCall?.filters).toContain('name:"Möller, Major J. A. L."');
+      // A hard filter, not a free-text query.
+      expect(nameCall?.query).toBe('');
+      expect(calls.some((c) => c.query.includes('Möller'))).toBe(false);
+    });
+
+    it('reproduces the indexed-name fan-out through filters.name in the continuation', async () => {
+      // filters.name exists on smithsonian_search_objects so this fan-out's
+      // search_continuation stays exact — the tool's documented invariant — rather
+      // than degrading to a free-text query that matches a different set.
+      const { result } = await signalsFor({ indexedNames: ['Warhol, Andy'] });
+
+      const nameSignal = result.signals.find((s) => s.signal.startsWith('name:'));
+      expect(nameSignal?.search_continuation).toEqual({
+        query: '',
+        filters: { name: 'Warhol, Andy' },
+      });
+      expect(() =>
+        smithsonianSearchObjects.input.parse(nameSignal?.search_continuation),
+      ).not.toThrow();
+    });
+
+    it('reads the wrapped form of an indexed name entry', async () => {
+      // Bibliographic and authority records index the name as an object carrying the
+      // value under `content` — {type:"author"} on Smithsonian Research Online,
+      // {VIAF:"…"} on Libraries authority records — rather than as a bare string.
+      // Passed through unread, the object reached luceneField and threw
+      // `value.replace is not a function`, failing the whole call.
+      const { result, calls } = await signalsFor({
+        indexedNames: [{ content: 'Mitchell, Stephanie L.' }, { content: 'Schulkin, Jay' }],
+      });
+
+      expect(result.search_signals_used).toContain('name: Mitchell, Stephanie L.');
+      const nameCall = calls.find((c) => c.filters.some((f) => f.startsWith('name:')));
+      expect(nameCall?.filters).toContain('name:"Mitchell, Stephanie L."');
+      expect(result.signals.find((s) => s.signal.startsWith('name:'))?.search_continuation).toEqual(
+        {
+          query: '',
+          filters: { name: 'Mitchell, Stephanie L.' },
+        },
+      );
+    });
+
+    it('skips a wrapped indexed name with no content and falls back to the freetext block', async () => {
+      const { result } = await signalsFor({
+        indexedNames: [{}],
+        freetextNames: [{ label: 'Collector', content: 'Krieger, Herbert W.' }],
+      });
+
+      expect(result.search_signals_used).toContain('collector: Krieger, Herbert W.');
+    });
+
+    it('applies the duplicate check to the indexed name too', async () => {
+      const { result } = await signalsFor({
+        culture: ['Ainu'],
+        indexedNames: ['Ainu'],
+        freetextNames: [{ label: 'Culture/People', content: 'Ainu' }],
+      });
+
+      expect(result.search_signals_used.some((s) => s.startsWith('name:'))).toBe(false);
+      expect(result.search_signals_used).toContain('culture: Ainu');
+    });
+  });
+
+  it('issues the topic fan-out as a hard topic: filter, not free text (issue #44)', async () => {
+    // topic:"Quilts" matches 1,134 objects where the bare word matches 2,677, so the
+    // free-text form tagged more than half its results with a topic the catalog never
+    // assigned them.
+    const anchorRaw = makeAnchorRaw();
+    const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 1134 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianFindRelated.errors });
+    await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+      ctx,
+    );
+
+    const topicCall = searchFn.mock.calls
+      .map((c) => c[0] as { query: string; filters: string[] })
+      .find((p) => p.filters.some((f) => f.startsWith('topic:')));
+    // Always quoted (issue #42) — 80 of the 133,113 topic terms carry a `"`.
+    expect(topicCall?.filters).toEqual(['topic:"Aviation"']);
+    expect(topicCall?.query).toBe('');
+    expect(searchFn.mock.calls.some((c) => (c[0] as { query: string }).query === 'Aviation')).toBe(
+      false,
+    );
+  });
+
   it('format renders anchor, related record_ids, and similarity signals', () => {
     const output = {
       anchor: { record_id: 'nasm_TEST001', title: 'Anchor Object', unit_code: 'NASM' },
@@ -1013,14 +1232,18 @@ describe('smithsonianFindRelated', () => {
           similarity_signals: ['culture: American', 'period: 1960s'],
         },
       ],
-      search_signals_used: ['culture: American', 'maker: Lockheed'],
+      search_signals_used: ['culture: American', 'manufacturer: Lockheed'],
       signals: [
         {
           signal: 'culture: American',
           row_count: 14662,
           search_continuation: { query: '', filters: { culture: 'American' } },
         },
-        { signal: 'maker: Lockheed', row_count: 199, search_continuation: { query: 'Lockheed' } },
+        {
+          signal: 'manufacturer: Lockheed',
+          row_count: 199,
+          search_continuation: { query: 'Lockheed' },
+        },
       ],
     };
     const blocks = smithsonianFindRelated.format!(output);
@@ -1028,7 +1251,7 @@ describe('smithsonianFindRelated', () => {
     expect(text).toContain('nasm_TEST001');
     expect(text).toContain('nasm_RELATED001');
     expect(text).toContain('culture: American');
-    expect(text).toContain('maker: Lockheed');
+    expect(text).toContain('manufacturer: Lockheed');
   });
 
   it('format renders every signal continuation field into content[] (issue #18)', () => {
@@ -1053,6 +1276,16 @@ describe('smithsonianFindRelated', () => {
             filters: { date: '1960s', object_type: 'Aircraft' },
           },
         },
+        {
+          signal: 'name: Warhol, Andy',
+          row_count: 421,
+          search_continuation: { query: '', filters: { name: 'Warhol, Andy' } },
+        },
+        {
+          signal: 'topic: Quilts',
+          row_count: 1134,
+          search_continuation: { query: '', filters: { topic: 'Quilts' } },
+        },
       ],
     };
     const text = smithsonianFindRelated.format!(output)
@@ -1064,6 +1297,9 @@ describe('smithsonianFindRelated', () => {
     // Both filter keys of the same continuation render together, not as alternatives.
     expect(text).toContain('date: "1960s"');
     expect(text).toContain('object_type: "Aircraft"');
+    // The two filter keys added for issues #43/#44 reach content[] on the same render.
+    expect(text).toContain('name: "Warhol, Andy"');
+    expect(text).toContain('topic: "Quilts"');
   });
 
   it('format renders cleanly when related is empty', () => {

@@ -181,6 +181,28 @@ describe('smithsonianListTerms', () => {
     expect(() => smithsonianListTerms.input.parse({ field: 'invalid_field' })).toThrow();
   });
 
+  it('enumerates the topic vocabulary, narrowed by contains', async () => {
+    // topic is enumerable upstream (133,113 terms) and is the vocabulary behind
+    // smithsonian_search_objects filters.topic and browse mode "topic".
+    const listTermsFn = vi
+      .fn()
+      .mockResolvedValue(makeTermsResult(['Quilts', 'Quilts--History'], 2));
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: listTermsFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
+    const input = smithsonianListTerms.input.parse({ field: 'topic', contains: 'quilt' });
+    const result = await smithsonianListTerms.handler(input, ctx);
+
+    expect(listTermsFn).toHaveBeenCalledWith(
+      { field: 'topic', start: 0, rows: 50, contains: 'quilt' },
+      ctx,
+    );
+    expect(result.field).toBe('topic');
+    expect(result.terms).toEqual(['Quilts', 'Quilts--History']);
+  });
+
   it('rejects fields not enumerable upstream (object_type, media_usage)', () => {
     // object_type is WAF-blocked and media_usage is not a terms field — both were
     // removed from the enum, so they must be rejected at input parse.

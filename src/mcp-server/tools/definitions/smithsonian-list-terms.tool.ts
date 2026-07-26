@@ -10,14 +10,14 @@ import { getSmithsonianService } from '@/services/smithsonian/smithsonian-servic
 export const smithsonianListTerms = tool('smithsonian_list_terms', {
   title: 'List Valid Filter Terms',
   description:
-    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field (unit_code, culture, place, date, online_media_type). Terms are a controlled vocabulary — often plural or qualified (e.g. "Paintings", not "Painting") — so guessed filter values tend to return nothing. Returns a page of the field\'s distinct term values; large vocabularies (place has 100k+ terms) page via start and rows. For unit_code, each code is returned with its museum name and contains matches the name as well as the code, so a museum name resolves to its code in one call.',
+    'Enumerate the valid term vocabulary for an indexed Smithsonian filter field (unit_code, culture, place, date, online_media_type, topic). Terms are a controlled vocabulary — often plural or qualified (e.g. "Paintings", not "Painting") — so guessed filter values tend to return nothing. Returns a page of the field\'s distinct term values; large vocabularies (topic has 133k terms, place 114k) page via start and rows. For unit_code, each code is returned with its museum name and contains matches the name as well as the code, so a museum name resolves to its code in one call.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
     field: z
-      .enum(['unit_code', 'culture', 'place', 'date', 'online_media_type'])
+      .enum(['unit_code', 'culture', 'place', 'date', 'online_media_type', 'topic'])
       .describe(
-        'Indexed field to enumerate. Choices: unit_code (museum codes like "NASM"), culture (e.g. "Aztecs"), place (geographic terms), date (decade/era values like "1920s"), online_media_type (media formats like "Images", "3D Models").',
+        'Indexed field to enumerate. Choices: unit_code (museum codes like "NASM"), culture (e.g. "Aztecs"), place (geographic terms), date (decade/era values like "1920s"), online_media_type (media formats like "Images", "3D Models"), topic (subject terms like "Quilts" — 133k terms, so pair it with contains).',
       ),
     start: z
       .number()
@@ -95,7 +95,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The field returned no indexed terms.',
       recovery:
-        'Try a different field name. Valid fields: unit_code, culture, place, date, online_media_type.',
+        'Try a different field name. Valid fields: unit_code, culture, place, date, online_media_type, topic.',
     },
   ],
 

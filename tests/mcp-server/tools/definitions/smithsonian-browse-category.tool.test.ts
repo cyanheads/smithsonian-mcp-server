@@ -241,7 +241,7 @@ describe('smithsonianBrowseCategory', () => {
   );
 
   it('leaves every mode unconstrained in shape (issue #36)', () => {
-    for (const mode of ['museum', 'culture', 'period', 'medium'] as const) {
+    for (const mode of ['museum', 'culture', 'period', 'medium', 'topic'] as const) {
       expect(smithsonianBrowseCategory.input.safeParse({ mode, value: '1940' }).success).toBe(true);
     }
     expect(
@@ -267,6 +267,27 @@ describe('smithsonianBrowseCategory', () => {
     expect(calledParams.filters).toContain('culture:"Plains Indian"');
     // Culture mode uses filter only — no free-text query
     expect(calledParams.query).toBe('');
+  });
+
+  it('embeds topic filter in q for topic mode', async () => {
+    const searchFn = vi.fn().mockResolvedValue({ rows: makeSamples(2), rowCount: 1134 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+    const input = smithsonianBrowseCategory.input.parse({ mode: 'topic', value: 'Quilts' });
+    const result = await smithsonianBrowseCategory.handler(input, ctx);
+
+    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
+    // Always quoted, so a topic term carrying a `"` (80 of the 133k do) stays one
+    // literal term rather than closing the phrase early.
+    expect(calledParams.filters).toEqual(['topic:"Quilts"']);
+    expect(calledParams.query).toBe('');
+    expect(result.mode).toBe('topic');
+    expect(result.total_count).toBe(1134);
+    // topic is not museum mode, so the page breakdown is computed.
+    expect(result.museum_breakdown.length).toBeGreaterThan(0);
   });
 
   it('embeds date filter in q for period mode', async () => {
@@ -396,6 +417,7 @@ describe('smithsonianBrowseCategory', () => {
       ['museum', 'FSA', 'unit_code', 'indexed Smithsonian unit code'],
       ['culture', 'Guiana', 'culture', 'indexed culture term'],
       ['period', '1210s', 'date', 'indexed date term'],
+      ['topic', 'Quilts', 'topic', 'indexed topic term'],
     ] as const)(
       '%s mode: an indexed value is named as empty, not as unresolvable',
       async (mode, value, field, claim) => {
@@ -426,6 +448,7 @@ describe('smithsonianBrowseCategory', () => {
       ['museum', 'NOTACODE', 'is not an exact Smithsonian unit code'],
       ['culture', 'Guianaa', 'is not an exact culture term'],
       ['period', '1210s', 'matched no indexed date term'],
+      ['topic', 'Quiltss', 'is not an exact topic term'],
     ] as const)(
       '%s mode: a value outside the vocabulary still gets the resolve-it hint',
       async (mode, value, claim) => {

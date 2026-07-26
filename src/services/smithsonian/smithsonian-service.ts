@@ -566,8 +566,9 @@ export class SmithsonianService {
    *
    * The upstream endpoint returns `response.terms` as a bare `string[]` (no
    * per-term counts) and ignores `rows`/`start`, always returning the full
-   * vocabulary — `place` alone is ~114k terms (~3.2 MB, seconds of latency
-   * against a 15 s fetch budget). Caching it turns every page of a walk, and
+   * vocabulary — `topic` alone is ~133k terms (~3.6 MB, seconds of latency
+   * against a 15 s fetch budget), with `place` close behind at ~115k. Caching it
+   * turns every page of a walk, and
    * every vocabulary check on a recovery path, into an in-memory scan; the data
    * is a controlled vocabulary with no freshness requirement on the scale of a
    * session, so a TTL of hours is safe and a cold miss costs what an uncached

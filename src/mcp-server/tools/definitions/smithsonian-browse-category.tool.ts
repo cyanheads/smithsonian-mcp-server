@@ -13,7 +13,7 @@ import {
 } from '@/services/smithsonian/smithsonian-service.js';
 
 /** The category dimension a browse targets. */
-type BrowseMode = 'museum' | 'culture' | 'period' | 'medium';
+type BrowseMode = 'museum' | 'culture' | 'period' | 'medium' | 'topic';
 
 /**
  * The indexed EDAN field each browse mode constrains. Every mode applies its value
@@ -30,6 +30,7 @@ const MODE_FIELD: Record<BrowseMode, string> = {
   culture: 'culture',
   period: 'date',
   medium: 'object_type',
+  topic: 'topic',
 };
 
 /** Upper bound on object_type candidates named in a medium recovery hint. */
@@ -40,7 +41,7 @@ const MAX_OBJECT_TYPE_CANDIDATES = 12;
  * browse category is an exact indexed facet, so a zero match means the value did
  * not resolve to retrievable objects, not that an object is missing (issue #31).
  *
- * For museum, culture, and period, `indexed` splits the two ways that happens.
+ * For museum, culture, period, and topic, `indexed` splits the two ways that happens.
  * A value outside the vocabulary is resolvable, so the hint names the literal
  * smithsonian_list_terms call that resolves it. A value the index enumerates but
  * that matches no object — 14 of the 48 unit codes and a long tail of culture
@@ -78,6 +79,11 @@ function categoryRecoveryHint(
         return `"${value}" is an indexed date term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a different term from smithsonian_list_terms { field: "date" }, or search the collection directly with smithsonian_search_objects.`;
       }
       return `"${value}" matched no indexed date term. Resolve an indexed value with smithsonian_list_terms { field: "date", contains: "${value}" }, then browse again with the exact value.`;
+    case 'topic':
+      if (indexed) {
+        return `"${value}" is an indexed topic term, but it currently matches no retrievable objects — resolving it again returns the same value. Browse a related term from smithsonian_list_terms { field: "topic", contains: "${value}" }, or search the collection directly with smithsonian_search_objects.`;
+      }
+      return `"${value}" is not an exact topic term. Resolve it with smithsonian_list_terms { field: "topic", contains: "${value}" }, then browse again with the exact value.`;
     case 'medium':
       if (objectTypes.length > 0) {
         return `"${value}" is not an exact object_type term. Object types present for a free-text search of "${value}" — ${objectTypes.join(', ')}. Browse again with one of these exact terms (object_type is commonly plural, e.g. "Paintings").`;
@@ -154,19 +160,19 @@ const SampleObjectSchema = z
 export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
   title: 'Browse Smithsonian by Category',
   description:
-    'Browse Smithsonian objects within one exact category — a single museum (mode "museum"), culture, indexed date term (mode "period"), or object type (mode "medium"). The value must be an exact indexed category term, not free text: resolve museum, culture, and period vocabulary with smithsonian_list_terms first (object_type is not enumerable there — harvest it from smithsonian_search_objects results). Returns the category total count, a page of matching objects, and a museum breakdown of that page; page the full category with start and rows. For open-ended or topic discovery, start with smithsonian_search_objects instead.',
+    'Browse Smithsonian objects within one exact category — a single museum (mode "museum"), culture, indexed date term (mode "period"), object type (mode "medium"), or subject term (mode "topic"). The value must be an exact indexed category term, not free text: resolve museum, culture, period, and topic vocabulary with smithsonian_list_terms first (object_type is not enumerable there — harvest it from smithsonian_search_objects results). Returns the category total count, a page of matching objects, and a museum breakdown of that page; page the full category with start and rows. For open-ended or topic discovery, start with smithsonian_search_objects instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
     mode: z
-      .enum(['museum', 'culture', 'period', 'medium'])
+      .enum(['museum', 'culture', 'period', 'medium', 'topic'])
       .describe(
-        'Browse dimension: "museum" (by unit code), "culture" (by culture term), "period" (by indexed date term like "1940s" or "500-1500"), "medium" (by object type like "Paintings").',
+        'Browse dimension: "museum" (by unit code), "culture" (by culture term), "period" (by indexed date term like "1940s" or "500-1500"), "medium" (by object type like "Paintings"), "topic" (by subject term like "Quilts").',
       ),
     value: z
       .string()
       .describe(
-        'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: an indexed date term — commonly a decade ("1940s", "1860s"), but year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s") are indexed too. medium: object type, usually plural ("Paintings", "Aircraft"). Smithsonian uses a controlled vocabulary — for museum (unit_code), culture, and period (date), call smithsonian_list_terms to find exact terms; medium (object_type) is not enumerable there, so harvest it from smithsonian_search_objects results.',
+        'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: an indexed date term — commonly a decade ("1940s", "1860s"), but year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s") are indexed too. medium: object type, usually plural ("Paintings", "Aircraft"). topic: subject term ("Quilts", "Aviation"). Smithsonian uses a controlled vocabulary — for museum (unit_code), culture, period (date), and topic, call smithsonian_list_terms to find exact terms; medium (object_type) is not enumerable there, so harvest it from smithsonian_search_objects results.',
       ),
     rows: z
       .number()
@@ -187,7 +193,7 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
     mode: z
       .string()
       .describe(
-        'Browse dimension used for this request (one of "museum", "culture", "period", "medium").',
+        'Browse dimension used for this request (one of "museum", "culture", "period", "medium", "topic").',
       ),
     value: z.string().describe('Category value queried, as provided in the request.'),
     total_count: z.number().describe('Total number of Smithsonian objects matching this category.'),

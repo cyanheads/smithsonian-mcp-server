@@ -111,7 +111,7 @@ const ObjectSummarySchema = z
 export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
   title: 'Search Smithsonian Objects',
   description:
-    'Recommended first step for open-ended or topic discovery: free-text search across 14.5 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, date term, or object type — use smithsonian_browse_category instead.',
+    'Recommended first step for open-ended or topic discovery: free-text search across 14.5 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, date term, object type, or topic — use smithsonian_browse_category instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -151,6 +151,18 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .optional()
           .describe(
             'Geographic place (e.g. "United States of America"). The full set is enumerable via smithsonian_list_terms (field "place").',
+          ),
+        topic: z
+          .string()
+          .optional()
+          .describe(
+            'Subject term from the controlled vocabulary (e.g. "Quilts", "Aviation"). Matches the topics[] values smithsonian_get_object returns, and is a hard constraint — topic "Quilts" matches 1,134 objects where the same word as free text matches 2,677. The full set is enumerable via smithsonian_list_terms (field "topic").',
+          ),
+        name: z
+          .string()
+          .optional()
+          .describe(
+            'Indexed named party — maker, collector, donor, issuing authority, or any other role the catalog records. Written surname-first (e.g. "Warhol, Andy"). This field is not enumerable via smithsonian_list_terms. A smithsonian_find_related name signal carries the indexed form verbatim and is the reliable source; smithsonian_get_object\'s makers[] is the catalog\'s free-text form of the same parties and is often written differently ("Major J. A. L. Möller (Jacob A.L. Möller/Monty Möller), Non-Indian, 1883-1957" for the indexed "Möller, Major J. A. L."), so treat it as a starting guess.',
           ),
         online_only: z
           .boolean()
@@ -218,7 +230,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'A filtered search matched nothing — most often a filter value outside the Smithsonian controlled vocabulary (e.g. a singular "Painting" instead of "Paintings").',
       recovery:
-        'Call smithsonian_list_terms with the relevant field (unit_code, culture, place, date) and a contains substring to resolve a filter value to an exact vocabulary term, then retry. Note object_type is not enumerable — harvest its values from search results.',
+        "Call smithsonian_list_terms with the relevant field (unit_code, culture, place, date, topic) and a contains substring to resolve a filter value to an exact vocabulary term, then retry. Note object_type and name are not enumerable — harvest object_type from search results, and take name from a smithsonian_find_related name signal, which carries the indexed form (smithsonian_get_object's makers[] is the free-text form and is often written differently).",
     },
   ],
 
@@ -234,6 +246,8 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     if (f?.date) filters.push(luceneField('date', f.date));
     if (f?.culture) filters.push(luceneField('culture', f.culture));
     if (f?.place) filters.push(luceneField('place', f.place));
+    if (f?.topic) filters.push(luceneField('topic', f.topic));
+    if (f?.name) filters.push(luceneField('name', f.name));
     if (f?.online_only) filters.push('online_media_type:*');
     if (f?.cc0_only) filters.push('media_usage:CC0');
 
@@ -266,17 +280,20 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       // controlled vocabulary — surface the actionable invalid_filter reason
       // (recovery points at smithsonian_list_terms) rather than generic no_results.
       if (filters.length > 0) {
-        // culture/place/date values aren't present in ObjectSummary, so a result
+        // culture/place/date/topic values aren't present in ObjectSummary, so a result
         // harvest can't resolve them — route each to smithsonian_list_terms with a
         // `contains` substring instead (each filter's name is also its list_terms
         // field). object_type/unit_code ARE in summaries, so those are harvested from
         // one unfiltered re-query and named in the hint. Harvesting is best-effort and
         // failure-path only: any error or an empty re-query keeps the static contract
-        // hint, so it never turns a clean invalid_filter into a crash.
+        // hint, so it never turns a clean invalid_filter into a crash. `name` is
+        // neither enumerable upstream nor carried in summaries, so it takes the static
+        // hint, which names where its exact values do come from.
         const routable: Array<{ field: string; value: string }> = [];
         if (f?.culture) routable.push({ field: 'culture', value: f.culture });
         if (f?.place) routable.push({ field: 'place', value: f.place });
         if (f?.date) routable.push({ field: 'date', value: f.date });
+        if (f?.topic) routable.push({ field: 'topic', value: f.topic });
 
         // Whether each routable value is already an exact vocabulary term, which
         // decides between "resolve it" and "it resolves to itself" (issue #33).

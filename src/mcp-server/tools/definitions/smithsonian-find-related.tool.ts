@@ -81,6 +81,8 @@ const SearchContinuationSchema = z
           .optional()
           .describe('smithsonian_search_objects filters.object_type value.'),
         date: z.string().optional().describe('smithsonian_search_objects filters.date value.'),
+        name: z.string().optional().describe('smithsonian_search_objects filters.name value.'),
+        topic: z.string().optional().describe('smithsonian_search_objects filters.topic value.'),
       })
       .optional()
       .describe(
@@ -94,7 +96,7 @@ const SearchContinuationSchema = z
 export const smithsonianFindRelated = tool('smithsonian_find_related', {
   title: 'Find Related Smithsonian Objects',
   description:
-    'Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, maker names, and topic terms. Each related object is tagged with the signals that connected it to the anchor. Matches surface across museums — an NASM aerospace anchor can pull related objects from NMNHPALEO, SAAM, and NMAH.',
+    'Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, named parties, and topic terms. Each related object is tagged with the signals that connected it to the anchor; a named-party signal carries the catalog\'s own role for that party (maker, Collector, Donor, issuing authority, …), not a fixed "maker" label. Matches surface across museums — an NASM aerospace anchor can pull related objects from NMNHPALEO, SAAM, and NMAH.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -217,17 +219,48 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const indexed = anchorRaw.content?.indexedStructured;
     const freetext = anchorRaw.content?.freetext;
 
-    // Extract metadata signals for fan-out
-    const cultures = indexed?.culture?.slice(0, 2) ?? [];
-    const makerNames = (freetext?.name ?? [])
-      .map((n) => n.content)
-      .filter((n): n is string => Boolean(n))
-      .slice(0, 2);
-    const topics = (indexed?.topic ?? []).slice(0, 2);
-    const objectTypes = indexed?.object_type ?? [];
-    const dates = indexed?.date ?? [];
+    // Extract metadata signals for fan-out — each slot takes the anchor's first
+    // indexed value for its field.
+    const culture0 = indexed?.culture?.[0];
+    const topic0 = indexed?.topic?.[0];
+    const objType = indexed?.object_type?.[0];
+    const period = indexed?.date?.[0];
 
-    // Build fan-out queries: culture, maker, topic, period+type.
+    /**
+     * Candidates for the single named-party slot, in preference order.
+     *
+     * `indexedStructured.name` is the indexed, hard-filterable counterpart of the
+     * freetext block — `name:"Warhol, Andy"` matches 421 records against 715 for the
+     * same string as free text — so when it is present its first value takes the slot
+     * as a `name:` filter. The two blocks carry no positional correspondence and no
+     * shared formatting: a record with three freetext entries can index one name,
+     * drawn from a different entry and written differently ("Möller, Major J. A. L."
+     * against "Major J. A. L. Möller (…), Non-Indian, 1883-1957"), so neither index
+     * position nor string equality pairs them up and no pairing is attempted.
+     *
+     * Otherwise the freetext entries are the candidates, each labeled from its own
+     * `label`. EDAN uses that block for any named party — Collector, Donor, issuing
+     * authority, Culture/People — and maker is a minority of them, so a fixed `maker`
+     * label asserts a relationship the catalog never claimed.
+     */
+    const indexedName = (indexed?.name ?? [])
+      .map((entry) => (typeof entry === 'string' ? entry : entry.content))
+      .find(Boolean);
+    const nameCandidates: Array<{ value: string; label: string; hardFilter: boolean }> = indexedName
+      ? [{ value: indexedName, label: 'name', hardFilter: true }]
+      : (freetext?.name ?? []).flatMap((entry) =>
+          entry.content
+            ? [
+                {
+                  value: entry.content,
+                  label: (entry.label ?? 'name').toLowerCase(),
+                  hardFilter: false,
+                },
+              ]
+            : [],
+        );
+
+    // Build fan-out queries: culture, named party, topic, period+type.
     // Field constraints are embedded in q as Lucene field:value terms.
     // `continuation` is the equivalent smithsonian_search_objects input, captured here
     // where the raw signal values are still in hand rather than reverse-parsed
@@ -240,7 +273,6 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     };
     const fanOuts: FanOut[] = [];
 
-    const culture0 = cultures[0];
     if (culture0) {
       fanOuts.push({
         query: '',
@@ -249,27 +281,39 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         continuation: { query: '', filters: { culture: culture0 } },
       });
     }
-    const maker0 = makerNames[0];
-    if (maker0) {
-      fanOuts.push({
-        query: maker0,
-        filters: [],
-        signal: `maker: ${maker0}`,
-        continuation: { query: maker0 },
-      });
+    // The culture fan-out above already runs culture0 as a hard filter, so a name
+    // candidate carrying the same string would spend one of the four slots re-running
+    // that value as a looser free-text query — and on ethnographic records, where
+    // freetext.name[0] is the Culture/People entry, present the culture as a named
+    // party. Take the first candidate not already in play; when every candidate
+    // duplicates it, the slot goes unused rather than emitting a redundant signal.
+    const namePick = nameCandidates.find((candidate) => candidate.value !== culture0);
+    if (namePick) {
+      const signal = `${namePick.label}: ${namePick.value}`;
+      fanOuts.push(
+        namePick.hardFilter
+          ? {
+              query: '',
+              filters: [luceneField('name', namePick.value)],
+              signal,
+              continuation: { query: '', filters: { name: namePick.value } },
+            }
+          : { query: namePick.value, filters: [], signal, continuation: { query: namePick.value } },
+      );
     }
-    const topic0 = topics[0];
+    // topic is an indexed facet, so the fan-out is a hard filter rather than free
+    // text: topic:"Quilts" matches 1,134 records against 2,677 for the bare word, so
+    // the free-text form tagged more than half its results with a topic the catalog
+    // never assigned them.
     if (topic0) {
       fanOuts.push({
-        query: topic0,
-        filters: [],
+        query: '',
+        filters: [luceneField('topic', topic0)],
         signal: `topic: ${topic0}`,
-        continuation: { query: topic0 },
+        continuation: { query: '', filters: { topic: topic0 } },
       });
     }
     // Always add period+type combo
-    const period = dates[0];
-    const objType = objectTypes[0];
     if (period || objType) {
       const filters = [
         period && luceneField('date', period),
@@ -513,6 +557,8 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         if (c.filters?.object_type)
           filterArgs.push(`object_type: ${JSON.stringify(c.filters.object_type)}`);
         if (c.filters?.date) filterArgs.push(`date: ${JSON.stringify(c.filters.date)}`);
+        if (c.filters?.name) filterArgs.push(`name: ${JSON.stringify(c.filters.name)}`);
+        if (c.filters?.topic) filterArgs.push(`topic: ${JSON.stringify(c.filters.topic)}`);
         const filterArg = filterArgs.length > 0 ? `, filters: { ${filterArgs.join(', ')} }` : '';
         lines.push(`- **${s.signal}** — ${s.row_count} upstream matches`);
         lines.push(
