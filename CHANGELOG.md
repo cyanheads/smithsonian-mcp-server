@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.6](changelog/0.3.x/0.3.6.md) — 2026-08-24
+
+MCP 2026-07-28 compatibility, strict tool inputs, client logging notifications, and explicit stateless HTTP sessions
+
 ## [0.3.5](changelog/0.3.x/0.3.5.md) — 2026-07-26
 
 Object titles and descriptions decode HTML entities and markup, host-level 404s on search/terms retry as outages instead of failing as not-found

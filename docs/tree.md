@@ -1,10 +1,9 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 07:22:56
+Generated on: 2026-08-25 02:11:06
 
 ```text
 smithsonian-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
