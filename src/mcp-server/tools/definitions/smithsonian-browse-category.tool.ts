@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import type { RequestContextLike } from '@cyanheads/mcp-ts-core/utils';
+import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import {
   getSmithsonianService,
   luceneField,
@@ -117,7 +117,7 @@ function categoryRecoveryHint(
 async function harvestObjectTypes(
   svc: SmithsonianService,
   value: string,
-  ctx: RequestContextLike,
+  ctx: RequestContext,
 ): Promise<string[]> {
   try {
     const { rows } = await svc.search({ query: value, rows: 100, start: 0, filters: [] }, ctx);
@@ -145,7 +145,7 @@ async function describeCategoryValue(
   svc: SmithsonianService,
   mode: BrowseMode,
   value: string,
-  ctx: RequestContextLike,
+  ctx: RequestContext,
 ): Promise<TermDescription> {
   if (mode === 'medium') return { indexed: false };
   try {

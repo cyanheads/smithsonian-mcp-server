@@ -12,7 +12,7 @@ import {
   serviceUnavailable,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import type { RequestContextLike } from '@cyanheads/mcp-ts-core/utils';
+import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
@@ -687,7 +687,7 @@ export class SmithsonianService {
   /** Execute a GET request with retry/backoff. Handles error-in-200 responses. */
   private get<T extends { error?: { code?: string; message?: string } }>(
     url: string,
-    ctx: RequestContextLike,
+    ctx: RequestContext,
     options: GetOptions = {},
   ): Promise<T> {
     return withRetry(
@@ -761,7 +761,7 @@ export class SmithsonianService {
       /** Lucene field:value terms, ANDed into the query as hard constraints (e.g. "unit_code:NASM"). */
       filters?: string[];
     },
-    ctx: RequestContextLike,
+    ctx: RequestContext,
   ): Promise<{ rows: ObjectSummary[]; rowCount: number }> {
     const activeFilters = params.filters ?? [];
     const cfg = getServerConfig();
@@ -799,10 +799,10 @@ export class SmithsonianService {
    * Fetch a single object by record_id.
    * The content endpoint returns the object directly at `response` (not `response.rows[0]`).
    *
-   * Takes the full `Context` rather than the `RequestContextLike` projection the other
+   * Takes the full `Context` rather than the `RequestContext` projection the other
    * methods use, because both not-found throw sites resolve the calling tool's declared
    * `not_found` recovery hint via `ctx.recoveryFor` — a member only `Context` carries.
-   * `Context` is still assignable to `RequestContextLike`, so the internal `this.get`
+   * `Context` is still assignable to `RequestContext`, so the internal `this.get`
    * call is unaffected. Every caller (`smithsonian_get_object`, `smithsonian_get_media`,
    * `smithsonian_find_related`) declares a `not_found` entry, so the resolver returns
    * that tool's own hint; a caller without one gets `{}` and the pre-existing shape.
@@ -880,7 +880,7 @@ export class SmithsonianService {
    * The framework's storage key validator only accepts `^[a-zA-Z0-9_.\-/]+$`, so
    * the key separator is `/` — a `terms:${field}` key throws at runtime.
    */
-  private async vocabulary(field: string, ctx: RequestContextLike): Promise<string[]> {
+  private async vocabulary(field: string, ctx: RequestContext): Promise<string[]> {
     const cfg = getServerConfig();
     const key = `terms/${field}`;
     const ttl = cfg.termsCacheTtlSeconds;
@@ -919,7 +919,7 @@ export class SmithsonianService {
    */
   async listTerms(
     params: { field: string; start: number; rows: number; contains?: string },
-    ctx: RequestContextLike,
+    ctx: RequestContext,
   ): Promise<{ terms: string[]; total: number; labels?: Record<string, string> }> {
     const all = await this.vocabulary(params.field, ctx);
     const labelled = params.field === 'unit_code';
@@ -969,11 +969,7 @@ export class SmithsonianService {
    * route to offer and says so instead of sending the caller back into the same
    * value (issue #46).
    */
-  async describeTerm(
-    field: string,
-    value: string,
-    ctx: RequestContextLike,
-  ): Promise<TermDescription> {
+  async describeTerm(field: string, value: string, ctx: RequestContext): Promise<TermDescription> {
     const vocabulary = await this.vocabulary(field, ctx);
     if (!vocabulary.includes(value)) return { indexed: false };
 
