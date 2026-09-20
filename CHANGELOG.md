@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.7](changelog/0.3.x/0.3.7.md) — 2026-09-20
+
+Argument rejections return InvalidParams (-32602) with a recovery hint, tool error text names the reason and whether it is retryable, and a pre-validation pass repairs client-added keys and case-style aliases before a call is rejected.
+
 ## [0.3.6](changelog/0.3.x/0.3.6.md) — 2026-08-24
 
 MCP 2026-07-28 compatibility, strict tool inputs, client logging notifications, and explicit stateless HTTP sessions

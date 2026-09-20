@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "smithsonian-mcp-server",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Search 14.5M Smithsonian Open Access objects across 20+ museums via MCP, and retrieve CC0 images for the 5.2M that carry openly-licensed media. STDIO or Streamable HTTP.",
   "author": {
     "name": "Casey Hand",
