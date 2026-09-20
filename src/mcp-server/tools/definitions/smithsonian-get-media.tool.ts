@@ -70,6 +70,8 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
       when: 'No object with the given ID exists in the Smithsonian catalog.',
       recovery:
         'Verify the ID via smithsonian_search_objects and use the record_id from search results.',
+      // Raised by SmithsonianService.getContent, which resolves this hint itself.
+      thrownBy: 'service',
     },
     {
       reason: 'no_media',

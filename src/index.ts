@@ -16,6 +16,13 @@ import { initSmithsonianService } from './services/smithsonian/smithsonian-servi
 await createApp({
   name: 'smithsonian-mcp-server',
   title: 'smithsonian-mcp-server',
+  /**
+   * No tool suspends for caller input via `ctx.requestInput`, so HTTP sessions
+   * carry nothing between calls. Declared here rather than left to
+   * `MCP_SESSION_MODE` so every deployment that does not set the variable — the
+   * npx/stdio install included — resolves the same way the Dockerfile does.
+   */
+  sessionMode: 'stateless',
   tools: [
     smithsonianSearchObjects,
     smithsonianListTerms,

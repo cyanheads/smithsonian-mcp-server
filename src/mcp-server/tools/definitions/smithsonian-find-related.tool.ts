@@ -191,6 +191,8 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       when: 'The anchor object ID does not exist in the Smithsonian catalog.',
       recovery:
         'Verify the ID via smithsonian_search_objects and use the record_id from search results.',
+      // Raised by SmithsonianService.getContent, which resolves this hint itself.
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_id',
