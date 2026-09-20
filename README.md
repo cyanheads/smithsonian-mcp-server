@@ -27,17 +27,11 @@
 
 ---
 
-## Prerequisites
+## Overview
 
-> **A free `api.data.gov` API key is required.** Register at [https://api.data.gov/signup](https://api.data.gov/signup) — approval is instant. Set it as `SMITHSONIAN_API_KEY` in your MCP client config or `.env` file. The server will not start without it.
->
-> **CC0 media gating:** `smithsonian_get_media` only returns CC0-licensed (open access) images. Use `smithsonian_search_objects` with `filters.cc0_only: true` to find objects with downloadable media before calling it.
+Smithsonian Open Access catalog — 14.5 million objects across 20+ museums, with CC0 images for the 5.2 million that carry them. Search by free text or exact category, browse by museum, culture, date, or topic, and discover cross-collection connections from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
----
-
-## Tools
-
-Six tools covering the full Smithsonian Open Access workflow — filter vocabulary discovery, search, detail retrieval, CC0 image access, and cross-collection exploration:
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -48,9 +42,11 @@ Six tools covering the full Smithsonian Open Access workflow — filter vocabula
 | `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium, topic) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
 | `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, named-party, topic, and period signals. |
 
-### `smithsonian_search_objects`
+---
 
-Full-text search with structured filters across the entire Smithsonian catalog.
+## Capability reference
+
+### `smithsonian_search_objects` <sub>tool</sub>
 
 - Free-text search over 14.5M objects from 20+ museums
 - Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, subject topic, named party (`name`), online-only, CC0-only
@@ -60,24 +56,18 @@ Full-text search with structured filters across the entire Smithsonian catalog.
 
 ---
 
-### `smithsonian_list_terms`
+### `smithsonian_list_terms` <sub>tool</sub>
 
-Enumerate the valid term vocabulary for an indexed filter field before applying filters.
-
-- Supported fields: `unit_code`, `culture`, `place`, `date`, `online_media_type`, `topic`
-- Returns the field's distinct term values as a page of the full vocabulary — no per-term object counts are available upstream
-- Smithsonian uses a controlled vocabulary (terms are often plural, e.g. `Paintings` not `Painting`) — grounding filter values here avoids empty results
-- Pass `contains` to filter the vocabulary by a case-insensitive substring — resolve a guessed value (e.g. `greek` → `Greek, Attic`) to its exact term(s) in one call, or confirm absence with an empty result
-- For `unit_code`, a `labels` map returns each code's museum name and `contains` matches that name as well as the code, so `National Air and Space` resolves to `NASM` in one call
-- Paginate with `start` + `rows` (default 50 per page, max 100); the largest vocabularies are `topic` (133k terms) and `place` (114k), so pair those with `contains`
-- Each field's vocabulary is cached for `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` (default 1 hour) — upstream ignores paging and returns the whole set on every call, so paging a large vocabulary uncached re-downloads it each time
-- `object_type` is not enumerable upstream — discover object-type values from the `object_type` field in `smithsonian_search_objects` results
+- Fields: `unit_code`, `culture`, `place`, `date`, `online_media_type`, `topic` — a controlled vocabulary, often plural (e.g. `Paintings`, not `Painting`); ground filter values here before searching or browsing
+- `contains` filters the vocabulary by a case-insensitive substring — resolves a guessed value (e.g. `greek` → `Greek, Attic`) in one call; for `unit_code` it also matches museum names (`National Air and Space` → `NASM`), and each `unit_code` term comes back with a `labels` map of its museum name
+- Paginate with `start` + `rows` (default 50, max 100 per page); `topic` (133k terms) and `place` (114k) are large enough to pair with `contains`
+- No per-term object counts are available upstream — only the term values themselves
+- Each field's vocabulary is cached for `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` (default 3600 seconds, `0` disables) — upstream ignores paging and returns the whole set on every call, so paging a large vocabulary uncached re-downloads it each time
+- `object_type` is not enumerable here — harvest its values from the `object_type` field in `smithsonian_search_objects` results
 
 ---
 
-### `smithsonian_get_object`
-
-Normalized catalog metadata for a single object.
+### `smithsonian_get_object` <sub>tool</sub>
 
 - Input: `record_id` from `smithsonian_search_objects` — do not construct IDs manually
 - Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, exhibition history, accession identifiers, credit line, rights statement
@@ -85,54 +75,40 @@ Normalized catalog metadata for a single object.
 
 ---
 
-### `smithsonian_get_media`
+### `smithsonian_get_media` <sub>tool</sub>
 
-CC0-gated image access at multiple resolutions.
-
-- Only CC0-licensed images are returned; throws `Forbidden` when an object has media but none is CC0
-- Throws `no_images` when an object's media is entirely non-image (scanned books, 3D models, sound recordings); the recovery hint names the types present
+- Only CC0-licensed images are returned, never restricted content
+- Three distinct failure reasons when nothing is returnable: `no_media` (nothing digitized), `no_images` (media exists but is entirely non-image — scanned books, 3D models, sound recordings; the recovery hint names the types present), `not_cc0` (images exist but none are CC0, thrown as `Forbidden`)
 - Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions
-- Use `smithsonian_search_objects` with `filters.cc0_only: true` before calling this tool
+- Use `smithsonian_search_objects` with `filters.cc0_only: true` to find objects with downloadable CC0 images before calling this tool
 
 ---
 
-### `smithsonian_browse_category`
-
-Paginated browse within one exact category. For open-ended or topic discovery, use `smithsonian_search_objects` instead.
+### `smithsonian_browse_category` <sub>tool</sub>
 
 - Five modes: `museum` (by unit code, e.g. `"NASM"` — matched exactly, not by museum name), `culture` (e.g. `"Aztecs"`), `period` (indexed date term, e.g. `"1940s"` or `"500-1500"`), `medium` (object type, e.g. `"Paintings"`), `topic` (subject term, e.g. `"Quilts"`)
 - `value` must be an exact indexed category term — resolve `museum`, `culture`, `period`, and `topic` vocabulary with `smithsonian_list_terms` first; `object_type` is not enumerable there, so harvest it from `smithsonian_search_objects` results
 - Returns total count, a page of sample objects, and a museum breakdown showing which institutions hold matching items (computed from the current page)
 - Use `start` + `rows` for standard pagination (offset-based, `start = page × rows`, max 50 per page) — adjacent pages retrieve the objects a capped sample omits
-- A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint. A value outside the vocabulary gets the exact `smithsonian_list_terms` call that resolves it; a value the index enumerates but that matches no objects is named as such and routed elsewhere, since resolving it returns the same value
+- A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint: a value outside the vocabulary gets the exact `smithsonian_list_terms` call that resolves it, and a value the index enumerates but that matches no objects is named as such and routed elsewhere
+- For open-ended or topic discovery, use `smithsonian_search_objects` instead — this tool requires an exact category value
 
 ---
 
-### `smithsonian_find_related`
+### `smithsonian_find_related` <sub>tool</sub>
 
-Cross-collection discovery via shared metadata signals.
-
-- Matches the anchor's culture, named-party, topic, and period+type metadata signals against the wider catalog
+- Matches shared culture, named-party, topic, and period+type metadata signals against the wider catalog; cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
 - The named-party signal carries the catalog's own role for the party (`maker`, `collector`, `donor`, `issuing authority`, …) rather than a fixed `maker` label, prefers the indexed `name` facet as a hard filter when the record has one, and is dropped when its value only repeats the culture signal
 - The topic signal is a hard `topic:` filter, so every object it tags carries that subject term rather than merely mentioning the word
-- Surfaces related objects from across collections, each tagged with the metadata signals that connected it to the anchor
-- Cross-museum discovery is the differentiator — an NASM aerospace anchor may surface related objects from NMNH, SAAM, and NMAH
-- `similarity_signals` on each result show every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
-- Page past a truncated result with `start` — a 0-indexed offset into the interleaved related set; page contiguously with `start = page × limit` (each signal is reachable to a depth of 5,000, fetched in ≤1,000-row chunks; a deeper page can shift an object by a bounded amount near a seam). A truncated response reports `truncationCeiling` as an upper bound on the reachable related pool
+- `similarity_signals` on each result names every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
+- Page with `start` — a 0-indexed offset into the interleaved related set, `start = page × limit`; each signal is reachable to a depth of 5,000 (fetched in ≤1,000-row chunks — a deeper page can shift an object by a bounded amount near a seam), and a truncated response reports `truncationCeiling` as an upper bound on the reachable related pool
 - `signals[]` breaks the fan-out down per signal: `row_count` is that signal's true upstream size (uncapped, so it can exceed the 5,000 reach) and `search_continuation` is the exact `smithsonian_search_objects` input that retrieves the signal's full match set at any depth — the retrieval path past this tool's per-signal reach
 
 ---
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
-
-- Declarative tool definitions — single file per tool, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 Smithsonian-specific:
 
@@ -237,7 +213,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 SMITHSONIAN_API_KEY=your-api-key bun 
 
 ### Prerequisites
 
-- [Bun v1.3.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - A free `api.data.gov` API key — register at [https://api.data.gov/signup](https://api.data.gov/signup). Approval is instant.
 
 ### Installation
@@ -278,7 +254,7 @@ cp .env.example .env
 | `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` | Seconds to cache each indexed field's term vocabulary. `0` disables caching. | `3600` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for HTTP server. | `3010` |
-| `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. This server explicitly uses stateless HTTP sessions. | `stateless` |
+| `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. The server declares `stateless` in code; set this only to override it. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
@@ -350,7 +326,7 @@ See [`CLAUDE.md`](./CLAUDE.md) / [`AGENTS.md`](./AGENTS.md) for development guid
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
