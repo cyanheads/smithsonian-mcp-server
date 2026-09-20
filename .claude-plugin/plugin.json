@@ -1,20 +1,42 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "smithsonian-mcp-server",
   "version": "0.3.6",
   "description": "Search 14.5M Smithsonian Open Access objects across 20+ museums via MCP, and retrieve CC0 images for the 5.2M that carry openly-licensed media. STDIO or Streamable HTTP.",
   "author": {
-    "name": "Casey Hand"
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
   },
   "homepage": "https://github.com/cyanheads/smithsonian-mcp-server#readme",
   "repository": "https://github.com/cyanheads/smithsonian-mcp-server",
   "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "smithsonian",
+    "open-access",
+    "museum",
+    "cultural-heritage",
+    "cc0"
+  ],
+  "userConfig": {
+    "SMITHSONIAN_API_KEY": {
+      "type": "string",
+      "title": "Smithsonian API Key",
+      "description": "Free API key from https://api.data.gov/signup — approval is instant.",
+      "sensitive": true,
+      "default": ""
+    }
+  },
   "mcpServers": {
     "smithsonian-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/smithsonian-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "SMITHSONIAN_API_KEY": "your-api-key"
+        "SMITHSONIAN_API_KEY": "${user_config.SMITHSONIAN_API_KEY}"
       }
     }
   }

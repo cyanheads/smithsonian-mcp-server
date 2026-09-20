@@ -25,7 +25,7 @@
     "displayName": "smithsonian-mcp-server",
     "shortDescription": "Search 14.5M Smithsonian Open Access objects across 20+ museums via MCP, and retrieve CC0 images for the 5.2M that carry openly-licensed media. STDIO or Streamable HTTP.",
     "longDescription": "Six tools covering the full Smithsonian Open Access workflow: search 14.5M objects from 20+ museums with rich filters, discover valid filter vocabulary terms, fetch normalized object metadata, retrieve CC0-licensed images for the 5.2M objects that carry them, browse by category (museum/culture/period/medium), and discover related objects across collections. Requires a free api.data.gov API key.",
-    "developerName": "Casey Hand",
+    "developerName": "cyanheads",
     "category": "Research",
     "capabilities": ["Read"],
     "websiteURL": "https://github.com/cyanheads/smithsonian-mcp-server",

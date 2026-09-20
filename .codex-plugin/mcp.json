@@ -3,8 +3,8 @@
     "command": "npx",
     "args": ["-y", "@cyanheads/smithsonian-mcp-server"],
     "env": {
-      "MCP_TRANSPORT_TYPE": "stdio",
-      "SMITHSONIAN_API_KEY": "your-api-key"
-    }
+      "MCP_TRANSPORT_TYPE": "stdio"
+    },
+    "env_vars": ["SMITHSONIAN_API_KEY"]
   }
 }
