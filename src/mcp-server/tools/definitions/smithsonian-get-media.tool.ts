@@ -105,10 +105,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
 
   async handler(input, ctx) {
     if (!input.id.trim()) {
-      throw ctx.fail('invalid_id', 'Object ID must not be empty.', {
-        ...ctx.recoveryFor('invalid_id'),
-        id: input.id,
-      });
+      throw ctx.fail('invalid_id', 'Object ID must not be empty.', { id: input.id });
     }
 
     const svc = getSmithsonianService();
@@ -125,7 +122,6 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
 
     if (mediaCount === 0) {
       throw ctx.fail('no_media', `Object "${input.id}" has no digitized online media.`, {
-        ...ctx.recoveryFor('no_media'),
         record_id: recordId,
         title,
       });
@@ -146,13 +142,11 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
         'no_images',
         `Object "${input.id}" has ${mediaCount} media item(s), but none of them are images${typeList ? ` (media types: ${typeList})` : ''}.`,
         {
-          ...(typeList
-            ? {
-                recovery: {
-                  hint: `This object's online media is ${typeList}, which smithsonian_get_media does not deliver. Call smithsonian_get_object { id: "${input.id}" } and read media_summary and record_link to reach it.`,
-                },
-              }
-            : ctx.recoveryFor('no_images')),
+          ...(typeList && {
+            recovery: {
+              hint: `This object's online media is ${typeList}, which smithsonian_get_media does not deliver. Call smithsonian_get_object { id: "${input.id}" } and read media_summary and record_link to reach it.`,
+            },
+          }),
           record_id: recordId,
           title,
           media_count: mediaCount,
@@ -168,12 +162,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
       throw ctx.fail(
         'not_cc0',
         `Object "${input.id}" has ${allImages.length} image(s) but none are CC0 open access.`,
-        {
-          ...ctx.recoveryFor('not_cc0'),
-          record_id: recordId,
-          title,
-          image_count: allImages.length,
-        },
+        { record_id: recordId, title, image_count: allImages.length },
       );
     }
 

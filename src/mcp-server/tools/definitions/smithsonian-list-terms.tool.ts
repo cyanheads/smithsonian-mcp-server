@@ -123,7 +123,6 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
     // successful "no term matches" (absence confirmation), surfaced as a notice below.
     if (total === 0 && !input.contains) {
       throw ctx.fail('no_terms', `No terms indexed for field "${input.field}".`, {
-        ...ctx.recoveryFor('no_terms'),
         field: input.field,
       });
     }

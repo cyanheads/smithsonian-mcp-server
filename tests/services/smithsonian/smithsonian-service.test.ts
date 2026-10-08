@@ -3,12 +3,18 @@
  * @module tests/services/smithsonian/smithsonian-service.test
  */
 
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
-import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createInMemoryStorage,
+  createMockContext,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import {
+  initSmithsonianService,
   luceneField,
   SmithsonianService,
   toPlainText,
@@ -38,8 +44,8 @@ function makeTenantContext() {
 
 /**
  * The recovery text `smithsonian_get_object` declares for `not_found`. All three
- * ID tools declare the same entry, and `ctx.recoveryFor` resolves against whichever
- * one is executing, so asserting through one contract covers the shared service path.
+ * ID tools declare the same entry, and the framework fills it from whichever one is
+ * executing, so asserting through one contract covers the shared service path.
  */
 const NOT_FOUND_RECOVERY = smithsonianGetObject.errors?.find(
   (e) => e.reason === 'not_found',
@@ -372,8 +378,8 @@ describe('SmithsonianService', () => {
       // The declared not_found contract must be carried in data (issue #10).
       expect(err.data?.reason).toBe('not_found');
       expect(err.data?.recordId).toBe('nasm_MISSING');
-      // No contract on this ctx, so the recovery resolver yields {} and the payload
-      // keeps its pre-contract shape — the spread must stay safe either way.
+      // The service carries no recovery; the framework fills the executing tool's
+      // declared hint from the reason.
       expect(err.data?.recovery).toBeUndefined();
     });
 
@@ -381,11 +387,11 @@ describe('SmithsonianService', () => {
       // Resolved from the real tool contract, not a copied string — so a contract
       // reword can't silently drift away from what reaches the wire.
       mockFetch({ status: 200, responseCode: 1, response: null });
-      const svc = makeService();
-      const ctx = createMockContext({ errors: smithsonianGetObject.errors });
-      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
-      expect(err.data?.reason).toBe('not_found');
-      expect(err.data?.recovery?.hint).toBe(NOT_FOUND_RECOVERY);
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_MISSING' });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'not_found', recovery: { hint: NOT_FOUND_RECOVERY } } },
+      });
     });
 
     it('HTTP 404 from content endpoint surfaces as notFound — not retried', async () => {
@@ -421,11 +427,11 @@ describe('SmithsonianService', () => {
           text: async () => '{"error":{"code":"NOT_FOUND","message":"Record not found"}}',
         }),
       );
-      const svc = makeService();
-      const ctx = createMockContext({ errors: smithsonianGetObject.errors });
-      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
-      expect(err.data?.reason).toBe('not_found');
-      expect(err.data?.recovery?.hint).toBe(NOT_FOUND_RECOVERY);
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_MISSING' });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'not_found', recovery: { hint: NOT_FOUND_RECOVERY } } },
+      });
     });
 
     it('reads object from response directly — not response.rows[0] (content endpoint shape)', async () => {

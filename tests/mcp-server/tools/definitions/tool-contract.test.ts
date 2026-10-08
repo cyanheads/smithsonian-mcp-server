@@ -238,9 +238,9 @@ describe('tool contract boundary', () => {
     });
 
     // `not_found` is declared on all three ID tools as `thrownBy: 'service'` —
-    // SmithsonianService.getContent raises it and resolves the executing tool's
-    // own hint, so the marker is only correct while each tool's declared text
-    // still reaches the wire.
+    // SmithsonianService.getContent raises it with the reason alone and the
+    // framework fills the executing tool's own hint, so the marker is only correct
+    // while each tool's declared text still reaches the wire.
     it.each([
       ['smithsonian_get_object', smithsonianGetObject, { id: 'nasm_MISSING' }],
       ['smithsonian_get_media', smithsonianGetMedia, { id: 'nasm_MISSING' }],

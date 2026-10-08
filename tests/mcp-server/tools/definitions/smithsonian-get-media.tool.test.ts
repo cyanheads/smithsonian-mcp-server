@@ -3,9 +3,8 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-get-media.tool.test
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetMedia } from '@/mcp-server/tools/definitions/smithsonian-get-media.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
@@ -72,13 +71,12 @@ describe('smithsonianGetMedia', () => {
   });
 
   it('throws invalid_id for empty ID', async () => {
-    const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
-    const input = smithsonianGetMedia.input.parse({ id: '  ' });
+    const result = await runToolContract(smithsonianGetMedia, { id: '  ' });
     const expectedHint = smithsonianGetMedia.errors?.find(
       (e) => e.reason === 'invalid_id',
     )?.recovery;
-    await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_id', recovery: { hint: expectedHint } } },
     });
   });
 
@@ -89,11 +87,10 @@ describe('smithsonianGetMedia', () => {
       toImageItems: vi.fn().mockReturnValue([]),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
-    const input = smithsonianGetMedia.input.parse({ id: 'nmnh_NOMEDIA' });
+    const result = await runToolContract(smithsonianGetMedia, { id: 'nmnh_NOMEDIA' });
     const expectedHint = smithsonianGetMedia.errors?.find((e) => e.reason === 'no_media')?.recovery;
-    await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_media', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'no_media', recovery: { hint: expectedHint } } },
     });
   });
 
@@ -183,11 +180,10 @@ describe('smithsonianGetMedia', () => {
         ]),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
-    const input = smithsonianGetMedia.input.parse({ id: 'nasm_RESTRICTED' });
+    const result = await runToolContract(smithsonianGetMedia, { id: 'nasm_RESTRICTED' });
     const expectedHint = smithsonianGetMedia.errors?.find((e) => e.reason === 'not_cc0')?.recovery;
-    await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'not_cc0', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'not_cc0', recovery: { hint: expectedHint } } },
     });
   });
 
@@ -232,31 +228,28 @@ describe('smithsonianGetMedia', () => {
   });
 
   it('propagates not_found with reason and recovery from the service (issues #10, #25)', async () => {
-    // The stand-in mirrors the real service throw site, resolving the recovery from the
-    // ctx the tool handed it — so this asserts the tool passes a contract-bound ctx down
-    // and propagates the resulting data to the wire.
+    // The stand-in mirrors the real service throw site: reason only, no recovery. The
+    // framework fills this tool's declared not_found hint on the wire.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn((_id: string, svcCtx: Context) =>
-        Promise.reject(
-          notFound('No Smithsonian object found for ID "nasm_GONE".', {
-            recordId: 'nasm_GONE',
-            reason: 'not_found',
-            ...svcCtx.recoveryFor('not_found'),
-          }),
-        ),
+      getContent: vi.fn().mockRejectedValue(
+        notFound('No Smithsonian object found for ID "nasm_GONE".', {
+          recordId: 'nasm_GONE',
+          reason: 'not_found',
+        }),
       ),
       isCC0: vi.fn(),
       toImageItems: vi.fn(),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
-    const input = smithsonianGetMedia.input.parse({ id: 'nasm_GONE' });
+    const result = await runToolContract(smithsonianGetMedia, { id: 'nasm_GONE' });
     const expectedHint = smithsonianGetMedia.errors?.find(
       (e) => e.reason === 'not_found',
     )?.recovery;
-    await expect(smithsonianGetMedia.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'not_found', recovery: { hint: expectedHint } },
+      },
     });
   });
 

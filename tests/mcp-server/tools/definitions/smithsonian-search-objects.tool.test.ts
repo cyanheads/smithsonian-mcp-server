@@ -9,6 +9,7 @@ import {
   createInMemoryStorage,
   createMockContext,
   getEnrichment,
+  runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
@@ -84,14 +85,15 @@ describe('smithsonianSearchObjects', () => {
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
-    const input = smithsonianSearchObjects.input.parse({ query: 'xyzzy_no_results_ever' });
+    const result = await runToolContract(smithsonianSearchObjects, {
+      query: 'xyzzy_no_results_ever',
+    });
     // The declared contract recovery must reach the wire as data.recovery.hint.
     const expectedHint = smithsonianSearchObjects.errors?.find(
       (e) => e.reason === 'no_results',
     )?.recovery;
-    await expect(smithsonianSearchObjects.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_results', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'no_results', recovery: { hint: expectedHint } } },
     });
   });
 
@@ -273,16 +275,15 @@ describe('smithsonianSearchObjects', () => {
       search: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
-    const input = smithsonianSearchObjects.input.parse({
+    const result = await runToolContract(smithsonianSearchObjects, {
       query: 'quilt',
       filters: { object_type: 'Painting' },
     });
     const expectedHint = smithsonianSearchObjects.errors?.find(
       (e) => e.reason === 'invalid_filter',
     )?.recovery;
-    await expect(smithsonianSearchObjects.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_filter', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_filter', recovery: { hint: expectedHint } } },
     });
   });
 
@@ -297,16 +298,15 @@ describe('smithsonianSearchObjects', () => {
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
-    const input = smithsonianSearchObjects.input.parse({
+    const result = await runToolContract(smithsonianSearchObjects, {
       query: 'quilt',
       filters: { object_type: 'Painting' },
     });
     const expectedHint = smithsonianSearchObjects.errors?.find(
       (e) => e.reason === 'invalid_filter',
     )?.recovery;
-    await expect(smithsonianSearchObjects.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_filter', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_filter', recovery: { hint: expectedHint } } },
     });
   });
 
@@ -585,18 +585,18 @@ describe('smithsonianSearchObjects', () => {
         describeTerm,
       } as unknown as svcModule.SmithsonianService);
 
-      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
-      const input = smithsonianSearchObjects.input.parse({
+      const result = await runToolContract(smithsonianSearchObjects, {
         query: 'soup can',
         filters: { name: 'Warhol, Andrew' },
       });
-      const err = await smithsonianSearchObjects.handler(input, ctx).catch((e) => e);
 
       expect(describeTerm).not.toHaveBeenCalled();
       const expectedHint = smithsonianSearchObjects.errors?.find(
         (e) => e.reason === 'invalid_filter',
       )?.recovery;
-      expect(err.data?.recovery?.hint).toBe(expectedHint);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_filter', recovery: { hint: expectedHint } } },
+      });
       // The reliable source is the find_related name signal — it carries the indexed
       // form. makers[] is the free-text form of the same parties, written differently
       // often enough that pointing there alone dead-ends the caller.

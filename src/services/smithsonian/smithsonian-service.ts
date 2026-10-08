@@ -3,7 +3,6 @@
  * @module services/smithsonian/smithsonian-service
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
   JsonRpcErrorCode,
@@ -799,15 +798,11 @@ export class SmithsonianService {
    * Fetch a single object by record_id.
    * The content endpoint returns the object directly at `response` (not `response.rows[0]`).
    *
-   * Takes the full `Context` rather than the `RequestContext` projection the other
-   * methods use, because both not-found throw sites resolve the calling tool's declared
-   * `not_found` recovery hint via `ctx.recoveryFor` — a member only `Context` carries.
-   * `Context` is still assignable to `RequestContext`, so the internal `this.get`
-   * call is unaffected. Every caller (`smithsonian_get_object`, `smithsonian_get_media`,
-   * `smithsonian_find_related`) declares a `not_found` entry, so the resolver returns
-   * that tool's own hint; a caller without one gets `{}` and the pre-existing shape.
+   * Both not-found throw sites carry `reason: 'not_found'` and no recovery: every
+   * caller (`smithsonian_get_object`, `smithsonian_get_media`, `smithsonian_find_related`)
+   * declares a `not_found` entry, and the framework fills that tool's own hint on the wire.
    */
-  async getContent(recordId: string, ctx: Context): Promise<RawEDAN> {
+  async getContent(recordId: string, ctx: RequestContext): Promise<RawEDAN> {
     const cfg = getServerConfig();
     const prefixed = recordId.startsWith('edanmdm:') ? recordId : `edanmdm:${recordId}`;
     const url = `${cfg.baseUrl}/content/${encodeURIComponent(prefixed)}`;
@@ -817,7 +812,7 @@ export class SmithsonianService {
     try {
       // EDAN returns a real HTTP 404 for a missing object; expect it so a bad ID
       // logs at debug, not as a server error. The NotFound throw still fires and
-      // is rewrapped below with the caller's recovery hint.
+      // is rewrapped below with the declared reason.
       raw = await this.get<RawContentResponse>(url, ctx, {
         headers: { 'X-Api-Key': cfg.apiKey },
         expectedStatuses: [404],
@@ -827,7 +822,6 @@ export class SmithsonianService {
         throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
           recordId,
           reason: 'not_found',
-          ...ctx.recoveryFor('not_found'),
         });
       }
       throw err;
@@ -837,7 +831,6 @@ export class SmithsonianService {
       throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
         recordId,
         reason: 'not_found',
-        ...ctx.recoveryFor('not_found'),
       });
     }
     return raw.response;

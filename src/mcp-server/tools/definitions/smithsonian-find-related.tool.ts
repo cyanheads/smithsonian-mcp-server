@@ -205,10 +205,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
 
   async handler(input, ctx) {
     if (!input.id.trim()) {
-      throw ctx.fail('invalid_id', 'Anchor object ID must not be empty.', {
-        ...ctx.recoveryFor('invalid_id'),
-        id: input.id,
-      });
+      throw ctx.fail('invalid_id', 'Anchor object ID must not be empty.', { id: input.id });
     }
 
     const svc = getSmithsonianService();

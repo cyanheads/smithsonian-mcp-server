@@ -3,9 +3,12 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-get-object.tool.test
  */
 
-import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createInMemoryStorage,
+  createMockContext,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
@@ -64,42 +67,38 @@ describe('smithsonianGetObject', () => {
   });
 
   it('throws invalid_id for empty ID', async () => {
-    const ctx = createMockContext({ errors: smithsonianGetObject.errors });
-    const input = smithsonianGetObject.input.parse({ id: '   ' });
+    const result = await runToolContract(smithsonianGetObject, { id: '   ' });
     const expectedHint = smithsonianGetObject.errors?.find(
       (e) => e.reason === 'invalid_id',
     )?.recovery;
-    await expect(smithsonianGetObject.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'invalid_id', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_id', recovery: { hint: expectedHint } } },
     });
   });
 
   it('propagates not_found with reason and recovery from the service (issues #10, #25)', async () => {
-    // The stand-in mirrors the real service throw site: it resolves the recovery from
-    // the ctx the tool handed it. That proves the tool passes a contract-bound ctx down
-    // and propagates the resulting data untouched onto both wire surfaces — the service
-    // test verifies the real factory populates reason and hint for real.
+    // The stand-in mirrors the real service throw site: reason only, no recovery. The
+    // framework fills this tool's declared not_found hint on the wire — the service
+    // test verifies the real factory populates the reason for real.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn((_id: string, svcCtx: Context) =>
-        Promise.reject(
-          notFound('No Smithsonian object found for ID "nasm_MISSING".', {
-            recordId: 'nasm_MISSING',
-            reason: 'not_found',
-            ...svcCtx.recoveryFor('not_found'),
-          }),
-        ),
+      getContent: vi.fn().mockRejectedValue(
+        notFound('No Smithsonian object found for ID "nasm_MISSING".', {
+          recordId: 'nasm_MISSING',
+          reason: 'not_found',
+        }),
       ),
       toFullObject: vi.fn(),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianGetObject.errors });
-    const input = smithsonianGetObject.input.parse({ id: 'nasm_MISSING' });
+    const result = await runToolContract(smithsonianGetObject, { id: 'nasm_MISSING' });
     const expectedHint = smithsonianGetObject.errors?.find(
       (e) => e.reason === 'not_found',
     )?.recovery;
-    await expect(smithsonianGetObject.handler(input, ctx)).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'not_found', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.NotFound,
+        data: { reason: 'not_found', recovery: { hint: expectedHint } },
+      },
     });
   });
 

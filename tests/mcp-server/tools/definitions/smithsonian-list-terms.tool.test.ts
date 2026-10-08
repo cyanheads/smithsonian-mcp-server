@@ -8,6 +8,7 @@ import {
   createInMemoryStorage,
   createMockContext,
   getEnrichment,
+  runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
@@ -59,13 +60,12 @@ describe('smithsonianListTerms', () => {
       listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 0)),
     } as unknown as svcModule.SmithsonianService);
 
-    const ctx = createMockContext({ errors: smithsonianListTerms.errors });
-    const input = smithsonianListTerms.input.parse({ field: 'culture' });
+    const result = await runToolContract(smithsonianListTerms, { field: 'culture' });
     const expectedHint = smithsonianListTerms.errors?.find(
       (e) => e.reason === 'no_terms',
     )?.recovery;
-    await expect(smithsonianListTerms.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'no_terms', recovery: { hint: expectedHint } },
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'no_terms', recovery: { hint: expectedHint } } },
     });
   });
 

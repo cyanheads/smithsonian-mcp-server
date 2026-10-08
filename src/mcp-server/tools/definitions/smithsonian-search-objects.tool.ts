@@ -352,18 +352,14 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
         }
 
         const hint = composeFilterHint(routableFilters, objectTypes, unitCodes);
-        const recovery: Record<string, unknown> = hint
-          ? { recovery: { hint } }
-          : ctx.recoveryFor('invalid_filter');
 
         throw ctx.fail(
           'invalid_filter',
           `No Smithsonian objects matched query "${input.query}" with the given filters. A filter value may not be an exact controlled-vocabulary term, or the query and filters may legitimately have no overlap.`,
-          { ...recovery, query: input.query, filters: input.filters },
+          { ...(hint && { recovery: { hint } }), query: input.query, filters: input.filters },
         );
       }
       throw ctx.fail('no_results', `No Smithsonian objects matched query "${input.query}".`, {
-        ...ctx.recoveryFor('no_results'),
         query: input.query,
       });
     }
