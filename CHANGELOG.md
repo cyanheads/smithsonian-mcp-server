@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.8](changelog/0.3.x/0.3.8.md) — 2026-10-08
+
+mcp-ts-core ^0.13.6 → ^0.13.14: near-miss tool arguments are repaired before validation, tool error results carry a requestId, error data no longer carries server stacks or request context, and the registry npm entries start the transport they name.
+
 ## [0.3.7](changelog/0.3.x/0.3.7.md) — 2026-09-20
 
 Argument rejections return InvalidParams (-32602) with a recovery hint, tool error text names the reason and whether it is retryable, and a pre-validation pass repairs client-added keys and case-style aliases before a call is rejected.
