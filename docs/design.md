@@ -21,7 +21,7 @@
 | `smithsonian_get_object` | Normalized metadata by ID, including labeled notes, scientific names, reported taxonomy/coordinates, and a media summary. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_browse_category` | Paginated browse within one exact category. Mode: `museum` \| `culture` \| `period` \| `medium` \| `topic`; `value` must be an exact indexed category term, not free text. Searches a constrained query internally and returns the category total, a page of matching objects, and a museum breakdown of that page. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `invalid_category` (ValidationError) |
 | `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, named party, topics). Returns up to 20 related objects, each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
-| `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `no_images` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
+| `smithsonian_get_media` | Returns CC0 image URLs at multiple resolutions for an object. Filters by each image's license and reports the object metadata license separately. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `no_images` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
 ### Resources
 
@@ -45,7 +45,7 @@ The server earns standalone status: single-source, but with massive cross-collec
 - Rate limit: `api_key` from api.data.gov has standard limits (~1,000 req/hr for free tier). DEMO_KEY is ~5 req/min — not suitable for production.
 - API endpoint: `https://api.si.edu/openaccess/api/v1.0/`
 - Object IDs are prefixed: `edanmdm:{record_ID}` — e.g. `edanmdm:nasm_A19670093000`. The `record_ID` field in `content.descriptiveNonRepeating` is the stable identifier.
-- CC0 gating: check `content.descriptiveNonRepeating.metadata_usage.access === 'CC0'` for the object; per-image `media[].usage.access === 'CC0'` for each image.
+- CC0 delivery gates on each image's `media[].usage.access === 'CC0'`; `content.descriptiveNonRepeating.metadata_usage.access` reports the object metadata license separately.
 - Images are served by the Smithsonian IDS (Image Delivery Service) at `ids.si.edu`. **No IIIF manifests** — the IDS uses direct download URLs with `_screen`, `_thumb`, and high-res TIFF/JPEG variants.
 - Read-only throughout.
 
@@ -94,7 +94,7 @@ Each step is independently testable.
 
 ### `smithsonian_search_objects`
 
-**Description:** Search across 14.5 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, and online/CC0 availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
+**Description:** Search across 14.5 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
 
 **Input:**
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`). Filters append hard `AND` constraints; plain words and quoted phrases remain ungrouped because EDAN changes implicit matching inside parentheses. Active Lucene expressions are grouped to preserve Boolean precedence; quoted and escaped punctuation stays literal.
@@ -119,7 +119,7 @@ Each step is independently testable.
 - Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names `start` as the retrieval path.
 
 **Errors:**
-- `no_results` (NotFound) — the query and filters match nothing at all (`rowCount === 0`). Recovery: broaden the query, remove filters, or check spelling. Deliberately keyed to the true match count rather than the page-local length, so a deep `start` against a query with real matches is never told to check its spelling.
+- `no_results` (NotFound) — an unfiltered query matches nothing at all (`rowCount === 0`). Recovery: broaden the query or check spelling. Deliberately keyed to the true match count rather than the page-local length, so a deep `start` against a query with real matches is never told to check its spelling.
 - `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: a culture/place/date/topic value is checked against its vocabulary first, and the hint branches on the answer — a value outside it routes to `smithsonian_list_terms { field, contains: <value> }`, while a value the index already enumerates is named as exact (resolving it returns the same value) and the caller is told to drop it or pick a different term. For object_type/unit_code, exact co-occurring values are harvested into the hint. `name` gets neither — it is not enumerable upstream and not carried in result summaries — so it falls to the static hint, which routes to a `smithsonian_find_related` name signal for the indexed form and flags `makers[]` as the free-text approximation. Then retry with an exact term.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
@@ -180,7 +180,7 @@ Each step is independently testable.
 
 **Output:**
 - `mode`, `value`, `total_count` — how many objects match
-- `sample_objects[]` — the requested page: `{ record_id, title, date, unit_code, thumbnail_url, is_cc0 }`
+- `sample_objects[]` — the requested page: `{ record_id, title, unit_code, thumbnail_url, is_cc0 }`
 - `museum_breakdown[]` — when mode is not `museum`, top 5 contributing units with counts, computed from the current page (helps plan museum-focused follow-up searches)
 - Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names `start` as the retrieval path
 
@@ -209,7 +209,7 @@ Each step is independently testable.
 
 **Output:**
 - `anchor` — summary of the anchor object (`{ record_id, title, unit_code }`)
-- `related[]` — `{ record_id, title, date, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
+- `related[]` — `{ record_id, title, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
 - `search_signals_used[]` — which metadata fields drove the fan-out searches
 - `signals[]` — per-signal breakdown of every fan-out that returned: `{ signal, row_count, search_continuation }`. `row_count` is the signal's true upstream match count, uncapped — unlike `truncationCeiling` it is not clamped to the 5,000 per-signal reach, so the two disagree exactly when a signal is broader than this tool can page. `search_continuation` is the `smithsonian_search_objects` input (`{ query, filters? }`) that reproduces that fan-out's query exactly, and `smithsonian_search_objects` applies `start` straight to the upstream offset with no depth cap — so it is the retrieval path for everything past the 5,000 reach. A fan-out whose upstream call failed is omitted (it has no known row count); `search_signals_used` still lists it.
 - `notice` — composes safe partial-failure categories and failed-signal labels with empty-result and paging guidance on both wire surfaces. No signals, no non-anchor matches, partial empty results, and exhausted pages have distinct guidance. A later-chunk failure drops the entire signal to avoid a gap; if every attempted signal fails, the first failure in signal order is thrown. Caller cancellation rejects even after a successful signal.
@@ -225,7 +225,7 @@ Each step is independently testable.
 
 ### `smithsonian_get_media`
 
-**Description:** Returns all available images for a Smithsonian object at multiple resolutions. Only CC0 (open access) objects and their CC0-licensed images are returned. The tool never returns an empty `images[]` — each way an object can yield no images (nothing digitized, media that is entirely non-image, images that are entirely non-CC0) has its own declared error reason. Each image includes high-res JPEG/TIFF URLs, screen-size and thumbnail URLs, pixel dimensions, and accessibility alt text. Intended for use with image-capable MCP clients that can display or analyze the photos.
+**Description:** Returns CC0-licensed images for a Smithsonian object at multiple resolutions, reporting the object metadata license separately. The tool never returns an empty `images[]` — each way an object can yield no images (nothing digitized, media that is entirely non-image, images that are entirely non-CC0) has its own declared error reason. Each image includes high-res JPEG/TIFF URLs, screen-size and thumbnail URLs, pixel dimensions, and accessibility alt text. Intended for use with image-capable MCP clients that can display or analyze the photos.
 
 **Input:**
 - `id: string` — `record_id` of the object (e.g. `"nasm_A19670093000"`).
@@ -264,7 +264,7 @@ Each step is independently testable.
 | 2 | `GET /search?q=culture:{culture}&start=0…` | Fan-out by culture, chunked to depth `min(start+limit, 5000)` | if `indexedStructured.culture` non-empty |
 | 3 | `GET /search?q=name:{name}&start=0…` (or `q={freetext name}`) | Fan-out by named party, same chunked depth | if a named-party candidate survives the culture-duplicate check |
 | 4 | `GET /search?q=topic:{topic}&start=0…` | Fan-out by topic term, same chunked depth | if `indexedStructured.topic` non-empty |
-| 5 | `GET /search?q={period}+{object_type}&start=0…` | Fan-out by period + type, same chunked depth | always |
+| 5 | `GET /search?q={period}+{object_type}&start=0…` | Fan-out by period + type, same chunked depth | if period or object type is present |
 
 Calls 2–5 use `Promise.allSettled` — one failed fan-out degrades gracefully. Each signal is fetched from the top (`start=0`) to a depth of `min(start + limit, 5000)`, split into chunks of at most 1,000 rows (the hard upstream `rows` ceiling — a single call requesting more silently collapses to a 10-row page). The first chunk is a single call that also reveals the signal's real match count; deeper chunks (`start=1000, 2000, …`) fire in parallel and only when both the requested depth and the real total exceed one chunk, so a shallow page costs exactly one call per signal. Results are deduped against the anchor ID and interleaved round-robin so each fan-out signal contributes, accumulating every signal that surfaced an object. The `start` offset is then applied to the merged interleave (not the upstream query), so pages are contiguous — page N+1 continues where page N ended. (Because a deeper page fetches more rows per signal, an object that ranks very differently across signals can be reallocated to a different bucket, shifting a bounded number of objects — up to the active-signal count — by one page near a seam.) When the interleave extends past the page or a signal reports more matches than were fetched, the response discloses `truncated` with a `truncationCeiling` (each signal's count capped at the 5,000 reach before summing); advancing `start` retrieves the next window, up to the per-signal cap.
 
@@ -300,13 +300,13 @@ The API response has two ID-like fields: `url` (e.g. `"edanmdm:nasm_A19670093000
 
 An earlier iteration spilled large result sets to a DuckDB-backed DataCanvas (`rows > 20` routed the full page to a SQL-queryable table). It was removed: the result set is catalog object summaries capped at ≤100 rows, where the workflow is find-the-object-then-drill-in, not aggregate-over-rows — the wrong shape for SQL, and `smithsonian_browse_category` already covers the cross-museum breakdown case. `smithsonian_search_objects` now returns up to `rows` (≤100) summaries directly; page through larger result sets with `start` + `rows`.
 
-### CC0 gating is object-level AND image-level
+### Object metadata and image licenses are separate
 
 The catalog has two distinct CC0 flags:
 1. `content.descriptiveNonRepeating.metadata_usage.access` — the object *metadata* license
 2. Per-image `media[].usage.access` — each image's individual license
 
-In practice they agree, but the design checks both. `smithsonian_get_media` surfaces `is_cc0` on both the object and each individual image. An object can be CC0 metadata but have some restricted images (or vice versa).
+`smithsonian_get_media` gates delivery on each image's license and surfaces `is_cc0` on both the object and each returned image. The metadata flag does not gate delivery: an object can have CC0 metadata and restricted images, or the reverse.
 
 ---
 
@@ -337,7 +337,8 @@ In practice they agree, but the design checks both. `smithsonian_get_media` surf
 | `rows` | number | Page size (max 100) |
 | `start` | number | Offset (0-indexed) |
 | `fq` | — | Not a working EDAN parameter. Structured filters are ANDed into `q` as Lucene `field:value` terms instead (e.g. `q=quilt AND unit_code:NASM`). |
-| `api_key` | string | Required — from api.data.gov |
+
+Authentication uses the required `X-Api-Key` request header, sourced from `SMITHSONIAN_API_KEY`.
 
 ### Search response shape
 
@@ -446,7 +447,8 @@ Key difference from search: the item object is `response` (not `response.rows[0]
 | Code | Museum |
 |:-----|:-------|
 | NASM | National Air and Space Museum |
-| NMNH | National Museum of Natural History |
+| NMNHBIRDS | NMNH - Vertebrate Zoology - Birds Division |
+| NMNHPALEO | NMNH - Paleobiology Dept. |
 | SAAM | Smithsonian American Art Museum |
 | NMAH | National Museum of American History |
 | NMAAHC | National Museum of African American History and Culture |
@@ -455,7 +457,7 @@ Key difference from search: the item object is `response` (not `response.rows[0]
 | NPG | National Portrait Gallery |
 | CHNDM | Cooper Hewitt, Smithsonian Design Museum |
 | HMSG | Hirshhorn Museum and Sculpture Garden |
-| FSG | Freer Gallery of Art and Arthur M. Sackler Gallery |
+| NMAA | National Museum of Asian Art |
 | NPM | National Postal Museum |
 | ACM | Anacostia Community Museum |
 | NZP | National Zoo & Conservation Biology Institute |
@@ -464,8 +466,7 @@ Key difference from search: the item object is `response` (not `response.rows[0]
 
 ### Resilience
 
-- **Error-in-200 responses**: The API returns HTTP 200 with `{ "error": { "code": "...", "message": "..." } }` in the body for `API_KEY_MISSING` and `OVER_RATE_LIMIT` — HTTP status alone is insufficient. The service normalizer must check for `response.error` before treating a 200 as success. `API_KEY_MISSING` should surface as a `ConfigurationError` (server misconfiguration, not a retryable condition). `OVER_RATE_LIMIT` maps to 429 retry logic.
-- Retry on 429 (`OVER_RATE_LIMIT`) with exponential backoff (base 2s, max 3 retries)
-- Retry on 503 with backoff (1s base, 2 retries)
-- `fetchWithTimeout` handles non-OK HTTP status → `ServiceUnavailable` automatically; the service layer adds the error-in-200 check on top
-- `api_key` injected by service, never exposed in error messages
+- **Error-in-200 responses**: The service checks the top-level `error` before treating a 200 as success. `API_KEY_MISSING` raises non-retryable `InternalError`; `OVER_RATE_LIMIT` raises retryable `ServiceUnavailable`. Real HTTP 429 responses map to `RateLimited`.
+- Transient failures retry with exponential backoff (base 2s, max 3 retries).
+- `fetchWithTimeout` maps non-OK HTTP statuses to their corresponding error codes. A 404 on `/search` or `/terms/{field}` is reclassified as retryable `ServiceUnavailable`; `/content/{id}` retains `NotFound`.
+- The API key is sent in the `X-Api-Key` header, never in URLs.
