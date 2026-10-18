@@ -68,18 +68,33 @@ export interface RawFreetext {
  * An `indexedStructured.name` entry. Usually the indexed value as a bare string,
  * but bibliographic and authority records (Smithsonian Research Online, Libraries,
  * archives) wrap it in an object that carries the same value under `content`
- * alongside provenance — `{ type: "author" }`, `{ VIAF: "…" }`. Every other
- * `indexedStructured` field is a plain `string[]`.
+ * alongside provenance — `{ type: "author" }`, `{ VIAF: "…" }`. Other indexed
+ * text fields are string arrays; `geoLocation` carries structured points.
  */
 export type RawIndexedName = string | { content?: string };
 
 export interface RawIndexedStructured {
   culture?: string[];
   date?: string[];
+  geoLocation?: Array<{
+    Other?: { type?: string; content?: string };
+    points?: {
+      point?: {
+        latitude?: { type?: string; content?: string };
+        longitude?: { type?: string; content?: string };
+      };
+    };
+  }>;
   name?: RawIndexedName[];
   object_type?: string[];
   online_media_type?: string[];
   place?: string[];
+  scientific_name?: string[];
+  tax_class?: string[];
+  tax_family?: string[];
+  tax_kingdom?: string[];
+  tax_order?: string[];
+  tax_phylum?: string[];
   topic?: string[];
 }
 
@@ -152,6 +167,7 @@ export interface ObjectSummary {
 }
 
 export interface FullObject {
+  coordinates: Array<{ latitude: number; longitude: number; locality?: string }>;
   credit_line?: string;
   culture: string[];
   dates: Array<{ label: string; value: string }>;
@@ -169,10 +185,13 @@ export interface FullObject {
     thumbnail_url?: string;
   };
   museum_name: string;
+  notes: Array<{ label: string; content: string }>;
   object_rights?: string;
   place: Array<{ label: string; value: string }>;
   record_id: string;
   record_link?: string;
+  scientific_names: string[];
+  taxonomy?: Partial<Record<'kingdom' | 'phylum' | 'class' | 'order' | 'family', string[]>>;
   title: string;
   topics: string[];
   unit_code: string;

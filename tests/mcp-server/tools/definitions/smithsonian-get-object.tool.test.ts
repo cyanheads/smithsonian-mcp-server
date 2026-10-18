@@ -22,6 +22,9 @@ function makeFullObject(id = 'nasm_TEST001'): FullObject {
     museum_name: 'National Air and Space Museum',
     dates: [{ label: 'Date', value: '1965' }],
     description: 'A historic aircraft.',
+    notes: [{ label: 'Summary', content: 'A historic aircraft.' }],
+    scientific_names: [],
+    coordinates: [],
     makers: [{ role: 'Manufacturer', name: 'Lockheed' }],
     materials: ['Aluminum'],
     dimensions: ['12 m wingspan'],
@@ -142,6 +145,9 @@ describe('smithsonianGetObject', () => {
       unit_code: 'NMNHPALEO',
       museum_name: 'NMNH - Paleobiology Dept.',
       dates: [],
+      notes: [],
+      scientific_names: [],
+      coordinates: [],
       makers: [],
       materials: [],
       dimensions: [],
@@ -215,6 +221,24 @@ describe('smithsonianGetObject', () => {
 
       expect(result.title).toBe("A nonpotential model for the Sun's open magnetic flux");
       expect(result.description).toBe('Yeates, A. R. 2010. "A nonpotential model." JGR 115.');
+    });
+
+    it('exposes labeled notes on both wire surfaces', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'slasro_92924' });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        notes: [
+          { label: 'Summary', content: 'Yeates, A. R. 2010. "A nonpotential model." JGR 115.' },
+        ],
+      });
+      expect(result.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'text',
+            text: expect.stringContaining('Summary: Yeates, A. R. 2010.'),
+          }),
+        ]),
+      );
     });
 
     it('renders the decoded text in format() too — both wire surfaces agree', async () => {

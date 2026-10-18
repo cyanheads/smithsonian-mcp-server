@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.3.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.8-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -29,13 +29,13 @@
 
 ## Overview
 
-Smithsonian Open Access catalog — 14.5 million objects across 20+ museums, with CC0 images for the 5.2 million that carry them. Search by free text or exact category, browse by museum, culture, date, or topic, and discover cross-collection connections from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+The Smithsonian's Open Access catalog: 14.5 million objects across 20+ museums, 5.2 million with CC0 images. Search by free text or category, browse by museum, culture, date, or topic, and discover connections across collections.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
-| `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, topic, name, online-only, CC0). Returns curated summaries with total count. |
+| `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, topic, name, scientific name, media type, online-only, CC0). Returns curated summaries with total count. |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type, topic). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
 | `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
 | `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned, never an empty list — a distinct error reason names why, whether the object has nothing digitized, only non-image media, or only restricted images. |
@@ -49,7 +49,9 @@ Smithsonian Open Access catalog — 14.5 million objects across 20+ museums, wit
 ### `smithsonian_search_objects` <sub>tool</sub>
 
 - Free-text search over 14.5M objects from 20+ museums
-- Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, subject topic, named party (`name`), online-only, CC0-only
+- Filters append hard `AND` constraints. Plain words and quoted phrases keep their matching semantics; active Lucene expressions are grouped to preserve Boolean precedence.
+- `filters.online_media_type` accepts exact `smithsonian_list_terms` media categories such as `Images`, `3D Models`, and `Sound recordings`. These describe the index; even `Images` does not guarantee attached or CC0 images. Check `smithsonian_get_object.media_summary` for deliverability. Media categories feed search, with no media-type browse mode.
+- Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, subject topic, named party (`name`), scientific name (`scientific_name`), indexed media category (`online_media_type`), online-only, CC0-only
 - `topic` and `name` are hard indexed constraints, not free text — `topic: "Quilts"` matches 1,134 objects where the bare word matches 2,677, and `name: "Warhol, Andy"` matches 421 against 715
 - Returns curated summaries: title, date, museum, object type, thumbnail URL, CC0 flag, `record_id`
 - Use `start` + `rows` for standard pagination (offset-based, max 100 per page)
@@ -72,6 +74,8 @@ Smithsonian Open Access catalog — 14.5 million objects across 20+ museums, wit
 - Input: `record_id` from `smithsonian_search_objects` — do not construct IDs manually
 - Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, exhibition history, accession identifiers, credit line, rights statement
 - Media summary included — call `smithsonian_get_media` for full image URLs
+- All nonempty notes retain their catalog labels and source order. `description` selects recognized prose labels; administrative notes stay labeled.
+- Natural-history metadata includes all `scientific_names`, reported `taxonomy` ranks, and valid decimal collection `coordinates` with their own locality when present. The arrays are empty when no names or valid points are available; absent ranks are omitted. No accepted name, geocoding, or accuracy is inferred. Use `scientific_names` as exact `filters.scientific_name` values in search; this field is not enumerable via `smithsonian_list_terms`.
 
 ---
 
@@ -103,6 +107,7 @@ Smithsonian Open Access catalog — 14.5 million objects across 20+ museums, wit
 - `similarity_signals` on each result names every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
 - Page with `start` — a 0-indexed offset into the interleaved related set, `start = page × limit`; each signal is reachable to a depth of 5,000 (fetched in ≤1,000-row chunks — a deeper page can shift an object by a bounded amount near a seam), and a truncated response reports `truncationCeiling` as an upper bound on the reachable related pool
 - `signals[]` breaks the fan-out down per signal: `row_count` is that signal's true upstream size (uncapped, so it can exceed the 5,000 reach) and `search_continuation` is the exact `smithsonian_search_objects` input that retrieves the signal's full match set at any depth — the retrieval path past this tool's per-signal reach
+- Partial failures name the failed signals with safe categories in the same notice as paging guidance. Empty successes distinguish missing anchor signals, no non-anchor matches, and exhausted pages. All-failed searches reject with the first signal failure; caller cancellation always rejects.
 
 ---
 

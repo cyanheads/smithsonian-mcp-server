@@ -16,9 +16,9 @@
 
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
-| `smithsonian_search_objects` | Full-text search across 14.5M objects. Shortcut `query` for plain text; structured filters for narrowing. Returns curated summaries, thumbnails, and facet counts. | `query`, `filters` (unit_code, object_type, date, culture, place, topic, name, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
+| `smithsonian_search_objects` | Full-text search across 14.5M objects with exact filters. Returns curated summaries, thumbnails, and total count. | `query`, `filters` (unit_code, object_type, date, culture, place, topic, name, scientific_name, online_media_type, online_only, cc0_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms, plus a `labels` map of museum names for `unit_code`; `contains` narrows the vocabulary by a case-insensitive substring, matching the museum name as well as the code for `unit_code`. Each field's vocabulary is cached (`SMITHSONIAN_TERMS_CACHE_TTL_SECONDS`) since upstream returns the whole set on every call. | `field` (unit_code, culture, place, date, online_media_type, topic), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
-| `smithsonian_get_object` | Normalized metadata projection by ID: title, description, dates, materials, dimensions, exhibition, credit, and a media summary (count + CC0 image count). | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_get_object` | Normalized metadata by ID, including labeled notes, scientific names, reported taxonomy/coordinates, and a media summary. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_browse_category` | Paginated browse within one exact category. Mode: `museum` \| `culture` \| `period` \| `medium` \| `topic`; `value` must be an exact indexed category term, not free text. Searches a constrained query internally and returns the category total, a page of matching objects, and a museum breakdown of that page. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `invalid_category` (ValidationError) |
 | `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, named party, topics). Returns up to 20 related objects, each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_get_media` | Returns image URLs at multiple resolutions for an object. CC0 objects only — states access status explicitly when an object is not open access. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `no_images` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
@@ -97,8 +97,10 @@ Each step is independently testable.
 **Description:** Search across 14.5 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, and online/CC0 availability. Returns curated summaries (title, date, museum, one-line description, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
 
 **Input:**
-- `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`).
+- `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`). Filters append hard `AND` constraints; plain words and quoted phrases remain ungrouped because EDAN changes implicit matching inside parentheses. Active Lucene expressions are grouped to preserve Boolean precedence; quoted and escaped punctuation stays literal.
 - `filters?: object` — Optional structured filters:
+  - `online_media_type?: string` — exact indexed category from `smithsonian_list_terms { field: "online_media_type" }`, such as Images, 3D Models, or Sound recordings. Quoted and escaped as a hard constraint, composing with availability filters. Invalid terms follow vocabulary-aware `invalid_filter` recovery; valid terms with no overlap are identified as exact. An Images match does not guarantee attached/CC0 images; read `get_object.media_summary`. Media terms feed search only, with no browse mode.
+  - `scientific_name?: string` — exact value from `smithsonian_get_object.scientific_names`, quoted and escaped as a hard constraint. Not enumerable through `smithsonian_list_terms`; filtered-zero recovery names the object field as the source.
   - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. Matched exactly and case-sensitively (`"NMAfA"` carries a lowercase f); `smithsonian_list_terms` with `field: "unit_code"` enumerates the live vocabulary.
   - `object_type?: string` — object type term from `indexedStructured.object_type` (e.g. `"Paintings"`, `"Photographs"`, `"Aircraft"`).
   - `date?: string` — indexed date term from `indexedStructured.date`. Commonly a decade (`"1920s"`, `"1960s"`), but the vocabulary also carries year ranges (`"500-1500"`), century terms (`"21st century"`), and BCE forms (`"-2500"`, `"BCE 1000s"`) — 128 of the 201 indexed terms are not decade-shaped, so no shape gate is applied.
@@ -134,7 +136,11 @@ Each step is independently testable.
 **Output:**
 - `record_id`, `title`, `unit_code`, `museum_name`
 - `dates[]` — all labeled date fields (Date, Accession Date, etc.)
-- `description` — best available prose from `freetext.notes` (Summary, Physical Description, Brief Description)
+- `description` — optional prose from Summary, Physical Description, then Brief Description matching labels; followed by exact Description, Description (Brief), then Citation labels. Administrative notes never become descriptions.
+- `notes[]` — every nonempty note as `{ label, content }` in source order, preserving repeated labels and using `Note` when the label is absent. Selected prose and notes use the shared decode-once plain-text projection.
+- `scientific_names[]` — all `indexedStructured.scientific_name` values, preserving order without selecting an accepted name. Search accepts these as exact `filters.scientific_name` constraints with quote/backslash escaping; filtered-zero recovery names this source rather than `list_terms`.
+- `taxonomy?` — reported `tax_kingdom`, `tax_phylum`, `tax_class`, `tax_order`, and `tax_family` arrays under their rank names; absent ranks remain omitted.
+- `coordinates[]` — valid decimal `geoLocation[].points.point` latitude/longitude pairs with only the same entry's `Other` locality. Blank, non-decimal, incomplete, non-finite, or out-of-range pairs are omitted; valid zero survives. No coordinate accuracy or geocoding is inferred.
 - `makers[]` — `{ role, name }` — all named parties (Pilot, Manufacturer, Artist, Author, etc.)
 - `materials[]` — physical description strings
 - `dimensions[]` — dimension strings
@@ -206,6 +212,7 @@ Each step is independently testable.
 - `related[]` — `{ record_id, title, date, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
 - `search_signals_used[]` — which metadata fields drove the fan-out searches
 - `signals[]` — per-signal breakdown of every fan-out that returned: `{ signal, row_count, search_continuation }`. `row_count` is the signal's true upstream match count, uncapped — unlike `truncationCeiling` it is not clamped to the 5,000 per-signal reach, so the two disagree exactly when a signal is broader than this tool can page. `search_continuation` is the `smithsonian_search_objects` input (`{ query, filters? }`) that reproduces that fan-out's query exactly, and `smithsonian_search_objects` applies `start` straight to the upstream offset with no depth cap — so it is the retrieval path for everything past the 5,000 reach. A fan-out whose upstream call failed is omitted (it has no known row count); `search_signals_used` still lists it.
+- `notice` — composes safe partial-failure categories and failed-signal labels with empty-result and paging guidance on both wire surfaces. No signals, no non-anchor matches, partial empty results, and exhausted pages have distinct guidance. A later-chunk failure drops the entire signal to avoid a gap; if every attempted signal fails, the first failure in signal order is thrown. Caller cancellation rejects even after a successful signal.
 - Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the *reachable* related pool — each signal's upstream match count is capped at its per-signal reach (5,000) before summing, so the ceiling never exceeds what `start` can retrieve. `notice` names both continuation tiers: `start` for the next page, `signals[].search_continuation` for a signal past the reach.
 
 **Errors:**
@@ -279,7 +286,7 @@ The object endpoint returns a `media_summary` (count, cc0_image_count, has_cc0_i
 
 ### Rename from `smithsonian_get_image` to `smithsonian_get_media`
 
-The idea doc used `smithsonian_get_image`. Renamed to `smithsonian_get_media` — the API technically supports Videos and 3D Images too (surfaced in `indexedStructured.online_media_type`), and the IDS returns multiple images per call. The current implementation focuses on Images; the name leaves room for future expansion without a breaking rename.
+The idea doc used `smithsonian_get_image`. Renamed to `smithsonian_get_media` — the API technically supports video and 3D models too (surfaced in `indexedStructured.online_media_type`), and the IDS returns multiple images per call. The current implementation focuses on Images; the name leaves room for future expansion without a breaking rename.
 
 ### Rename from `smithsonian_search` / `smithsonian_explore` to `smithsonian_search_objects` / `smithsonian_browse_category`
 
@@ -306,7 +313,7 @@ In practice they agree, but the design checks both. `smithsonian_get_media` surf
 ## Known Limitations
 
 - **No category browse endpoint**: The open API exposes `/terms/{field}` for flat filter vocabularies (what `smithsonian_list_terms` reads) but no `/category/search`. `smithsonian_browse_category` works around this via constrained search and can't return true hierarchical category trees.
-- **Filter values require prior knowledge**: Filters like `unit_code`, `object_type`, `culture` accept arbitrary strings but there's no discovery endpoint to list valid values. The design notes this in parameter descriptions and points agents to search first to discover real values.
+- **Some filter values require object discovery**: `object_type` and `name` are not enumerable through `list_terms`; harvest object types from search and indexed names from related-search continuations. Scientific names come from `get_object.scientific_names`. Other supported vocabularies, including media types, are enumerable through `list_terms`.
 - **Rate limits**: The free api.data.gov tier has ~1,000 req/hr. The `smithsonian_find_related` workflow makes ~5 calls for a shallow page — more when paging a broad signal deep (each 1,000-row chunk is one call, capped per signal); a session of 50 related searches could hit the hourly limit. The service layer must implement backoff on 429.
 - **Objects without media**: A significant portion of catalog objects have no digitized media — `smithsonian_get_media` returns `no_media` for these.
 - **EDAN content type variety**: Not all records are `type: edanmdm`. The catalog also has `type: ead_component`, `edanmdm`, library records, etc. The design targets `edanmdm` type records (the museum objects), but some search results may be library records with different field structures. The service normalizer should handle sparse/absent fields gracefully.
@@ -329,7 +336,7 @@ In practice they agree, but the design checks both. `smithsonian_get_media` surf
 | `q` | string | Full-text query |
 | `rows` | number | Page size (max 100) |
 | `start` | number | Offset (0-indexed) |
-| `fq` | — | Not a working EDAN parameter. Structured filters are ANDed into `q` as Lucene `field:value` terms instead (e.g. `q=(quilt) AND unit_code:NASM`). |
+| `fq` | — | Not a working EDAN parameter. Structured filters are ANDed into `q` as Lucene `field:value` terms instead (e.g. `q=quilt AND unit_code:NASM`). |
 | `api_key` | string | Required — from api.data.gov |
 
 ### Search response shape

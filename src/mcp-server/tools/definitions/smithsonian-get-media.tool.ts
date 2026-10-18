@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import { getSmithsonianService, toPlainText } from '@/services/smithsonian/smithsonian-service.js';
 
 const ImageResolutionSchema = z
   .object({
@@ -114,7 +114,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
     const raw = await svc.getContent(input.id, ctx);
 
     const isCC0 = svc.isCC0(raw);
-    const title = raw.title ?? '';
+    const title = toPlainText(raw.title ?? '');
     const recordId = raw.content?.descriptiveNonRepeating?.record_ID ?? input.id;
     const media = raw.content?.descriptiveNonRepeating?.online_media?.media ?? [];
     const mediaCount =

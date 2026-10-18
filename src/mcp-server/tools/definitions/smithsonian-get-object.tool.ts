@@ -10,7 +10,7 @@ import { getSmithsonianService } from '@/services/smithsonian/smithsonian-servic
 export const smithsonianGetObject = tool('smithsonian_get_object', {
   title: 'Get Smithsonian Object',
   description:
-    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns the exposed catalog fields — title, dates, description, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. The media summary is a count; full image URLs come from smithsonian_get_media.',
+    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns title, dates, description, labeled notes, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. Natural-history records can include scientific_names, taxonomy, and collection coordinates without inferred precision. The media summary is a count; full image URLs come from smithsonian_get_media.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -44,7 +44,58 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       .string()
       .optional()
       .describe(
-        'Best available prose description (Summary, Physical Description, or Brief Description notes).',
+        'Best available prose description from Summary, Physical Description, Brief Description, Description, Description (Brief), or Citation notes. Absent when only administrative notes exist.',
+      ),
+    notes: z
+      .array(
+        z
+          .object({
+            label: z.string().describe('Catalog note label, or Note when absent.'),
+            content: z.string().describe('Plain-text note content.'),
+          })
+          .describe('A labeled catalog note.'),
+      )
+      .describe('All nonempty catalog notes in source order, including repeated labels.'),
+    scientific_names: z
+      .array(z.string().describe('A catalog-reported scientific name.'))
+      .describe('All reported scientific names in source order; no accepted-name inference.'),
+    taxonomy: z
+      .object({
+        kingdom: z
+          .array(z.string().describe('A kingdom value.'))
+          .optional()
+          .describe('Reported kingdom values.'),
+        phylum: z
+          .array(z.string().describe('A phylum value.'))
+          .optional()
+          .describe('Reported phylum values.'),
+        class: z
+          .array(z.string().describe('A class value.'))
+          .optional()
+          .describe('Reported class values.'),
+        order: z
+          .array(z.string().describe('An order value.'))
+          .optional()
+          .describe('Reported order values.'),
+        family: z
+          .array(z.string().describe('A family value.'))
+          .optional()
+          .describe('Reported family values.'),
+      })
+      .optional()
+      .describe('Reported taxonomic ranks; absent ranks remain omitted.'),
+    coordinates: z
+      .array(
+        z
+          .object({
+            latitude: z.number().describe('Reported decimal latitude in degrees.'),
+            longitude: z.number().describe('Reported decimal longitude in degrees.'),
+            locality: z.string().optional().describe('Locality reported alongside this point.'),
+          })
+          .describe('A valid reported decimal coordinate pair.'),
+      )
+      .describe(
+        'Collection points without inferred precision or geocoding; empty when no valid decimal pairs exist.',
       ),
     makers: z
       .array(
@@ -187,6 +238,24 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       lines.push('');
       lines.push('**Dates:**');
       for (const d of result.dates) lines.push(`- ${d.label}: ${d.value}`);
+    }
+    if (result.notes.length > 0) {
+      lines.push('', '**Notes:**');
+      for (const note of result.notes) lines.push(`- ${note.label}: ${note.content}`);
+    }
+    if (result.scientific_names.length > 0)
+      lines.push(`**Scientific names:** ${result.scientific_names.join('; ')}`);
+    if (result.taxonomy) {
+      for (const [rank, values] of Object.entries(result.taxonomy)) {
+        if (values) lines.push(`**Taxonomy ${rank}:** ${values.join('; ')}`);
+      }
+    }
+    if (result.coordinates.length > 0) {
+      lines.push('**Collection coordinates:**');
+      for (const point of result.coordinates)
+        lines.push(
+          `- ${point.latitude}, ${point.longitude}${point.locality ? ` (${point.locality})` : ''}`,
+        );
     }
     if (result.makers.length > 0) {
       lines.push('');

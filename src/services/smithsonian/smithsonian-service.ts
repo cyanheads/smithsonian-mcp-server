@@ -189,6 +189,43 @@ export function toPlainText(value: string): string {
   return text.replace(CHARACTER_REFERENCE, decodeCharacterReference);
 }
 
+/** Detect active Lucene syntax outside quoted phrases and escaped characters. */
+export function hasActiveLuceneSyntax(query: string): boolean {
+  let quoted = false;
+  let escaped = false;
+  let token = '';
+  let literalToken = false;
+  const isOperator = () => !literalToken && (token === 'AND' || token === 'OR' || token === 'NOT');
+  for (const char of query) {
+    if (escaped) {
+      escaped = false;
+      literalToken = true;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      quoted = !quoted;
+      literalToken = true;
+      continue;
+    }
+    if (quoted) continue;
+    if ('():[]{}+!^~'.includes(char) || char === '&' || char === '|') return true;
+    if (char === '-' && token.length === 0) return true;
+    if (char.trim() === '') {
+      if (isOperator()) return true;
+      token = '';
+      literalToken = false;
+    } else {
+      // Only Boolean keywords matter; retain a bounded token while scanning.
+      if (token.length < 4) token += char;
+    }
+  }
+  return isOperator();
+}
+
 // ---------------------------------------------------------------------------
 // Normalization helpers
 // ---------------------------------------------------------------------------
@@ -268,6 +305,36 @@ function normalizeToFull(raw: RawEDAN): FullObject {
   const unitCode = dnr?.unit_code ?? raw.unitCode ?? '';
   const recordId = dnr?.record_ID ?? raw.url?.replace(/^edanmdm:/, '') ?? raw.id ?? '';
 
+  const taxonomy: NonNullable<FullObject['taxonomy']> = {};
+  for (const rank of ['kingdom', 'phylum', 'class', 'order', 'family'] as const) {
+    const values = indexed?.[`tax_${rank}`];
+    if (values) taxonomy[rank] = values;
+  }
+  const coordinates: FullObject['coordinates'] = [];
+  for (const location of indexed?.geoLocation ?? []) {
+    const point = location.points?.point;
+    const lat = point?.latitude;
+    const lon = point?.longitude;
+    if (lat?.type !== 'decimal' || lon?.type !== 'decimal') continue;
+    if (!lat.content?.trim() || !lon.content?.trim()) continue;
+    if (
+      !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(lat.content.trim()) ||
+      !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(lon.content.trim())
+    )
+      continue;
+    const latitude = Number(lat.content);
+    const longitude = Number(lon.content);
+    if (
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      Math.abs(latitude) > 90 ||
+      Math.abs(longitude) > 180
+    )
+      continue;
+    const locality = location.Other?.type === 'Locality' ? location.Other.content : undefined;
+    coordinates.push({ latitude, longitude, ...(locality && { locality }) });
+  }
+
   // Dates — gather both structured and freetext
   const dates: Array<{ label: string; value: string }> = [];
   for (const entry of freetext?.date ?? []) {
@@ -284,7 +351,20 @@ function normalizeToFull(raw: RawEDAN): FullObject {
       break;
     }
   }
-  if (!description) description = firstContent(freetext?.notes);
+  if (!description) {
+    for (const label of ['Description', 'Description (Brief)', 'Citation']) {
+      const match = freetext?.notes?.find((n) => n.label === label && n.content);
+      if (match?.content) {
+        description = match.content;
+        break;
+      }
+    }
+  }
+  const notes = (freetext?.notes ?? []).flatMap((entry) =>
+    entry.content
+      ? [{ label: toPlainText(entry.label ?? 'Note'), content: toPlainText(entry.content) }]
+      : [],
+  );
 
   // Makers
   const makers: Array<{ role: string; name: string }> = [];
@@ -360,7 +440,11 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     unit_code: unitCode,
     museum_name: museumName(unitCode),
     dates,
+    scientific_names: indexed?.scientific_name ?? [],
+    ...(Object.keys(taxonomy).length > 0 && { taxonomy }),
+    coordinates,
     ...(description !== undefined && { description: toPlainText(description) }),
+    notes,
     makers,
     materials,
     dimensions,
@@ -767,13 +851,12 @@ export class SmithsonianService {
     const base = `${cfg.baseUrl}/search`;
 
     // Embed field constraints into q as ANDed Lucene terms so each filter is a
-    // HARD constraint (EDAN has no fq param). The base query is parenthesized
-    // because an explicit AND otherwise binds only to the adjacent word.
-    // Space-joining instead would make filters soft (scoring-only), letting
-    // non-matching units outrank filtered results — so the AND is required.
+    // hard constraint (EDAN has no fq param). Group active syntax to preserve
+    // Boolean precedence, but keep implicit terms ungrouped: EDAN changes their
+    // matching semantics inside parentheses. Phrases and escapes stay literal.
     let q = params.query;
     if (activeFilters.length > 0) {
-      const baseQ = q && q !== '*' ? `(${q})` : '';
+      const baseQ = q && q !== '*' ? (hasActiveLuceneSyntax(q) ? `(${q})` : q) : '';
       const terms = activeFilters.join(' AND ');
       q = baseQ ? `${baseQ} AND ${terms}` : terms;
     }

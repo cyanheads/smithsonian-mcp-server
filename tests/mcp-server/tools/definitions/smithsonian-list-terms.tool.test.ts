@@ -19,6 +19,11 @@ function makeTermsResult(terms: string[] = [], total = terms.length) {
 }
 
 describe('smithsonianListTerms', () => {
+  it('routes media terms to search without inventing a browse mode', () => {
+    const guidance = smithsonianListTerms.output.shape.terms.element.description;
+    expect(guidance).toContain('online_media_type values feed search only');
+    expect(guidance).toContain('no media-type or place mode');
+  });
   beforeEach(() => {
     vi.restoreAllMocks();
   });

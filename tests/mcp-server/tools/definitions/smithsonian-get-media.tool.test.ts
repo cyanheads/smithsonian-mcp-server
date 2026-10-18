@@ -70,6 +70,50 @@ describe('smithsonianGetMedia', () => {
     expect(result.images[0]?.high_res_jpeg?.url).toContain('.jpg');
   });
 
+  for (const branch of ['success', 'no_media', 'no_images', 'not_cc0']) {
+    it.each([
+      ['<I>Southern Women</I> &amp; &#39; &#x27;', "Southern Women & ' '"],
+      ['&amp;#39; &lt;b&gt;', '&#39; <b>'],
+      ['Depth <20 m & a > b', 'Depth <20 m & a > b'],
+      [undefined, ''],
+    ])(`normalizes media title once on ${branch}: %s`, async (title, expected) => {
+      const raw = makeCc0Raw(branch === 'no_media' ? 0 : 1);
+      if (title === undefined) delete raw.title;
+      else raw.title = title;
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        getContent: vi.fn().mockResolvedValue(raw),
+        isCC0: vi.fn().mockReturnValue(true),
+        toImageItems: vi
+          .fn()
+          .mockReturnValue(
+            branch === 'no_images' ? [] : [{ ...makeCc0Image(), is_cc0: branch !== 'not_cc0' }],
+          ),
+      } as unknown as svcModule.SmithsonianService);
+      const result = await runToolContract(smithsonianGetMedia, { id: 'nasm_TEST001' });
+      if (branch === 'success') {
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toMatchObject({ title: expected });
+        expect(result.content).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ text: expect.stringContaining(`# Media: ${expected}`) }),
+          ]),
+        );
+      } else {
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            data: { title: expected, reason: branch, recovery: { hint: expect.any(String) } },
+          },
+        });
+        expect(result.content).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ text: expect.stringContaining(branch) }),
+          ]),
+        );
+      }
+    });
+  }
+
   it('throws invalid_id for empty ID', async () => {
     const result = await runToolContract(smithsonianGetMedia, { id: '  ' });
     const expectedHint = smithsonianGetMedia.errors?.find(

@@ -63,8 +63,176 @@ function makeRelatedRows(): ObjectSummary[] {
 }
 
 describe('smithsonianFindRelated', () => {
+  function fanoutService(search: ReturnType<typeof vi.fn>, raw = makeAnchorRaw()) {
+    const service = new svcModule.SmithsonianService(createInMemoryStorage());
+    vi.spyOn(service, 'getContent').mockResolvedValue(raw);
+    vi.spyOn(service, 'search').mockImplementation(search);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+    return service;
+  }
+
+  it('discloses partial failures safely together with paging guidance', async () => {
+    const search = vi
+      .fn()
+      .mockImplementation(({ filters }) =>
+        filters[0]?.startsWith('culture:')
+          ? Promise.reject(new Error('SECRET upstream body'))
+          : Promise.resolve({ rows: makeRelatedRows(), rowCount: 100 }),
+      );
+    fanoutService(search);
+    const result = await runToolContract(smithsonianFindRelated, { id: 'nasm_TEST001', limit: 1 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      notice: expect.stringContaining('culture: American'),
+      truncated: true,
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain('failed');
+    expect(text).toContain('search_continuation');
+    expect(text).not.toContain('SECRET');
+  });
+
+  it('propagates the first all-failed signal in input order', async () => {
+    const first = new Error('first failure');
+    fanoutService(
+      vi.fn().mockRejectedValueOnce(first).mockRejectedValue(new Error('later failure')),
+    );
+    await expect(
+      smithsonianFindRelated.handler(
+        smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+        createMockContext(),
+      ),
+    ).rejects.toBe(first);
+  });
+
+  it.each(['no signals', 'no matches', 'past end', 'partial empty'])(
+    'explains empty related results: %s',
+    async (kind) => {
+      const raw = kind === 'no signals' ? { title: 'Sparse', content: {} } : makeAnchorRaw();
+      const search = vi.fn().mockResolvedValue({
+        rows: kind === 'past end' ? makeRelatedRows() : [],
+        rowCount: kind === 'past end' ? 2 : 0,
+      });
+      if (kind === 'partial empty') search.mockRejectedValueOnce(new Error('SECRET'));
+      fanoutService(search, raw);
+      const result = await runToolContract(smithsonianFindRelated, {
+        id: 'nasm_TEST001',
+        start: kind === 'past end' ? 10 : 0,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ related: [], notice: expect.any(String) });
+      expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toMatch(
+        /try|search|start/i,
+      );
+    },
+  );
+
+  it.each(['before', 'mixed', 'all failed'])(
+    'never degrades cancellation into success: %s',
+    async (kind) => {
+      let controller = new AbortController();
+      let calls = 0;
+      const search = vi.fn().mockImplementation(async () => {
+        calls++;
+        if (kind === 'mixed' && calls === 1) return { rows: makeRelatedRows(), rowCount: 2 };
+        controller.abort();
+        if (kind !== 'before') throw new Error('SECRET');
+        return { rows: makeRelatedRows(), rowCount: 2 };
+      });
+      fanoutService(search);
+      if (kind === 'before') controller.abort();
+      const pending = smithsonianFindRelated.handler(
+        smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+        createMockContext({ signal: controller.signal }),
+      );
+      await expect(pending).rejects.toBeDefined();
+      controller = new AbortController();
+      calls = 0;
+      if (kind === 'before') controller.abort();
+      const result = await runToolContract(
+        smithsonianFindRelated,
+        { id: 'nasm_TEST001' },
+        { context: createMockContext({ signal: controller.signal }) },
+      );
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.RequestCancelled },
+      });
+      expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toMatch(
+        /cancel|abort/i,
+      );
+    },
+  );
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('discloses a later-chunk failure without retaining a gapped signal', async () => {
+    const search = vi.fn().mockImplementation(async ({ start, rows, filters }) => {
+      if (start > 0 && filters[0]?.startsWith('culture:')) throw new Error('SECRET chunk failure');
+      return {
+        rows: Array.from({ length: rows }, (_, i) => ({
+          ...makeRelatedRows()[0]!,
+          record_id: `record-${start + i}`,
+        })),
+        rowCount: 2000,
+      };
+    });
+    fanoutService(search);
+    const result = await runToolContract(smithsonianFindRelated, {
+      id: 'nasm_TEST001',
+      start: 1000,
+      limit: 1,
+    });
+    expect(result.isError).not.toBe(true);
+    const output = result.structuredContent as {
+      signals: Array<{ signal: string }>;
+      notice: string;
+    };
+    expect(output.signals.length).toBeGreaterThan(0);
+    expect(output.signals.some((s) => s.signal.startsWith('culture:'))).toBe(false);
+    expect(output.notice).toContain('culture: American');
+    expect(output.notice).toContain('failed');
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).not.toContain(
+      'SECRET',
+    );
+    expect(search.mock.calls.some(([params]) => params.start === 1000)).toBe(true);
+  });
+
+  it('bounds and flattens failed signal labels without relaying thrown text', async () => {
+    const raw = makeAnchorRaw();
+    raw.content!.indexedStructured!.culture = ['long\n'.repeat(1000)];
+    fanoutService(
+      vi
+        .fn()
+        .mockRejectedValueOnce(new Error('PRIVATE upstream body'))
+        .mockResolvedValue({ rows: [], rowCount: 0 }),
+      raw,
+    );
+    const result = await runToolContract(smithsonianFindRelated, { id: 'nasm_TEST001' });
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('unavailable');
+    expect(notice).not.toContain('\n');
+    expect(notice).not.toContain('PRIVATE');
+    expect(notice.length).toBeLessThan(600);
+  });
+
+  it('describes anchor-only fetched windows without claiming the full signal is empty', async () => {
+    const service = fanoutService(vi.fn());
+    vi.mocked(service.search).mockResolvedValue({
+      rows: [service.toSummary(makeAnchorRaw())],
+      rowCount: 10,
+    });
+    const result = await runToolContract(smithsonianFindRelated, { id: 'nasm_TEST001', limit: 1 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      related: [],
+      signals: expect.arrayContaining([expect.objectContaining({ row_count: 10 })]),
+      notice: expect.stringContaining('fetched windows'),
+    });
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toContain(
+      'search_continuation',
+    );
   });
 
   it('returns related objects for a valid anchor ID', async () => {

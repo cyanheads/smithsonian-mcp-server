@@ -106,6 +106,157 @@ function declaredRecovery(
 }
 
 describe('tool contract boundary', () => {
+  it.each([0, 1, 2, 3])('wires media-type filtering at cap/end boundaries: %s', async (start) => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => searchBody(start < 2 ? 1 : 0, 2),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await runToolContract(smithsonianSearchObjects, {
+      query: '',
+      filters: { online_media_type: '3D Models' },
+      rows: 1,
+      start,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      total_count: 2,
+      objects: start < 2 ? [expect.any(Object)] : [],
+    });
+    expect(text(result)).toContain('2 total results');
+    expect((result.structuredContent as { truncated?: boolean }).truncated === true).toBe(
+      start === 0,
+    );
+    expect(text(result).includes('2 objects match')).toBe(start === 0);
+    const params = new URL(fetchMock.mock.calls[0]![0]).searchParams;
+    expect(params.get('rows')).toBe('1');
+    expect(params.get('start')).toBe(String(start));
+    expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(
+      'online_media_type:"3D Models"',
+    );
+  });
+
+  it('rejects invalid media-type input before accessing upstream', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await runToolContract(smithsonianSearchObjects, {
+      query: '',
+      filters: { online_media_type: false },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('online_media_type');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+  it('relays specimen fields through both object wire surfaces', async () => {
+    stubJson({
+      response: {
+        title: 'Lampropeltis triangulum',
+        content: {
+          indexedStructured: {
+            scientific_name: ['Lampropeltis triangulum', 'Other name'],
+            tax_kingdom: ['Animalia'],
+            tax_phylum: ['Chordata'],
+            tax_class: ['Reptilia'],
+            tax_order: ['Squamata'],
+            tax_family: ['Colubrinae', 'Other family'],
+            geoLocation: [
+              {
+                Other: { type: 'Locality', content: 'El Copé' },
+                points: {
+                  point: {
+                    latitude: { type: 'decimal', content: '8.6194' },
+                    longitude: { type: 'decimal', content: '-80.5792' },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+    const result = await runToolContract(smithsonianGetObject, { id: 'nmnhvz_10292842' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      scientific_names: ['Lampropeltis triangulum', 'Other name'],
+      taxonomy: { family: ['Colubrinae', 'Other family'] },
+      coordinates: [{ latitude: 8.6194, longitude: -80.5792, locality: 'El Copé' }],
+    });
+    for (const value of [
+      'Other name',
+      'Animalia',
+      'Chordata',
+      'Reptilia',
+      'Squamata',
+      'Colubrinae',
+      'Other family',
+      '8.6194',
+      '-80.5792',
+      'El Copé',
+    ])
+      expect(text(result)).toContain(value);
+  });
+
+  it.each([0, 100, 200, 201])(
+    'wires scientific_name as a hard filter at offset %s',
+    async (start) => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => searchBody(start < 200 ? 100 : 0, 200),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const result = await runToolContract(smithsonianSearchObjects, {
+        query: '',
+        filters: { scientific_name: 'Crotalus "horridus"\\name', unit_code: 'NMNHHERPS' },
+        rows: 100,
+        start,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        total_count: 200,
+      });
+      expect((result.structuredContent as { objects: unknown[] }).objects).toHaveLength(
+        start < 200 ? 100 : 0,
+      );
+      expect(text(result)).toContain('200 total results');
+      expect((result.structuredContent as { truncated?: boolean }).truncated === true).toBe(
+        start === 0,
+      );
+      expect(text(result).includes('200 objects match')).toBe(start === 0);
+      const params = new URL(fetchMock.mock.calls[0]![0]).searchParams;
+      expect(params.get('rows')).toBe('100');
+      expect(params.get('start')).toBe(String(start));
+      expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(
+        'unit_code:"NMNHHERPS" AND scientific_name:"Crotalus \\"horridus\\"\\\\name"',
+      );
+    },
+  );
+
+  it('routes an empty scientific-name result to object scientific_names', async () => {
+    stubJson(searchBody(0, 0));
+    const result = await runToolContract(smithsonianSearchObjects, {
+      query: '',
+      filters: { scientific_name: 'Invented name' },
+    });
+    expect(errorOf(result).data?.reason).toBe('invalid_filter');
+    expect(errorOf(result).data?.recovery?.hint).toContain(
+      'smithsonian_get_object.scientific_names',
+    );
+    expect(text(result)).toContain('smithsonian_get_object.scientific_names');
+  });
+
+  it('rejects invalid scientific-name input before upstream access', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await runToolContract(smithsonianSearchObjects, {
+      query: '',
+      filters: { scientific_name: false },
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain('scientific_name');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
     initSmithsonianService({} as AppConfig, createInMemoryStorage());

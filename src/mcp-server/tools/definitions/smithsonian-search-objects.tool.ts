@@ -194,6 +194,18 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .describe(
             'When true, restrict to records carrying an indexed online_media_type value. That vocabulary covers digitized surrogates — finding aids, catalog cards, scanned books, full text, electronic resources — alongside images, 3D models, and video, and the surrogate types often have no deliverable media attached, so a match can still report has_media: false. Read has_media on each result to decide whether smithsonian_get_media will return anything.',
           ),
+        scientific_name: z
+          .string()
+          .optional()
+          .describe(
+            'Exact indexed scientific name from smithsonian_get_object.scientific_names, e.g. "Crotalus horridus". Not enumerable via smithsonian_list_terms.',
+          ),
+        online_media_type: z
+          .string()
+          .optional()
+          .describe(
+            'Exact indexed media category from smithsonian_list_terms { field: "online_media_type" }, e.g. "Images", "3D Models", "Sound recordings". Even Images does not guarantee attached or CC0 images; read smithsonian_get_object.media_summary for availability.',
+          ),
         cc0_only: z
           .boolean()
           .optional()
@@ -272,6 +284,8 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     if (f?.place) filters.push(luceneField('place', f.place));
     if (f?.topic) filters.push(luceneField('topic', f.topic));
     if (f?.name) filters.push(luceneField('name', f.name));
+    if (f?.scientific_name) filters.push(luceneField('scientific_name', f.scientific_name));
+    if (f?.online_media_type) filters.push(luceneField('online_media_type', f.online_media_type));
     if (f?.online_only) filters.push('online_media_type:*');
     if (f?.cc0_only) filters.push('media_usage:CC0');
 
@@ -318,6 +332,8 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
         if (f?.place) routable.push({ field: 'place', value: f.place });
         if (f?.date) routable.push({ field: 'date', value: f.date });
         if (f?.topic) routable.push({ field: 'topic', value: f.topic });
+        if (f?.online_media_type)
+          routable.push({ field: 'online_media_type', value: f.online_media_type });
 
         // Where each routable value sits in its vocabulary, which decides between
         // "resolve it" and "it resolves to itself" (issue #33), plus the substring
@@ -351,7 +367,14 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           }
         }
 
-        const hint = composeFilterHint(routableFilters, objectTypes, unitCodes);
+        const hint = [
+          composeFilterHint(routableFilters, objectTypes, unitCodes),
+          f?.scientific_name
+            ? 'Use an exact scientific_name from smithsonian_get_object.scientific_names; this field is not enumerable via smithsonian_list_terms. Drop the filter if it does not overlap your query or other filters.'
+            : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
 
         throw ctx.fail(
           'invalid_filter',

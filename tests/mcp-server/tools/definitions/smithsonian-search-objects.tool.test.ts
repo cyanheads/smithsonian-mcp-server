@@ -47,6 +47,57 @@ function makeFilteredZeroService(
 }
 
 describe('smithsonianSearchObjects', () => {
+  it.each([
+    [{ indexed: false }, 'smithsonian_list_terms'],
+    [{ indexed: true }, 'exact term'],
+  ])('routes media-type zero results using vocabulary membership: %j', async (term, expected) => {
+    const search = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    const service = makeFilteredZeroService(search, term);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+    const result = await runToolContract(smithsonianSearchObjects, {
+      query: 'moon',
+      filters: { online_media_type: 'Sound recordings' },
+    });
+    expect(service.describeTerm).toHaveBeenCalledWith(
+      'online_media_type',
+      'Sound recordings',
+      expect.anything(),
+    );
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: { reason: 'invalid_filter', recovery: { hint: expect.stringContaining(expected) } },
+      },
+    });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining(expected) }),
+      ]),
+    );
+  });
+
+  it('combines exact media types with existing availability filters without promising delivery', async () => {
+    const search = vi
+      .fn()
+      .mockResolvedValue({ rows: [{ ...makeObjectSummary(), has_media: false }], rowCount: 1 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search,
+    } as unknown as svcModule.SmithsonianService);
+    const result = await runToolContract(smithsonianSearchObjects, {
+      query: 'moon',
+      filters: { online_media_type: 'Images "special"\\value', online_only: true, cc0_only: true },
+    });
+    expect(search.mock.calls[0]![0].filters).toEqual([
+      'online_media_type:"Images \\"special\\"\\\\value"',
+      'online_media_type:*',
+      'media_usage:CC0',
+    ]);
+    expect(result.structuredContent).toMatchObject({ objects: [{ has_media: false }] });
+    expect(result.content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: expect.stringContaining('**Has media:** No') }),
+      ]),
+    );
+  });
   beforeEach(() => {
     vi.restoreAllMocks();
   });

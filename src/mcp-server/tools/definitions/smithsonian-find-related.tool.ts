@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
 
 /**
@@ -180,7 +180,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .string()
       .optional()
       .describe(
-        "Guidance naming the inputs that retrieve the related objects this page omitted — start for the next page, signals[].search_continuation for a signal past this tool's reach.",
+        'Composed partial-failure, empty-result, and paging guidance. Failed signals carry safe categories; start pages the related set and signals[].search_continuation reaches a broader signal.',
       ),
   },
 
@@ -208,6 +208,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       throw ctx.fail('invalid_id', 'Anchor object ID must not be empty.', { id: input.id });
     }
 
+    ctx.signal?.throwIfAborted();
     const svc = getSmithsonianService();
     ctx.log.info('Finding related objects', { id: input.id, limit: input.limit });
 
@@ -387,6 +388,19 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       return { items, signal: fo.signal, rowCount: wave1.rowCount };
     };
     const fanOutResults = await Promise.allSettled(fanOuts.map(fetchSignal));
+    ctx.signal?.throwIfAborted();
+    const failures = fanOuts.flatMap((fanOut, index) => {
+      const result = fanOutResults[index];
+      return result?.status === 'rejected'
+        ? [{ signal: fanOut.signal, error: result.reason as unknown }]
+        : [];
+    });
+    const cancellation = failures.find(
+      ({ error }) => error instanceof McpError && error.code === JsonRpcErrorCode.RequestCancelled,
+    );
+    if (cancellation) throw cancellation.error;
+    const [firstFailure] = failures;
+    if (firstFailure && failures.length === fanOuts.length) throw firstFailure.error;
 
     // Per-signal disclosure (issue #18). The merged interleave reaches at most
     // MAX_FETCH_PER_SIGNAL rows per signal, so a broad signal has matches no `start`
@@ -502,6 +516,32 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     // exact end of a signal — there rowCount never exceeds neededDepth.
     const moreInMerged = merged.length > input.start + input.limit;
     const moreUpstream = buckets.some((b) => b.rowCount > neededDepth);
+    const notices: string[] = [];
+    if (failures.length > 0) {
+      const failedSignals = failures.map(({ signal, error }) => {
+        const category =
+          error instanceof McpError && error.code === JsonRpcErrorCode.Timeout
+            ? 'timeout'
+            : error instanceof McpError && error.code === JsonRpcErrorCode.RateLimited
+              ? 'rate limited'
+              : 'unavailable';
+        return `${signal.slice(0, 120).replace(/\s+/g, ' ')} (${category})`;
+      });
+      notices.push(
+        `Partial results: signal searches failed for ${failedSignals.join('; ')}. Retry this call to include those signals.`,
+      );
+    }
+    if (related.length === 0) {
+      notices.push(
+        fanOuts.length === 0
+          ? 'The anchor has no usable metadata signals. Try another anchor or smithsonian_search_objects with a topic.'
+          : merged.length > 0 || input.start > 0
+            ? `No related objects at offset ${input.start}. Try start: 0 or use signals[].search_continuation with smithsonian_search_objects.`
+            : failures.length > 0
+              ? 'Successful fetched windows contained no non-anchor matches; failed signals may still have matches. Retry or use signals[].search_continuation with smithsonian_search_objects.'
+              : 'The fetched windows contained no non-anchor matches. Try signals[].search_continuation with smithsonian_search_objects for a signal with more rows, or another anchor.',
+      );
+    }
     if (moreInMerged || moreUpstream) {
       // Two-tier continuation: `start` pages the merged interleave up to each
       // signal's MAX_FETCH_PER_SIGNAL reach; signals[].search_continuation is the
@@ -511,13 +551,17 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         shown: related.length,
         cap: input.limit,
         ceiling,
-        guidance:
+        guidance: [
+          ...notices,
           `Showing ${related.length} related objects from offset ${input.start}. ` +
-          'Advance start (start = page × limit) for the next page. Each signal is reachable ' +
-          `to ${MAX_FETCH_PER_SIGNAL} objects this way — see signals[].row_count for a signal's true size, ` +
-          'and pass its search_continuation to smithsonian_search_objects to retrieve the rest.',
+            'Advance start (start = page × limit) for the next page. Each signal is reachable ' +
+            `to ${MAX_FETCH_PER_SIGNAL} objects this way — see signals[].row_count for a signal's true size, ` +
+            'and pass its search_continuation to smithsonian_search_objects to retrieve the rest.',
+        ].join(' '),
       });
-    }
+    } else if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+
+    ctx.signal?.throwIfAborted();
 
     return {
       anchor: {

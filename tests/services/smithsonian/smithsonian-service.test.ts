@@ -14,6 +14,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import {
+  hasActiveLuceneSyntax,
   initSmithsonianService,
   luceneField,
   SmithsonianService,
@@ -24,6 +25,72 @@ import type {
   RawEDAN,
   RawSearchResponse,
 } from '@/services/smithsonian/types.js';
+
+describe('query syntax scanner', () => {
+  it.each(['Wright AND Flyer', 'NOT Flyer', 'Wright && Flyer', 'name:Wright', '(Wright (Flyer))'])(
+    'recognizes active syntax: %s',
+    (query) => {
+      expect(hasActiveLuceneSyntax(query)).toBe(true);
+    },
+  );
+
+  it.each([
+    '"OR"',
+    '"(literal)"',
+    '\\OR',
+    'ORange',
+    '"unfinished',
+    'name\\:Wright',
+    'plain\\\\text',
+  ])('preserves literal syntax: %s', (query) => {
+    expect(hasActiveLuceneSyntax(query)).toBe(false);
+  });
+
+  it.each(['line', 'lines', 'unclosed phrase', 'operator prefixes'])(
+    'scans caller text within CPU bounds: %s',
+    (shape) => {
+      const samples = [5_000, 10_000, 20_000, 40_000, 80_000, 160_000, 320_000].map((size) => ({
+        cpuPerScan: Number.POSITIVE_INFINITY,
+        query:
+          shape === 'line'
+            ? `${'\\('.repeat(size / 2)}\n`
+            : shape === 'lines'
+              ? '\\(\n'.repeat(Math.ceil(size / 3))
+              : shape === 'unclosed phrase'
+                ? `"${'((\\"'.repeat(Math.ceil(size / 4))}`
+                : 'ORange ANDerson NOTice\n'.repeat(Math.ceil(size / 22)),
+      }));
+      const measure = (sample: (typeof samples)[number]) => {
+        const start = process.threadCpuUsage();
+        let runs = 0;
+        let cpu = 0;
+        // Accumulate measurable CPU even on clocks that report coarse ticks.
+        do {
+          expect(hasActiveLuceneSyntax(sample.query)).toBe(false);
+          runs++;
+          const elapsed = process.threadCpuUsage(start);
+          cpu = elapsed.user + elapsed.system;
+          expect(cpu).toBeLessThan(1_000_000);
+        } while (cpu < 20_000);
+        expect(cpu / runs).toBeLessThan(100_000);
+        sample.cpuPerScan = Math.min(sample.cpuPerScan, cpu / runs);
+      };
+      // Establish the absolute bound before advancing to each doubled size.
+      for (const sample of samples) measure(sample);
+      const alternate = [0, 6, 1, 5, 2, 4, 3].map((index) => samples[index]!);
+      for (const order of [alternate, alternate.toReversed()]) {
+        for (const sample of order) measure(sample);
+      }
+      const ratio = () => samples.at(-1)!.cpuPerScan / samples[0]!.cpuPerScan;
+      if (ratio() >= 256) {
+        for (const order of [alternate, alternate.toReversed(), alternate]) {
+          for (const sample of order) measure(sample);
+        }
+      }
+      expect(ratio()).toBeLessThan(256);
+    },
+  );
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -248,6 +315,45 @@ describe('SmithsonianService', () => {
       expect(headers?.['X-Api-Key']).toBe('test-key-12345');
     });
 
+    it.each([
+      ['Wright OR Flyer', ['unit_code:NASM'], '(Wright OR Flyer) AND unit_code:NASM'],
+      ['(Wright Flyer)', ['unit_code:NASM'], '((Wright Flyer)) AND unit_code:NASM'],
+      ['', ['unit_code:NASM'], 'unit_code:NASM'],
+      ['*', ['unit_code:NASM'], 'unit_code:NASM'],
+      ['totem pole', [], 'totem pole'],
+    ])(
+      'preserves existing explicit and filter-only query behavior: %s',
+      async (query, filters, expected) => {
+        const fetchMock = vi
+          .fn()
+          .mockResolvedValue({ ok: true, status: 200, json: async () => makeSearchResponse() });
+        vi.stubGlobal('fetch', fetchMock);
+        await makeService().search({ query, filters, rows: 1, start: 0 }, makeTenantContext());
+        expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(expected);
+      },
+    );
+
+    it.each([
+      'totem pole',
+      '"Wright OR Flyer"',
+      '"(Wright Flyer)"',
+      'Wright \\(Flyer\\)',
+      '"Wright \\" OR Flyer"',
+      'Wright \\OR Flyer',
+    ])('keeps implicit or literal query matching when filtering: %s', async (query) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue({ ok: true, status: 200, json: async () => makeSearchResponse() });
+      vi.stubGlobal('fetch', fetchMock);
+      await makeService().search(
+        { query, filters: ['unit_code:NASM'], rows: 1, start: 0 },
+        makeTenantContext(),
+      );
+      expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(
+        `${query} AND unit_code:NASM`,
+      );
+    });
+
     it('embeds filters into q as ANDed Lucene constraints', async () => {
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -267,8 +373,8 @@ describe('SmithsonianService', () => {
       expect(calledUrl).not.toContain('fq=');
       const qs = new URL(calledUrl).searchParams;
       const q = qs.get('q') ?? '';
-      // ANDed as hard constraints; base query parenthesized so AND doesn't bind to one word
-      expect(q).toBe('(test) AND unit_code:NASM AND media_usage:CC0');
+      // Plain terms stay ungrouped so EDAN preserves implicit matching.
+      expect(q).toBe('test AND unit_code:NASM AND media_usage:CC0');
     });
 
     it('throws on API_KEY_MISSING error-in-200', async () => {
@@ -464,6 +570,150 @@ describe('SmithsonianService', () => {
   });
 
   describe('toFullObject()', () => {
+    it.each([
+      ['90', '180', 'decimal', 'decimal', true],
+      ['-90', '-180', 'decimal', 'decimal', true],
+      ['8.6194123456789', '-80.5792123456789', 'decimal', 'decimal', true],
+      ['1', '181', 'decimal', 'decimal', false],
+      ['1', '-181', 'decimal', 'decimal', false],
+      ['1', '', 'decimal', 'decimal', false],
+      ['1', '2', 'degrees', 'decimal', false],
+      ['1', '2', 'decimal', 'degrees', false],
+    ])(
+      'preserves only valid reported decimal coordinate pairs: %s %s %s %s',
+      (latitude, longitude, latType, lonType, valid) => {
+        const full = makeService().toFullObject({
+          content: {
+            indexedStructured: {
+              geoLocation: [
+                {
+                  Other: { type: 'Country', content: 'No locality' },
+                  points: {
+                    point: {
+                      latitude: { type: latType, content: latitude },
+                      longitude: { type: lonType, content: longitude },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        });
+        expect(full.coordinates).toEqual(
+          valid ? [{ latitude: Number(latitude), longitude: Number(longitude) }] : [],
+        );
+      },
+    );
+    it('preserves specimen names, ranks, sparse decimal points and same-entry locality', () => {
+      const full = makeService().toFullObject({
+        content: {
+          indexedStructured: {
+            scientific_name: ['Gonocephalus chamaeleontinus', 'Gonocephalus kuhlii'],
+            tax_kingdom: ['Animalia'],
+            tax_family: ['Agamidae', 'Other family'],
+            geoLocation: [
+              { Other: { type: 'Locality', content: 'Mount Gede, Tjibodas' } },
+              {
+                Other: { type: 'Locality', content: 'El Copé' },
+                points: {
+                  point: {
+                    latitude: { type: 'decimal', content: '8.6194' },
+                    longitude: { type: 'decimal', content: '-80.5792' },
+                  },
+                },
+              },
+              {
+                points: {
+                  point: {
+                    latitude: { type: 'decimal', content: '0' },
+                    longitude: { type: 'decimal', content: '0' },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      });
+      expect(full.scientific_names).toEqual([
+        'Gonocephalus chamaeleontinus',
+        'Gonocephalus kuhlii',
+      ]);
+      expect(full.taxonomy).toEqual({
+        kingdom: ['Animalia'],
+        family: ['Agamidae', 'Other family'],
+      });
+      expect(full.coordinates).toEqual([
+        { latitude: 8.6194, longitude: -80.5792, locality: 'El Copé' },
+        { latitude: 0, longitude: 0 },
+      ]);
+      expect(makeService().toFullObject({})).toMatchObject({
+        scientific_names: [],
+        coordinates: [],
+      });
+      expect(makeService().toFullObject({}).taxonomy).toBeUndefined();
+    });
+
+    it.each(['', ' ', 'NaN', 'Infinity', '0x10', '12oops', '91', '-91'])(
+      'omits invalid specimen latitude without substituting zero: %s',
+      (value) => {
+        const full = makeService().toFullObject({
+          content: {
+            indexedStructured: {
+              geoLocation: [
+                {
+                  points: {
+                    point: {
+                      latitude: { type: 'decimal', content: value },
+                      longitude: { type: 'decimal', content: '0' },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        });
+        expect(full.coordinates).toEqual([]);
+      },
+    );
+    it.each([
+      'Summary',
+      'Extended Physical Description',
+      'Brief Description',
+      'Description',
+      'Description (Brief)',
+      'Citation',
+    ])('preserves recognized prose: %s', (label) => {
+      const full = makeService().toFullObject({
+        content: { freetext: { notes: [{ label, content: 'Useful prose' }] } },
+      });
+      expect(full.description).toBe('Useful prose');
+    });
+
+    it('keeps administrative and repeated notes labeled without inventing prose', () => {
+      const full = makeService().toFullObject({
+        content: {
+          freetext: {
+            notes: [
+              { label: 'Record Last Modified', content: '12 Jan 2026' },
+              { label: 'Location', content: 'Currently not on view' },
+              { label: 'Specimen Count', content: '2' },
+              { label: 'Location', content: '<b>Storage</b> &amp;#39;' },
+              { content: 'Unlabeled' },
+              { label: 'Empty', content: '' },
+            ],
+          },
+        },
+      });
+      expect(full.description).toBeUndefined();
+      expect(full.notes).toEqual([
+        { label: 'Record Last Modified', content: '12 Jan 2026' },
+        { label: 'Location', content: 'Currently not on view' },
+        { label: 'Specimen Count', content: '2' },
+        { label: 'Location', content: 'Storage &#39;' },
+        { label: 'Note', content: 'Unlabeled' },
+      ]);
+      expect(makeService().toFullObject({}).notes).toEqual([]);
+    });
     it('normalizes all metadata fields correctly', () => {
       const svc = makeService();
       const raw = makeContentResponse('nasm_TEST001').response!;
