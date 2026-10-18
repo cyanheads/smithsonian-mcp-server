@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.9](changelog/0.3.x/0.3.9.md) — 2026-10-18
+
+Precise searches and richer Smithsonian object metadata
+
 ## [0.3.8](changelog/0.3.x/0.3.8.md) — 2026-10-08
 
 mcp-ts-core ^0.13.6 → ^0.13.14: near-miss tool arguments are repaired before validation, tool error results carry a requestId, error data no longer carries server stacks or request context, and the registry npm entries start the transport they name.
