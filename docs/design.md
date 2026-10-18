@@ -334,7 +334,7 @@ The catalog has two distinct CC0 flags:
 | Param | Type | Notes |
 |:------|:-----|:------|
 | `q` | string | Full-text query |
-| `rows` | number | Page size (max 100) |
+| `rows` | number | Upstream page size (max 1,000); `smithsonian_search_objects` caps at 100, while related searches use chunks of up to 1,000. |
 | `start` | number | Offset (0-indexed) |
 | `fq` | — | Not a working EDAN parameter. Structured filters are ANDed into `q` as Lucene `field:value` terms instead (e.g. `q=quilt AND unit_code:NASM`). |
 
