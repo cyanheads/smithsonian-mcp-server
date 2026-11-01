@@ -3,6 +3,7 @@
  * @module tests/services/smithsonian/smithsonian-service.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -11,8 +12,13 @@ import {
   createMockContext,
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
+import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
+import { smithsonianGetMedia } from '@/mcp-server/tools/definitions/smithsonian-get-media.tool.js';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
+import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
+import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
 import {
   hasActiveLuceneSyntax,
   initSmithsonianService,
@@ -25,6 +31,7 @@ import type {
   RawEDAN,
   RawSearchResponse,
 } from '@/services/smithsonian/types.js';
+import { FakeBucket, openTestMirror, type TestMirror } from './oa-bucket-fake.js';
 
 describe('query syntax scanner', () => {
   it.each(['Wright AND Flyer', 'NOT Flyer', 'Wright && Flyer', 'name:Wright', '(Wright (Flyer))'])(
@@ -315,11 +322,13 @@ describe('SmithsonianService', () => {
       expect(headers?.['X-Api-Key']).toBe('test-key-12345');
     });
 
+    const NASM: FacetFilter[] = [{ field: 'unit_code', value: 'NASM' }];
+
     it.each([
-      ['Wright OR Flyer', ['unit_code:NASM'], '(Wright OR Flyer) AND unit_code:NASM'],
-      ['(Wright Flyer)', ['unit_code:NASM'], '((Wright Flyer)) AND unit_code:NASM'],
-      ['', ['unit_code:NASM'], 'unit_code:NASM'],
-      ['*', ['unit_code:NASM'], 'unit_code:NASM'],
+      ['Wright OR Flyer', NASM, '(Wright OR Flyer) AND unit_code:"NASM"'],
+      ['(Wright Flyer)', NASM, '((Wright Flyer)) AND unit_code:"NASM"'],
+      ['', NASM, 'unit_code:"NASM"'],
+      ['*', NASM, 'unit_code:"NASM"'],
       ['totem pole', [], 'totem pole'],
     ])(
       'preserves existing explicit and filter-only query behavior: %s',
@@ -345,12 +354,9 @@ describe('SmithsonianService', () => {
         .fn()
         .mockResolvedValue({ ok: true, status: 200, json: async () => makeSearchResponse() });
       vi.stubGlobal('fetch', fetchMock);
-      await makeService().search(
-        { query, filters: ['unit_code:NASM'], rows: 1, start: 0 },
-        makeTenantContext(),
-      );
+      await makeService().search({ query, filters: NASM, rows: 1, start: 0 }, makeTenantContext());
       expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(
-        `${query} AND unit_code:NASM`,
+        `${query} AND unit_code:"NASM"`,
       );
     });
 
@@ -365,7 +371,7 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = makeTenantContext();
       await svc.search(
-        { query: 'test', rows: 5, start: 0, filters: ['unit_code:NASM', 'media_usage:CC0'] },
+        { query: 'test', rows: 5, start: 0, filters: [...NASM, { field: 'cc0' }] },
         ctx,
       );
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
@@ -374,7 +380,7 @@ describe('SmithsonianService', () => {
       const qs = new URL(calledUrl).searchParams;
       const q = qs.get('q') ?? '';
       // Plain terms stay ungrouped so EDAN preserves implicit matching.
-      expect(q).toBe('test AND unit_code:NASM AND media_usage:CC0');
+      expect(q).toBe('test AND unit_code:"NASM" AND media_usage:CC0');
     });
 
     it('throws on API_KEY_MISSING error-in-200', async () => {
@@ -454,7 +460,7 @@ describe('SmithsonianService', () => {
       mockFetch(makeContentResponse('nasm_TEST001'));
       const svc = makeService();
       const ctx = makeTenantContext();
-      const raw = await svc.getContent('nasm_TEST001', ctx);
+      const { record: raw } = await svc.getContent('nasm_TEST001', ctx);
       expect(raw.title).toBe('Test Object');
       expect(raw.content?.descriptiveNonRepeating?.record_ID).toBe('nasm_TEST001');
     });
@@ -562,7 +568,7 @@ describe('SmithsonianService', () => {
       mockFetch(contentShape);
       const svc = makeService();
       const ctx = makeTenantContext();
-      const raw = await svc.getContent('saam_DIRECT001', ctx);
+      const { record: raw } = await svc.getContent('saam_DIRECT001', ctx);
       // Asserts the envelope was unwrapped at `response`, not `response.rows[0]`
       expect(raw.title).toBe('Direct Response Object');
       expect(raw.content?.descriptiveNonRepeating?.record_ID).toBe('saam_DIRECT001');
@@ -1869,6 +1875,772 @@ describe('SmithsonianService', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Response cache wiring (issue #65)
+// ---------------------------------------------------------------------------
+
+/** An upstream answer in the shape `fetchWithTimeout` reads off a `Response`. */
+function upstream(body: unknown, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? 'OK' : `HTTP ${status}`,
+    headers: { get: () => null },
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+type Upstream = ReturnType<typeof upstream>;
+type Endpoint = 'search' | 'content';
+type Route = (init: RequestInit) => Upstream | Promise<Upstream>;
+
+/** The endpoint a request addresses, read from its path: `…/search` or `…/content/{id}`. */
+function endpointOf(input: string): Endpoint | undefined {
+  const segments = new URL(input).pathname.split('/');
+  if (segments.at(-1) === 'search') return 'search';
+  if (segments.at(-2) === 'content') return 'content';
+  return undefined;
+}
+
+/**
+ * Stub fetch with one route per endpoint. A request to any other path, or to an
+ * endpoint without a route, rejects, so an unexpected upstream call fails the test.
+ */
+function stubUpstream(routes: Partial<Record<Endpoint, Route>>) {
+  const fetchMock = vi.fn(async (input: string, init: RequestInit) => {
+    const endpoint = endpointOf(input);
+    const route = endpoint ? routes[endpoint] : undefined;
+    if (!route) throw new Error('unmocked fetch');
+    return route(init);
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return {
+    fetchMock,
+    /** Requests received on one endpoint. */
+    count: (endpoint: Endpoint) =>
+      fetchMock.mock.calls.filter(([input]) => endpointOf(input) === endpoint).length,
+  };
+}
+
+/**
+ * A route that holds every request until `release()`, and rejects one the way a
+ * real fetch does once its request signal aborts. Never released, it only ends
+ * when the signal aborts — a hung upstream. `signals` holds the signal each
+ * request ran on; `arrived(n)` resolves once `n` requests have come in.
+ */
+function heldRoute(answer: Upstream) {
+  const signals: AbortSignal[] = [];
+  const gate = Promise.withResolvers<void>();
+  const waiting: Array<{ count: number; resolve: () => void }> = [];
+  const route: Route = (init) => {
+    const signal = init.signal as AbortSignal;
+    signals.push(signal);
+    for (const waiter of waiting) if (signals.length >= waiter.count) waiter.resolve();
+    return new Promise<Upstream>((resolve, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      gate.promise.then(() => resolve(answer));
+    });
+  };
+  const arrived = (count: number) =>
+    signals.length >= count
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => waiting.push({ count, resolve }));
+  return { route, signals, arrived, release: () => gate.resolve() };
+}
+
+/** Run a call to its outcome — value or thrown error — with timeouts and backoff skipped. */
+async function outcomeOf(run: () => Promise<unknown>): Promise<unknown> {
+  vi.useFakeTimers();
+  try {
+    const pending = run().catch((error: unknown) => error);
+    await vi.runAllTimersAsync();
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+describe('response cache wiring (issue #65)', () => {
+  const SEARCH = { query: 'aircraft', rows: 10, start: 0 };
+  const RECORD = 'nasm_TEST001';
+
+  /** A context that is cancelled through `signal`. */
+  function cancellableContext(signal: AbortSignal) {
+    return createMockContext({ tenantId: 'test-tenant', signal });
+  }
+
+  /** One call to `endpoint` — the same request URL every time. */
+  function callOn(svc: SmithsonianService, endpoint: Endpoint, ctx = makeTenantContext()) {
+    return endpoint === 'search' ? svc.search(SEARCH, ctx) : svc.getContent(RECORD, ctx);
+  }
+
+  /** The 200 each endpoint answers on success. */
+  function success(endpoint: Endpoint): Upstream {
+    return upstream(endpoint === 'search' ? makeSearchResponse() : makeContentResponse(RECORD));
+  }
+
+  /** The error code a call rejected with. */
+  async function codeOf(pending: Promise<unknown>): Promise<number | undefined> {
+    return ((await pending) as { code?: number }).code;
+  }
+
+  beforeEach(() => {
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  describe('behavior the cache keeps', () => {
+    it('search() reads a 200 without a response body as an empty page', async () => {
+      stubUpstream({ search: () => upstream({ status: 200, responseCode: 1 }) });
+
+      await expect(makeService().search(SEARCH, makeTenantContext())).resolves.toEqual({
+        rows: [],
+        rowCount: 0,
+      });
+    });
+
+    it.each(['search', 'content'] as const)(
+      'a caller cancelled mid-request rejects with RequestCancelled (%s)',
+      async (endpoint) => {
+        const held = heldRoute(success(endpoint));
+        stubUpstream({ [endpoint]: held.route });
+        const controller = new AbortController();
+
+        const pending = callOn(
+          makeService(),
+          endpoint,
+          cancellableContext(controller.signal),
+        ).catch((error: unknown) => error);
+        await held.arrived(1);
+        controller.abort();
+
+        expect(await codeOf(pending)).toBe(JsonRpcErrorCode.RequestCancelled);
+      },
+    );
+  });
+
+  it('serves a repeated identical search from one request, returning the same page', async () => {
+    const up = stubUpstream({ search: () => success('search') });
+    const svc = makeService();
+
+    const first = await svc.search(SEARCH, makeTenantContext());
+    const second = await svc.search(SEARCH, makeTenantContext());
+
+    expect(up.count('search')).toBe(1);
+    expect(second).toEqual(first);
+    expect(second.rows[0]?.record_id).toBe('nasm_TEST001');
+    expect(second.rowCount).toBe(42);
+  });
+
+  it('serves one record from one request, with or without the edanmdm: prefix', async () => {
+    const up = stubUpstream({ content: () => success('content') });
+    const svc = makeService();
+
+    const bare = await svc.getContent(RECORD, makeTenantContext());
+    const prefixed = await svc.getContent(`edanmdm:${RECORD}`, makeTenantContext());
+
+    expect(up.count('content')).toBe(1);
+    expect(prefixed).toEqual(bare);
+    expect(prefixed.record.title).toBe('Test Object');
+  });
+
+  it('keys on the whole request URL: another page of the same query fetches', async () => {
+    const up = stubUpstream({ search: () => success('search') });
+    const svc = makeService();
+
+    await svc.search(SEARCH, makeTenantContext());
+    await svc.search({ ...SEARCH, start: 10 }, makeTenantContext());
+
+    expect(up.count('search')).toBe(2);
+    expect(new URL(up.fetchMock.mock.calls[1]![0]).searchParams.get('start')).toBe('10');
+  });
+
+  /** A route that never answers: only the request signal aborting ends it. */
+  const hung: Route = (init) => heldRoute(success('content')).route(init);
+
+  it.each([
+    [
+      'HTTP 429',
+      'search',
+      () => upstream({ error: { code: 'OVER_RATE_LIMIT', message: 'Try again later.' } }, 429),
+      JsonRpcErrorCode.RateLimited,
+    ],
+    [
+      'an error-in-200 rate-limit body',
+      'search',
+      () => upstream({ error: { code: 'OVER_RATE_LIMIT', message: 'Rate limit exceeded.' } }),
+      JsonRpcErrorCode.ServiceUnavailable,
+    ],
+    [
+      'an error-in-200 key body',
+      'content',
+      () => upstream({ error: { code: 'API_KEY_MISSING', message: 'No api_key was supplied.' } }),
+      JsonRpcErrorCode.InternalError,
+    ],
+    [
+      'HTTP 404',
+      'content',
+      () => upstream({ error: { code: 'NOT_FOUND', message: 'Record not found' } }, 404),
+      JsonRpcErrorCode.NotFound,
+    ],
+    [
+      'a 200 without a record',
+      'content',
+      () => upstream({ status: 200, responseCode: 1, response: null }),
+      JsonRpcErrorCode.NotFound,
+    ],
+    ['a timeout', 'search', hung, JsonRpcErrorCode.Timeout],
+    ['a timeout', 'content', hung, JsonRpcErrorCode.Timeout],
+  ] as const)(
+    'stores nothing after %s on %s — the next call fetches, and its success is stored',
+    async (_label, endpoint, failure, code) => {
+      let failing = true;
+      const up = stubUpstream({
+        [endpoint]: (init: RequestInit) => (failing ? failure(init) : success(endpoint)),
+      });
+      const svc = makeService();
+
+      expect(await codeOf(outcomeOf(() => callOn(svc, endpoint)))).toBe(code);
+      const failedRequests = up.count(endpoint);
+
+      failing = false;
+      await callOn(svc, endpoint);
+      await callOn(svc, endpoint);
+
+      expect(up.count(endpoint)).toBe(failedRequests + 1);
+    },
+  );
+
+  it('returns a 200 without a search response body unstored — the next call fetches', async () => {
+    let body: unknown = { status: 200, responseCode: 1 };
+    const up = stubUpstream({ search: () => upstream(body) });
+    const svc = makeService();
+
+    expect(await svc.search(SEARCH, makeTenantContext())).toEqual({ rows: [], rowCount: 0 });
+    body = makeSearchResponse();
+    await svc.search(SEARCH, makeTenantContext());
+    const third = await svc.search(SEARCH, makeTenantContext());
+
+    expect(up.count('search')).toBe(2);
+    expect(third.rowCount).toBe(42);
+  });
+
+  it.each(['search', 'content'] as const)(
+    'stores nothing from a cancelled request — the next call fetches (%s)',
+    async (endpoint) => {
+      const held = heldRoute(success(endpoint));
+      let route: Route = held.route;
+      const up = stubUpstream({ [endpoint]: (init: RequestInit) => route(init) });
+      const svc = makeService();
+      const controller = new AbortController();
+
+      const cancelled = callOn(svc, endpoint, cancellableContext(controller.signal)).catch(
+        (error: unknown) => error,
+      );
+      await held.arrived(1);
+      controller.abort();
+      expect(await codeOf(cancelled)).toBe(JsonRpcErrorCode.RequestCancelled);
+
+      route = () => success(endpoint);
+      await callOn(svc, endpoint);
+      await callOn(svc, endpoint);
+
+      expect(up.count(endpoint)).toBe(2);
+    },
+  );
+
+  it.each(['search', 'content'] as const)(
+    'makes one request for two concurrent identical calls; cancelling one leaves the other its result (%s)',
+    async (endpoint) => {
+      const held = heldRoute(success(endpoint));
+      const up = stubUpstream({ [endpoint]: held.route });
+      const svc = makeService();
+      const leaving = new AbortController();
+
+      const cancelled = callOn(svc, endpoint, cancellableContext(leaving.signal)).catch(
+        (error: unknown) => error,
+      );
+      const staying = callOn(svc, endpoint);
+      await held.arrived(1);
+      leaving.abort();
+
+      expect(await codeOf(cancelled)).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(held.signals[0]?.aborted).toBe(false);
+      held.release();
+      expect(await staying).toMatchObject(
+        endpoint === 'search' ? { rowCount: 42 } : { record: { title: 'Test Object' } },
+      );
+
+      // The surviving caller's answer was stored.
+      await callOn(svc, endpoint);
+      expect(up.count(endpoint)).toBe(1);
+    },
+  );
+
+  it('aborts the shared request once every caller has cancelled, and the next call starts afresh', async () => {
+    const held = heldRoute(success('content'));
+    let route: Route = held.route;
+    const up = stubUpstream({ content: (init: RequestInit) => route(init) });
+    const svc = makeService();
+    const first = new AbortController();
+    const second = new AbortController();
+
+    const firstCall = callOn(svc, 'content', cancellableContext(first.signal)).catch(
+      (error: unknown) => error,
+    );
+    const secondCall = callOn(svc, 'content', cancellableContext(second.signal)).catch(
+      (error: unknown) => error,
+    );
+    await held.arrived(1);
+    first.abort();
+    expect(held.signals[0]?.aborted).toBe(false);
+    second.abort();
+    expect(held.signals[0]?.aborted).toBe(true);
+    expect(await codeOf(firstCall)).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(await codeOf(secondCall)).toBe(JsonRpcErrorCode.RequestCancelled);
+
+    route = () => success('content');
+    expect(await callOn(svc, 'content')).toMatchObject({ record: { title: 'Test Object' } });
+    expect(up.count('content')).toBe(2);
+  });
+
+  it.each([
+    ['search', 3_600],
+    ['content', 86_400],
+  ] as const)(
+    'refetches %s once its default TTL of %i s has elapsed',
+    async (endpoint, ttlSeconds) => {
+      const up = stubUpstream({ [endpoint]: () => success(endpoint) });
+      const svc = makeService();
+      vi.useFakeTimers();
+
+      await callOn(svc, endpoint);
+      vi.setSystemTime(Date.now() + ttlSeconds * 1000 - 1);
+      await callOn(svc, endpoint);
+      expect(up.count(endpoint)).toBe(1);
+
+      vi.setSystemTime(Date.now() + 1);
+      await callOn(svc, endpoint);
+      expect(up.count(endpoint)).toBe(2);
+    },
+  );
+
+  describe('with a TTL of 0', () => {
+    /** A service whose config reads the stubbed TTL — the config memo is module-level. */
+    async function freshService(): Promise<SmithsonianService> {
+      vi.resetModules();
+      const { SmithsonianService: FreshService } = await import(
+        '@/services/smithsonian/smithsonian-service.js'
+      );
+      return new FreshService(createInMemoryStorage());
+    }
+
+    it.each([
+      ['search', 'SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS'],
+      ['content', 'SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS'],
+    ] as const)(
+      "fetches %s on every call, concurrent ones each on the caller's own signal",
+      async (endpoint, variable) => {
+        vi.stubEnv(variable, '0');
+        const svc = await freshService();
+        const held = heldRoute(success(endpoint));
+        const up = stubUpstream({ [endpoint]: held.route });
+        const leaving = new AbortController();
+
+        const cancelled = callOn(svc, endpoint, cancellableContext(leaving.signal)).catch(
+          (error: unknown) => error,
+        );
+        const staying = callOn(svc, endpoint);
+        await held.arrived(2);
+        leaving.abort();
+
+        expect(held.signals[0]?.aborted).toBe(true);
+        expect(held.signals[1]?.aborted).toBe(false);
+        expect(await codeOf(cancelled)).toBe(JsonRpcErrorCode.RequestCancelled);
+        held.release();
+        await staying;
+        await callOn(svc, endpoint);
+
+        expect(up.count(endpoint)).toBe(3);
+      },
+    );
+
+    it.each([
+      ['search', 'content', 'SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS'],
+      ['content', 'search', 'SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS'],
+    ] as const)('disables %s alone — %s stays cached', async (disabled, cached, variable) => {
+      vi.stubEnv(variable, '0');
+      const svc = await freshService();
+      const up = stubUpstream({
+        search: () => success('search'),
+        content: () => success('content'),
+      });
+
+      for (let call = 0; call < 2; call++) {
+        await callOn(svc, disabled);
+        await callOn(svc, cached);
+      }
+
+      expect(up.count(disabled)).toBe(2);
+      expect(up.count(cached)).toBe(1);
+    });
+  });
+
+  describe('through the tools', () => {
+    beforeEach(() => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+    });
+
+    it('get_object, get_media, and find_related on one record_id make one /content request', async () => {
+      const up = stubUpstream({
+        content: () => success('content'),
+        search: () => success('search'),
+      });
+
+      const object = await runToolContract(smithsonianGetObject, { id: RECORD });
+      const media = await runToolContract(smithsonianGetMedia, { id: RECORD });
+      const related = await runToolContract(smithsonianFindRelated, { id: RECORD });
+
+      for (const result of [object, media, related]) expect(result.isError).not.toBe(true);
+      expect(up.count('content')).toBe(1);
+    });
+
+    it('a repeated search_objects call makes one /search request and returns the same output', async () => {
+      const up = stubUpstream({ search: () => success('search') });
+
+      const first = await runToolContract(smithsonianSearchObjects, { query: 'aircraft' });
+      const second = await runToolContract(smithsonianSearchObjects, { query: 'aircraft' });
+
+      expect(first.isError).not.toBe(true);
+      expect(up.count('search')).toBe(1);
+      expect(second.structuredContent).toEqual(first.structuredContent);
+      expect(second.content).toEqual(first.content);
+    });
+  });
+
+  describe('the retry loop each read runs', () => {
+    /** An error-in-200 rate-limit body: transient, so the loop backs off 2 s and retries. */
+    const rateLimited: Route = () =>
+      upstream({ error: { code: 'OVER_RATE_LIMIT', message: 'Rate limit exceeded.' } });
+
+    it.each([
+      ['search', 'SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS'],
+      ['content', 'SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS'],
+    ] as const)(
+      'releases a caller cancelled during a backoff at once, with no further request (%s, TTL 0)',
+      async (endpoint, variable) => {
+        vi.stubEnv(variable, '0');
+        vi.resetModules();
+        const { SmithsonianService: FreshService } = await import(
+          '@/services/smithsonian/smithsonian-service.js'
+        );
+        const svc = new FreshService(createInMemoryStorage());
+        const up = stubUpstream({ [endpoint]: rateLimited });
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        let settled = false;
+
+        const pending = callOn(svc, endpoint, cancellableContext(controller.signal))
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(up.count(endpoint)).toBe(1);
+        controller.abort();
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(settled).toBe(true);
+        expect(((await pending) as Error).name).toBe('AbortError');
+        await vi.runAllTimersAsync();
+        expect(up.count(endpoint)).toBe(1);
+      },
+    );
+
+    it.each(['search', 'content'] as const)(
+      "ends the shared request's backoff once its last caller leaves, leaving no timer running (%s)",
+      async (endpoint) => {
+        const up = stubUpstream({ [endpoint]: rateLimited });
+        vi.useFakeTimers();
+        const controller = new AbortController();
+
+        const pending = callOn(
+          makeService(),
+          endpoint,
+          cancellableContext(controller.signal),
+        ).catch((error: unknown) => error);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(up.count(endpoint)).toBe(1);
+        controller.abort();
+        expect(await codeOf(pending)).toBe(JsonRpcErrorCode.RequestCancelled);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(vi.getTimerCount()).toBe(0);
+        expect(up.count(endpoint)).toBe(1);
+      },
+    );
+
+    it.each(['search', 'content'] as const)(
+      'gives up on a hung upstream within one 50 s deadline across attempts and backoff (%s)',
+      async (endpoint) => {
+        stubUpstream({ [endpoint]: hung });
+        vi.useFakeTimers();
+        let settled = false;
+
+        const pending = callOn(makeService(), endpoint)
+          .catch((error: unknown) => error)
+          .finally(() => {
+            settled = true;
+          });
+        await vi.advanceTimersByTimeAsync(50_000);
+
+        expect(settled).toBe(true);
+        const error = (await pending) as { code?: number; data?: { reason?: string } };
+        expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+        expect(error.data?.reason).toBe('retry_deadline_exceeded');
+      },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Open Access mirror routing (issue #66)
+// ---------------------------------------------------------------------------
+
+/**
+ * Real `metadata/edan/` lines. The mirror below ingests lines 0–4 as one shard and the rest as
+ * the next, so its rowid order is line order.
+ */
+const OA_FIXTURE_LINES = readFileSync(
+  new URL('./fixtures/oa-bulk-lines.jsonl', import.meta.url),
+  'utf8',
+)
+  .split('\n')
+  .filter(Boolean);
+
+describe('Open Access mirror routing (issue #66)', () => {
+  /** The LastModified the bucket fake lists each shard with, which the sync records as the snapshot. */
+  const SNAPSHOT = '2026-10-26T07:25:06.000Z';
+  const FROM_MIRROR = { source: 'oa_mirror', snapshot: SNAPSHOT };
+  const FROM_LIVE = { source: 'edan_api' };
+  /** Fixture line 0. */
+  const MIRRORED = 'nasm_A19820121000';
+  /** In no fixture line: only the live API holds it. */
+  const LIVE_ONLY = 'nasm_TEST001';
+  /** Matches fixture lines 0, 3, and 6. */
+  const ONLINE_CC0: FacetFilter[] = [{ field: 'online_only' }, { field: 'cc0' }];
+
+  type Read = 'getContent' | 'search';
+  const ENDPOINT = { getContent: 'content', search: 'search' } as const satisfies Record<
+    Read,
+    Endpoint
+  >;
+
+  let t: TestMirror;
+
+  function withMirror(mirror: TestMirror): SmithsonianService {
+    return new SmithsonianService(createInMemoryStorage(), mirror.reader);
+  }
+
+  /** A read the mirror can answer: a record it holds, or a filter-only search. */
+  function mirrorable(svc: SmithsonianService, read: Read) {
+    return read === 'getContent'
+      ? svc.getContent(MIRRORED, makeTenantContext())
+      : svc.search({ query: '', rows: 10, start: 0, filters: ONLINE_CC0 }, makeTenantContext());
+  }
+
+  /** Both live routes, each answering the same success every time. */
+  function stubLive() {
+    return stubUpstream({
+      content: () => upstream(makeContentResponse(MIRRORED)),
+      search: () => upstream(makeSearchResponse()),
+    });
+  }
+
+  beforeEach(async () => {
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+    const bucket = new FakeBucket();
+    bucket.put('metadata/edan/aaa/00.txt', OA_FIXTURE_LINES.slice(0, 5));
+    bucket.put('metadata/edan/bbb/00.txt', OA_FIXTURE_LINES.slice(5));
+    vi.stubGlobal('fetch', bucket.fetch);
+    t = openTestMirror();
+    await t.mirror.runSync({ mode: 'init' });
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    await t.close();
+  });
+
+  it.each([MIRRORED, `edanmdm:${MIRRORED}`])(
+    'getContent(%s) answers a record the mirror holds from the mirror, with its snapshot and no EDAN request',
+    async (id) => {
+      const up = stubUpstream({});
+
+      const read = await withMirror(t).getContent(id, makeTenantContext());
+
+      expect(up.fetchMock).not.toHaveBeenCalled();
+      expect(read.provenance).toStrictEqual(FROM_MIRROR);
+      expect(read.record.url).toBe(`edanmdm:${MIRRORED}`);
+      expect(read.record.title).toBe('Missile, Cruise, Air-launched, Flight Test, AGM-86B ALCM');
+    },
+  );
+
+  it('getContent sends a record the mirror lacks to the live API, marked edan_api', async () => {
+    const up = stubUpstream({ content: () => upstream(makeContentResponse(LIVE_ONLY)) });
+
+    const read = await withMirror(t).getContent(LIVE_ONLY, makeTenantContext());
+
+    expect(up.count('content')).toBe(1);
+    expect(read.provenance).toStrictEqual(FROM_LIVE);
+    expect(read.record.title).toBe('Test Object');
+  });
+
+  it('getContent still rejects a record neither the mirror nor the live API holds as not_found', async () => {
+    const up = stubUpstream({
+      content: () => upstream({ error: { code: 'NOT_FOUND', message: 'Record not found' } }, 404),
+    });
+
+    await expect(
+      withMirror(t).getContent('nasm_MISSING', makeTenantContext()),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound, data: { reason: 'not_found' } });
+    expect(up.count('content')).toBe(1);
+  });
+
+  it.each(['getContent', 'search'] as const)(
+    '%s answers live when the store fails, and logs the failure at error once',
+    async (read) => {
+      const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      (await t.store.raw()).exec('DROP TABLE objects');
+      const up = stubLive();
+
+      const result = await mirrorable(withMirror(t), read);
+
+      expect(up.count(ENDPOINT[read])).toBe(1);
+      expect(result.provenance).toStrictEqual(FROM_LIVE);
+      expect(errors).toHaveBeenCalledTimes(1);
+      const [message, error] = errors.mock.calls[0]!;
+      expect(message).toBe('Open Access mirror read failed; answering from the live API.');
+      expect((error as Error).message).toMatch(/no such table: objects/);
+    },
+  );
+
+  it.each(['getContent', 'search'] as const)(
+    '%s answers live, without logging an error, from a mirror that has never completed a sync',
+    async (read) => {
+      const errors = vi.spyOn(logger, 'error').mockImplementation(() => {});
+      const unsynced = openTestMirror();
+      try {
+        const up = stubLive();
+
+        const result = await mirrorable(withMirror(unsynced), read);
+
+        expect(up.count(ENDPOINT[read])).toBe(1);
+        expect(result.provenance).toStrictEqual(FROM_LIVE);
+        expect(errors).not.toHaveBeenCalled();
+      } finally {
+        await unsynced.close();
+      }
+    },
+  );
+
+  it.each(['', '*'])(
+    'search serves query %j with filters from the mirror: rows in ingest order, rowCount the facet count, no EDAN request',
+    async (query) => {
+      const up = stubUpstream({});
+
+      const page = await withMirror(t).search(
+        { query, rows: 2, start: 0, filters: ONLINE_CC0 },
+        makeTenantContext(),
+      );
+
+      expect(up.fetchMock).not.toHaveBeenCalled();
+      expect(page.rows.map((r) => r.record_id)).toEqual(['nasm_A19820121000', 'nmnhvz_14945304']);
+      expect(page.rowCount).toBe(3);
+      expect(page.provenance).toStrictEqual(FROM_MIRROR);
+    },
+  );
+
+  it.each([
+    ['no record matches', [{ field: 'unit_code', value: 'SAO' }], 0, 0],
+    ['the page starts past the last match', ONLINE_CC0, 3, 3],
+  ] as const)(
+    'search serves an empty page from the mirror when %s',
+    async (_label, filters, start, total) => {
+      const up = stubUpstream({});
+
+      const page = await withMirror(t).search(
+        { query: '', rows: 10, start, filters },
+        makeTenantContext(),
+      );
+
+      expect(up.fetchMock).not.toHaveBeenCalled();
+      expect(page.rows).toEqual([]);
+      expect(page.rowCount).toBe(total);
+      expect(page.provenance).toStrictEqual(FROM_MIRROR);
+    },
+  );
+
+  it('search sends free text with filters to the live API, the filters ANDed into q', async () => {
+    const up = stubUpstream({ search: () => upstream(makeSearchResponse()) });
+
+    // The mirror holds one NASM record titled "Missile, …"; the live API answers 42.
+    const page = await withMirror(t).search(
+      { query: 'missile', rows: 10, start: 0, filters: [{ field: 'unit_code', value: 'NASM' }] },
+      makeTenantContext(),
+    );
+
+    expect(up.count('search')).toBe(1);
+    expect(new URL(up.fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(
+      'missile AND unit_code:"NASM"',
+    );
+    expect(page.rowCount).toBe(42);
+    expect(page.provenance).toStrictEqual(FROM_LIVE);
+  });
+
+  it('serves the live answer to a mirror miss from the response cache on repeat', async () => {
+    const up = stubUpstream({ content: () => upstream(makeContentResponse(LIVE_ONLY)) });
+    const svc = withMirror(t);
+
+    const first = await svc.getContent(LIVE_ONLY, makeTenantContext());
+    const second = await svc.getContent(LIVE_ONLY, makeTenantContext());
+
+    expect(up.count('content')).toBe(1);
+    expect(second).toEqual(first);
+    expect(second.provenance).toStrictEqual(FROM_LIVE);
+  });
+
+  it('reports no provenance on either read without a mirror', async () => {
+    const up = stubUpstream({
+      content: () => upstream(makeContentResponse(LIVE_ONLY)),
+      search: () => upstream(makeSearchResponse()),
+    });
+    const svc = makeService();
+
+    const read = await svc.getContent(LIVE_ONLY, makeTenantContext());
+    const page = await svc.search(
+      { query: '', rows: 10, start: 0, filters: ONLINE_CC0 },
+      makeTenantContext(),
+    );
+
+    expect(up.count('content')).toBe(1);
+    expect(up.count('search')).toBe(1);
+    expect('provenance' in read).toBe(false);
+    expect('provenance' in page).toBe(false);
+    expect(read.record.title).toBe('Test Object');
+    expect(page.rowCount).toBe(42);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // luceneField — Lucene term construction (issue #42)
 // ---------------------------------------------------------------------------
 
@@ -1993,5 +2765,334 @@ describe('toPlainText', () => {
 
   it('handles the empty string', () => {
     expect(toPlainText('')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Indexed unit code and holding museum (issue #64)
+// ---------------------------------------------------------------------------
+
+/**
+ * A record in the shape every `OCIO_DPO3D` record carries: top-level `unitCode` is
+ * the code EDAN indexes (what a `unit_code` filter matches), while
+ * `descriptiveNonRepeating.unit_code` is the record's own and `data_source` names
+ * the unit that holds the object. Passing `undefined` omits the field.
+ */
+function makeUnitRecord(
+  indexed: string | undefined,
+  recordCode: string | undefined,
+  dataSource: string | undefined,
+): RawEDAN {
+  return {
+    id: 'ld1-unit',
+    title: 'Cassiopeia A Supernova Remnant',
+    ...(indexed !== undefined && { unitCode: indexed }),
+    url: 'edanmdm:dpo_3d_200012',
+    content: {
+      descriptiveNonRepeating: {
+        record_ID: 'dpo_3d_200012',
+        ...(recordCode !== undefined && { unit_code: recordCode }),
+        ...(dataSource !== undefined && { data_source: dataSource }),
+        metadata_usage: { access: 'CC0' },
+      },
+    },
+  };
+}
+
+const OCIO_NAME =
+  'Office of the Chief Information Officer - Digitization Program Office (3D digitization)';
+
+describe('indexed unit code and holding museum (issue #64)', () => {
+  it('leaves a record whose two codes agree unchanged, with no holding museum', () => {
+    const svc = makeService();
+    const raw = makeUnitRecord('NASM', 'NASM', 'National Air and Space Museum');
+    for (const projected of [svc.toSummary(raw), svc.toFullObject(raw)]) {
+      expect(projected.unit_code).toBe('NASM');
+      expect(projected.museum_name).toBe('National Air and Space Museum');
+      expect(projected).not.toHaveProperty('holding_museum_name');
+    }
+  });
+
+  it.each([
+    // Every record code the 112 OCIO_DPO3D records carry, with its data_source. Eight of the
+    // SERC records give the bare code as their data_source, the ninth the unit's name.
+    ['SAO', 'Smithsonian Astrophysical Observatory', 'Smithsonian Astrophysical Observatory'],
+    ['DPO', 'NMNH - Paleobiology Dept.', 'NMNH - Paleobiology Dept.'],
+    ['DPO', 'Cooper Hewitt, Smithsonian Design Museum', 'Cooper Hewitt, Smithsonian Design Museum'],
+    ['NMNHANTHRO', 'NMNH - Anthropology Dept.', 'NMNH - Anthropology Dept.'],
+    ['SERC', 'SERC', 'Smithsonian Environmental Research Center'],
+    [
+      'SERC',
+      'Smithsonian Environmental Research Center',
+      'Smithsonian Environmental Research Center',
+    ],
+    ['NMNHINV', 'NMNH - Invertebrate Zoology Dept.', 'NMNH - Invertebrate Zoology Dept.'],
+    ['NMAL', 'National Museum of the American Latino', 'National Museum of the American Latino'],
+    // A data_source that is another known unit code resolves the same way.
+    ['DPO', 'NMNHPALEO', 'NMNH - Paleobiology Dept.'],
+    // Only the name table's own keys resolve; an inherited property name stays as given.
+    ['DPO', 'constructor', 'constructor'],
+  ])(
+    'reports the indexed code and the holding unit for record code %s (data_source %s)',
+    (recordCode, dataSource, holding) => {
+      const svc = makeService();
+      const raw = makeUnitRecord('OCIO_DPO3D', recordCode, dataSource);
+      for (const projected of [svc.toSummary(raw), svc.toFullObject(raw)]) {
+        expect(projected.unit_code).toBe('OCIO_DPO3D');
+        expect(projected.museum_name).toBe(OCIO_NAME);
+        expect(projected.holding_museum_name).toBe(holding);
+      }
+    },
+  );
+
+  it('echoes an unmapped indexed code as the museum name, never an inherited property', () => {
+    const svc = makeService();
+    const raw = makeUnitRecord('toString', 'toString', undefined);
+    for (const projected of [svc.toSummary(raw), svc.toFullObject(raw)]) {
+      expect(projected.unit_code).toBe('toString');
+      expect(projected.museum_name).toBe('toString');
+    }
+  });
+
+  it('falls back to the record code when the indexed unitCode is absent', () => {
+    const svc = makeService();
+    const raw = makeUnitRecord(undefined, 'NMNHPALEO', 'NMNH - Paleobiology Dept.');
+    for (const projected of [svc.toSummary(raw), svc.toFullObject(raw)]) {
+      expect(projected.unit_code).toBe('NMNHPALEO');
+      expect(projected.museum_name).toBe('NMNH - Paleobiology Dept.');
+      expect(projected).not.toHaveProperty('holding_museum_name');
+    }
+  });
+
+  it('reads the indexed code when the record carries no code of its own', () => {
+    const svc = makeService();
+    const raw = makeUnitRecord('OCIO_DPO3D', undefined, 'Smithsonian Astrophysical Observatory');
+    for (const projected of [svc.toSummary(raw), svc.toFullObject(raw)]) {
+      expect(projected.unit_code).toBe('OCIO_DPO3D');
+      expect(projected).not.toHaveProperty('holding_museum_name');
+    }
+  });
+
+  it.each([
+    ['absent', undefined],
+    ['empty', ''],
+    ['blank', '   '],
+  ])('omits the holding museum when data_source is %s, codes still differing', (_, dataSource) => {
+    const svc = makeService();
+    const raw = makeUnitRecord('OCIO_DPO3D', 'SAO', dataSource);
+    for (const projected of [svc.toSummary(raw), svc.toFullObject(raw)]) {
+      expect(projected.unit_code).toBe('OCIO_DPO3D');
+      expect(projected).not.toHaveProperty('holding_museum_name');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Non-image media on media_summary (issue #62)
+// ---------------------------------------------------------------------------
+
+/** A record whose `online_media.media[]` is exactly `media`, counted as given. */
+function makeMediaRecord(
+  media: NonNullable<RawEDAN['content']>['descriptiveNonRepeating'],
+): RawEDAN {
+  return {
+    title: 'Media Record',
+    unitCode: 'NMNHMAMMALS',
+    content: { descriptiveNonRepeating: { record_ID: 'media_TEST', ...media } },
+  };
+}
+
+const VOYAGER_URL = 'https://3d-api.si.edu/voyager/3d_package:732d123d-7a35-411b-a4e1-5e355adcacf8';
+
+describe('media_summary.non_image_media (issue #62)', () => {
+  it('counts an untyped item with a media id as an image, as smithsonian_get_media does', () => {
+    const svc = makeService();
+    const raw = makeMediaRecord({
+      online_media: {
+        mediaCount: 2,
+        media: [
+          { idsId: 'NMNH-UNTYPED', usage: { access: 'CC0' } },
+          { idsId: 'NMNH-TYPED', type: 'Images', usage: { access: 'CC0' } },
+        ],
+      },
+    });
+    expect(svc.toImageItems(raw).map((img) => img.media_id)).toEqual([
+      'NMNH-UNTYPED',
+      'NMNH-TYPED',
+    ]);
+    expect(svc.toFullObject(raw).media_summary.cc0_image_count).toBe(2);
+  });
+
+  it('lists a 3D package by its viewer URL, never its per-file resources (dpo_3d_200012)', () => {
+    const raw = makeMediaRecord({
+      online_media: {
+        mediaCount: 1,
+        media: [
+          {
+            id: '3d_package:732d123d-7a35-411b-a4e1-5e355adcacf8',
+            type: '3d_voyager',
+            content: VOYAGER_URL,
+            thumbnail:
+              'https://3d-api.si.edu/content/document/3d_package:732d123d-7a35-411b-a4e1-5e355adcacf8/scene-image-thumb.jpg',
+            usage: { access: 'CC0' },
+            resources: [
+              {
+                url: 'https://3d-api.si.edu/content/document/3d_package:732d123d-7a35-411b-a4e1-5e355adcacf8/resources/CASSIOPEIAA-100k-2048_std.usdz',
+              },
+              {
+                url: 'https://3d-api.si.edu/content/document/3d_package:732d123d-7a35-411b-a4e1-5e355adcacf8/resources/CASSIOPEIAA-100k-2048_std.glb',
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const summary = makeService().toFullObject(raw).media_summary;
+    expect(summary.non_image_media).toEqual([
+      { type: '3d_voyager', url: VOYAGER_URL, is_cc0: true },
+    ]);
+    expect(summary.cc0_image_count).toBe(0);
+  });
+
+  it('lists both scanned-book links of siris_sil_893158', () => {
+    const raw = makeMediaRecord({
+      online_media: {
+        mediaCount: 2,
+        media: [
+          {
+            id: 'media:',
+            type: 'Scanned books',
+            content: 'https://doi.org/10.5479/sil.893158.39088019035187',
+            usage: { access: 'CC0' },
+          },
+          {
+            id: 'media:',
+            type: 'Scanned books',
+            content: 'https://biodiversitylibrary.org/bibliography/179335',
+            usage: { access: 'CC0' },
+          },
+        ],
+      },
+    });
+    expect(makeService().toFullObject(raw).media_summary.non_image_media).toEqual([
+      {
+        type: 'Scanned books',
+        url: 'https://doi.org/10.5479/sil.893158.39088019035187',
+        is_cc0: true,
+      },
+      {
+        type: 'Scanned books',
+        url: 'https://biodiversitylibrary.org/bibliography/179335',
+        is_cc0: true,
+      },
+    ]);
+  });
+
+  it('lists the field-book viewer and PDF of fbr_item_MODSI843', () => {
+    const raw = makeMediaRecord({
+      online_media: {
+        mediaCount: 2,
+        media: [
+          {
+            type: 'slideshowXML',
+            content:
+              'http://siarchives.si.edu/sites/default/files/viewers/csc/viewer_MODSI843_007267_B02_F08.xml',
+            usage: { access: 'CC0' },
+          },
+          {
+            type: 'Electronic resource',
+            content:
+              'http://siarchives.si.edu/sites/default/files/media/SIA-SIA_007267_B02_F08.pdf',
+            usage: { access: 'CC0' },
+          },
+        ],
+      },
+    });
+    expect(
+      makeService()
+        .toFullObject(raw)
+        .media_summary.non_image_media.map((m) => m.type),
+    ).toEqual(['slideshowXML', 'Electronic resource']);
+  });
+
+  it('lists all 49 3D packages beside 13 images (nmnhvz_7047834) — the two selections partition media[]', () => {
+    const images = Array.from({ length: 13 }, (_, i) => ({
+      id: `media-${i}`,
+      idsId: `NMNH-IMG-${i}`,
+      type: 'Images',
+      usage: { access: 'CC0' },
+    }));
+    const packages = Array.from({ length: 49 }, (_, i) => ({
+      id: `3d_package:${i}`,
+      type: '3d_voyager',
+      content: `https://3d-api.si.edu/voyager/3d_package:${i}`,
+      usage: { access: 'CC0' },
+    }));
+    const svc = makeService();
+    const raw = makeMediaRecord({
+      online_media: { mediaCount: 62, media: [...images, ...packages] },
+    });
+    const summary = svc.toFullObject(raw).media_summary;
+    expect(summary.count).toBe(62);
+    expect(summary.cc0_image_count).toBe(13);
+    expect(summary.non_image_media).toHaveLength(49);
+    expect(summary.non_image_media.map((m) => m.url)).toEqual(packages.map((p) => p.content));
+    expect(svc.toImageItems(raw).length + summary.non_image_media.length).toBe(62);
+  });
+
+  it('puts every item on exactly one side: Images and untyped are images, anything else is not', () => {
+    const svc = makeService();
+    const raw = makeMediaRecord({
+      online_media: {
+        mediaCount: 5,
+        media: [
+          { idsId: 'A', type: 'Images', usage: { access: 'CC0' } },
+          { idsId: 'B', usage: { access: 'CC0' } },
+          { idsId: 'C', type: '', usage: { access: 'CC0' } },
+          { idsId: 'D', type: 'images', content: 'https://example.si.edu/d' },
+          { idsId: 'E', type: '3d_voyager', content: 'https://example.si.edu/e' },
+        ],
+      },
+    });
+    expect(svc.toImageItems(raw).map((img) => img.media_id)).toEqual(['A', 'B', 'C']);
+    expect(svc.toFullObject(raw).media_summary.non_image_media.map((m) => m.type)).toEqual([
+      'images',
+      '3d_voyager',
+    ]);
+  });
+
+  it('omits url when the item has no content, and reads CC0 from usage.access as images do', () => {
+    const raw = makeMediaRecord({
+      online_media: {
+        mediaCount: 4,
+        media: [
+          { type: '3d_voyager', usage: { access: 'CC0' } },
+          { type: 'Scanned books', content: '', usage: { access: 'Usage Conditions Apply' } },
+          { type: 'Electronic resource', content: 'https://example.si.edu/r.pdf' },
+          { type: 'slideshowXML', content: 'https://example.si.edu/v.xml', usage: {} },
+        ],
+      },
+    });
+    const listed = makeService().toFullObject(raw).media_summary.non_image_media;
+    expect(listed).toEqual([
+      { type: '3d_voyager', is_cc0: true },
+      { type: 'Scanned books', is_cc0: false },
+      { type: 'Electronic resource', url: 'https://example.si.edu/r.pdf', is_cc0: false },
+      { type: 'slideshowXML', url: 'https://example.si.edu/v.xml', is_cc0: false },
+    ]);
+    expect(listed[0]).not.toHaveProperty('url');
+    expect(listed[1]).not.toHaveProperty('url');
+  });
+
+  it('is empty when the object has no media, or only images', () => {
+    const svc = makeService();
+    expect(svc.toFullObject({}).media_summary.non_image_media).toEqual([]);
+    const imagesOnly = makeMediaRecord({
+      online_media: {
+        mediaCount: 1,
+        media: [{ idsId: 'IMG', type: 'Images', usage: { access: 'CC0' } }],
+      },
+    });
+    expect(svc.toFullObject(imagesOnly).media_summary.non_image_media).toEqual([]);
   });
 });

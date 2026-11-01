@@ -4,19 +4,31 @@
  * `format()` and enrichment, and builds the dual-surface envelope a client
  * actually receives. The per-tool suites beside this file call handlers
  * directly with pre-parsed input, so they never exercise argument validation,
- * the error envelope, or the `content[]` twin of `structuredContent`.
+ * the error envelope, or the `content[]` twin of `structuredContent`. The Open Access
+ * mirror block also reads the output schemas a real `tools/list` advertises.
  * @module tests/mcp-server/tools/definitions/tool-contract.test
  */
 
+import { readFileSync } from 'node:fs';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { createInMemoryStorage, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createWorkerHandler } from '@cyanheads/mcp-ts-core/worker';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadClampSwitch } from '@/config/server-config.js';
+import { smithsonianBrowseCategory } from '@/mcp-server/tools/definitions/smithsonian-browse-category.tool.js';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
 import { smithsonianGetMedia } from '@/mcp-server/tools/definitions/smithsonian-get-media.tool.js';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import { initSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import type { RawEDAN } from '@/services/smithsonian/types.js';
+import {
+  bulkLine,
+  FakeBucket,
+  openTestMirror,
+  type TestMirror,
+} from '../../../services/smithsonian/oa-bucket-fake.js';
 
 // ---------------------------------------------------------------------------
 // Upstream stubs
@@ -93,6 +105,29 @@ function errorOf(result: { structuredContent?: unknown }): {
 } {
   const sc = result.structuredContent as { error?: unknown } | undefined;
   return sc?.error as ReturnType<typeof errorOf>;
+}
+
+interface AdvertisedProperty {
+  additionalProperties?: boolean;
+  description?: string;
+  maximum?: number;
+  properties?: Record<string, AdvertisedProperty>;
+  type?: string;
+}
+
+/**
+ * The input schema `tools/list` advertises: the SDK reads it through the schema's
+ * `~standard.jsonSchema.input` at draft 2020-12, and the wire carries its JSON.
+ */
+function advertisedInput(def: { input: unknown }): {
+  properties: Record<string, AdvertisedProperty>;
+} {
+  const std = (
+    def.input as {
+      '~standard': { jsonSchema: { input: (options: { target: string }) => unknown } };
+    }
+  )['~standard'];
+  return JSON.parse(JSON.stringify(std.jsonSchema.input({ target: 'draft-2020-12' })));
 }
 
 /** The `recovery` string a tool declares for one reason. */
@@ -306,14 +341,75 @@ describe('tool contract boundary', () => {
       expect(text(result)).toContain('field');
     });
 
-    it('rejects a numeric bound past its maximum', async () => {
-      const result = await runToolContract(smithsonianSearchObjects, {
-        query: 'aircraft',
-        rows: 101,
-      } as never);
+    describe('with SMITHSONIAN_CLAMP_LIMITS=false', () => {
+      afterEach(() => {
+        vi.unstubAllEnvs();
+        loadClampSwitch();
+      });
 
-      expect(errorOf(result).code).toBe(-32602);
-      expect(text(result)).toContain('rows');
+      it('rejects a numeric bound past its maximum', async () => {
+        vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+        loadClampSwitch();
+        const fetchMock = vi.fn().mockRejectedValue(new Error('unmocked fetch'));
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await runToolContract(smithsonianSearchObjects, {
+          query: 'aircraft',
+          rows: 1001,
+        });
+
+        expect(errorOf(result).code).toBe(-32602);
+        expect(errorOf(result).data?.reason).toBe('invalid_arguments');
+        expect(text(result)).toContain('rows');
+        expect(fetchMock).not.toHaveBeenCalled();
+      });
+
+      it('advertises the search rows cap as the schema maximum', () => {
+        vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+        loadClampSwitch();
+
+        const rows = advertisedInput(smithsonianSearchObjects).properties.rows;
+        expect(rows).toMatchObject({ type: 'integer', maximum: 1000 });
+      });
+    });
+
+    it('advertises the search rows field with no maximum by default', () => {
+      const rows = advertisedInput(smithsonianSearchObjects).properties.rows;
+      expect(rows?.type).toBe('integer');
+      expect(rows).not.toHaveProperty('maximum');
+      expect(rows?.description).toContain('1000');
+    });
+
+    it.each(['unit_cod', 'unitCode'])(
+      'rejects the unknown filters key %s by name before any upstream request',
+      async (key) => {
+        const fetchMock = vi.fn().mockRejectedValue(new Error('unmocked fetch'));
+        vi.stubGlobal('fetch', fetchMock);
+
+        const result = await runToolContract(smithsonianSearchObjects, {
+          query: 'quilt',
+          filters: { [key]: 'NMAH' },
+          rows: 3,
+        } as never);
+
+        const error = errorOf(result);
+        expect(error.code).toBe(-32602);
+        expect(error.data?.reason).toBe('invalid_arguments');
+        const accepted =
+          'unit_code, object_type, date, culture, place, topic, name, online_only, scientific_name, online_media_type, cc0_only';
+        for (const surface of [error.data?.recovery?.hint ?? '', text(result)]) {
+          expect(surface).toContain(`filters.${key}`);
+          expect(surface).toContain(accepted);
+        }
+        expect(text(result)).toContain('Recovery:');
+        expect(fetchMock).not.toHaveBeenCalled();
+      },
+    );
+
+    it('advertises the search filters object as closed', () => {
+      const filters = advertisedInput(smithsonianSearchObjects).properties.filters;
+      expect(filters?.additionalProperties).toBe(false);
+      expect(Object.keys(filters?.properties ?? {})).toContain('unit_code');
     });
   });
 
@@ -454,6 +550,431 @@ describe('tool contract boundary', () => {
 
       expect(result.isError).toBeFalsy();
       expect(result.structuredContent).toMatchObject({ objects: [], total_count: 40 });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Open Access mirror provenance (issue #66)
+// ---------------------------------------------------------------------------
+
+/** Real `metadata/edan/` lines (2026-10-26 publish): eight `edanmdm` records and one `ead_component`. */
+const FIXTURE_LINES = readFileSync(
+  new URL('../../../services/smithsonian/fixtures/oa-bulk-lines.jsonl', import.meta.url),
+  'utf8',
+)
+  .split('\n')
+  .filter(Boolean);
+const FIXTURE_RECORDS = FIXTURE_LINES.map((line) => JSON.parse(line) as RawEDAN).filter(
+  (record) => record.type === 'edanmdm',
+);
+
+/** The live API's path under the default base URL. */
+const EDAN_PATH = '/openaccess/api/v1.0';
+
+type EdanEndpoint = 'search' | 'content';
+
+/**
+ * Stub the live Smithsonian API, routed by hostname and pathname: `/search` answers with the
+ * fixture records, `/content/{id}` with the fixture record that id names. Every other request
+ * rejects as unmocked; `requests` lists the ones an endpoint answered.
+ */
+function stubEdan() {
+  const answered: Array<{ endpoint: EdanEndpoint; url: URL }> = [];
+  const fetchMock = vi.fn(async (input: string | URL) => {
+    const url = new URL(input);
+    if (url.hostname !== 'api.si.edu') throw new Error('unmocked fetch');
+    if (url.pathname === `${EDAN_PATH}/search`) {
+      answered.push({ endpoint: 'search', url });
+      return Response.json({
+        status: 200,
+        response: { rows: FIXTURE_RECORDS, rowCount: FIXTURE_RECORDS.length },
+      });
+    }
+    const contentPrefix = `${EDAN_PATH}/content/`;
+    const id = url.pathname.startsWith(contentPrefix)
+      ? decodeURIComponent(url.pathname.slice(contentPrefix.length))
+      : undefined;
+    const record = FIXTURE_RECORDS.find((r) => r.url === id);
+    if (!record) throw new Error('unmocked fetch');
+    answered.push({ endpoint: 'content', url });
+    return Response.json({ status: 200, response: record });
+  });
+  vi.stubGlobal('fetch', fetchMock);
+  return {
+    fetchMock,
+    requests: (endpoint: EdanEndpoint) =>
+      answered.filter((r) => r.endpoint === endpoint).map((r) => r.url),
+  };
+}
+
+/** The fields these tests read off a successful `structuredContent`. */
+interface Answer {
+  mirror_snapshot?: string;
+  notice?: string;
+  objects?: Array<{ record_id: string }>;
+  record_id?: string;
+  sample_objects?: Array<{ record_id: string }>;
+  sources?: string[];
+  total_count?: number;
+}
+
+const answerOf = (result: { structuredContent?: unknown }) => result.structuredContent as Answer;
+
+/** The `content[]` line that opens with `**<label>:**`, or undefined. */
+function trailer(result: { content?: unknown }, label: string): string | undefined {
+  return text(result)
+    .split('\n')
+    .find((line) => line.startsWith(`**${label}:**`));
+}
+
+describe('Open Access mirror provenance (issue #66)', () => {
+  const SNAPSHOT = '2026-10-26T07:25:06.000Z';
+  const MIRROR_SENTENCE =
+    "Rows served from the Smithsonian Open Access mirror (snapshot of 2026-10-26) are in mirror order, not the live API's.";
+
+  let t: TestMirror;
+
+  beforeAll(async () => {
+    const bucket = new FakeBucket();
+    vi.stubGlobal('fetch', bucket.fetch);
+    t = openTestMirror();
+    bucket.put('metadata/edan/aaa/00.txt', FIXTURE_LINES.slice(0, 5));
+    bucket.put('metadata/edan/bbb/00.txt', FIXTURE_LINES.slice(5));
+    // 1,001 records under unit BIG: one past the 1,000-row page cap, so a clamped page truncates.
+    bucket.put(
+      'metadata/edan/big/00.txt',
+      Array.from({ length: 1001 }, (_, i) =>
+        bulkLine(`big_${i}`, {
+          unitCode: 'BIG',
+          content: { descriptiveNonRepeating: { unit_code: 'BIG', record_ID: `big_${i}` } },
+        }),
+      ),
+    );
+    await t.mirror.runSync({ mode: 'init' });
+    vi.unstubAllGlobals();
+  });
+
+  afterAll(async () => {
+    await t.close();
+  });
+
+  beforeEach(() => {
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  /** Each read the mirror can answer, plus a free-text search it cannot; run with it on and off. */
+  const CALLS = {
+    get_object: () => runToolContract(smithsonianGetObject, { id: 'nasm_A19820121000' }),
+    get_media: () => runToolContract(smithsonianGetMedia, { id: 'nasm_A19820121000' }),
+    find_related: () => runToolContract(smithsonianFindRelated, { id: 'nmnhvz_14945304' }),
+    browse: () =>
+      runToolContract(smithsonianBrowseCategory, { mode: 'museum', value: 'NMNHFISHES', rows: 1 }),
+    filter_only_search: () =>
+      runToolContract(smithsonianSearchObjects, {
+        query: '',
+        filters: { online_only: true, cc0_only: true },
+        rows: 2,
+      }),
+    clamped_filter_only_search: () =>
+      runToolContract(smithsonianSearchObjects, {
+        query: '',
+        filters: { unit_code: 'BIG' },
+        rows: 5000,
+      }),
+    free_text_search: () => runToolContract(smithsonianSearchObjects, { query: 'missile' }),
+  };
+
+  describe('mirror on', () => {
+    beforeEach(() => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage(), t.reader);
+    });
+
+    it.each([
+      ['smithsonian_get_object', CALLS.get_object],
+      ['smithsonian_get_media', CALLS.get_media],
+    ])(
+      '%s reads a mirrored id with no EDAN request and names the mirror on both surfaces',
+      async (_name, run) => {
+        const edan = stubEdan();
+
+        const result = await run();
+
+        expect(result.isError).toBeFalsy();
+        expect(edan.fetchMock).not.toHaveBeenCalled();
+        const answer = answerOf(result);
+        expect(answer.record_id).toBe('nasm_A19820121000');
+        expect(answer.sources).toEqual(['oa_mirror']);
+        expect(answer.mirror_snapshot).toBe(SNAPSHOT);
+        expect(trailer(result, 'Sources')).toBe('**Sources:** `oa_mirror`');
+        expect(trailer(result, 'Mirror snapshot')).toBe(`**Mirror snapshot:** \`${SNAPSHOT}\``);
+      },
+    );
+
+    it('reads the find_related anchor from the mirror; only its free-text name fan-out goes live', async () => {
+      const edan = stubEdan();
+
+      const result = await CALLS.find_related();
+
+      expect(result.isError).toBeFalsy();
+      expect(edan.requests('content')).toHaveLength(0);
+      expect(edan.requests('search').map((url) => url.searchParams.get('q'))).toEqual([
+        'Albatross Philippine Expedition, 1907-1910',
+      ]);
+      expect(edan.fetchMock).toHaveBeenCalledTimes(1);
+      const answer = answerOf(result);
+      expect(answer.sources).toEqual(['oa_mirror', 'edan_api']);
+      expect(answer.mirror_snapshot).toBe(SNAPSHOT);
+      expect(trailer(result, 'Sources')).toBe('**Sources:** `oa_mirror`, `edan_api`');
+      expect(trailer(result, 'Mirror snapshot')).toBe(`**Mirror snapshot:** \`${SNAPSHOT}\``);
+    });
+
+    it('serves a browse page with no EDAN request, the facet count, and the mirror sentence last', async () => {
+      const edan = stubEdan();
+
+      const result = await CALLS.browse();
+
+      expect(result.isError).toBeFalsy();
+      expect(edan.fetchMock).not.toHaveBeenCalled();
+      const answer = answerOf(result);
+      expect(answer.total_count).toBe(2);
+      expect(answer.sample_objects?.map((o) => o.record_id)).toEqual(['nmnhvz_14945304']);
+      expect(answer.sources).toEqual(['oa_mirror']);
+      expect(answer.mirror_snapshot).toBe(SNAPSHOT);
+      expect(answer.notice).toMatch(/^2 objects match this category; /);
+      expect(answer.notice?.slice(-MIRROR_SENTENCE.length)).toBe(MIRROR_SENTENCE);
+      expect(text(result)).toContain(answer.notice);
+    });
+
+    it('serves a filter-only search with no EDAN request, the facet count, and the mirror sentence last', async () => {
+      const edan = stubEdan();
+
+      const result = await CALLS.filter_only_search();
+
+      expect(result.isError).toBeFalsy();
+      expect(edan.fetchMock).not.toHaveBeenCalled();
+      const answer = answerOf(result);
+      expect(answer.total_count).toBe(3);
+      expect(answer.objects?.map((o) => o.record_id)).toEqual([
+        'nasm_A19820121000',
+        'nmnhvz_14945304',
+      ]);
+      expect(answer.sources).toEqual(['oa_mirror']);
+      expect(answer.mirror_snapshot).toBe(SNAPSHOT);
+      expect(answer.notice).toMatch(/^3 objects match; this page shows 2 from offset 0\. /);
+      expect(answer.notice?.slice(-MIRROR_SENTENCE.length)).toBe(MIRROR_SENTENCE);
+      expect(text(result)).toContain(answer.notice);
+    });
+
+    it('composes a clamped, truncated filter-only notice as clamp, guidance, then mirror sentence', async () => {
+      const edan = stubEdan();
+
+      const result = await CALLS.clamped_filter_only_search();
+
+      expect(result.isError).toBeFalsy();
+      expect(edan.fetchMock).not.toHaveBeenCalled();
+      const answer = answerOf(result);
+      expect(answer.total_count).toBe(1001);
+      expect(answer.objects).toHaveLength(1000);
+      expect(result.structuredContent).toMatchObject({
+        truncated: true,
+        shown: 1000,
+        cap: 1000,
+        truncationCeiling: 1001,
+      });
+      const notice = answer.notice ?? '';
+      const clamp = notice.indexOf(
+        'rows 5000 exceeds the cap of 1000; the page was served with rows 1000.',
+      );
+      const guidance = notice.indexOf('1001 objects match; this page shows 1000 from offset 0.');
+      expect(clamp).toBe(0);
+      expect(guidance).toBeGreaterThan(clamp);
+      expect(notice.indexOf(MIRROR_SENTENCE)).toBeGreaterThan(guidance);
+      expect(notice.slice(-MIRROR_SENTENCE.length)).toBe(MIRROR_SENTENCE);
+      expect(text(result)).toContain(notice);
+    });
+
+    it('sends a free-text search live, naming only edan_api and no snapshot', async () => {
+      const edan = stubEdan();
+
+      const result = await CALLS.free_text_search();
+
+      expect(result.isError).toBeFalsy();
+      expect(edan.requests('search').map((url) => url.searchParams.get('q'))).toEqual(['missile']);
+      expect(edan.fetchMock).toHaveBeenCalledTimes(1);
+      expect(answerOf(result).sources).toEqual(['edan_api']);
+      expect(result.structuredContent).not.toHaveProperty('mirror_snapshot');
+      expect(trailer(result, 'Sources')).toBe('**Sources:** `edan_api`');
+      expect(trailer(result, 'Mirror snapshot')).toBeUndefined();
+      expect(text(result)).not.toContain('Open Access mirror');
+    });
+  });
+
+  describe('mirror off', () => {
+    beforeEach(() => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+    });
+
+    it.each(Object.entries(CALLS))(
+      '%s goes live and carries neither field nor a Sources line',
+      async (_name, run) => {
+        const edan = stubEdan();
+
+        const result = await run();
+
+        expect(result.isError).toBeFalsy();
+        expect(edan.fetchMock).toHaveBeenCalled();
+        expect(result.structuredContent).not.toHaveProperty('sources');
+        expect(result.structuredContent).not.toHaveProperty('mirror_snapshot');
+        expect(JSON.stringify(result.structuredContent)).not.toContain('Open Access mirror');
+        expect(trailer(result, 'Sources')).toBeUndefined();
+        expect(trailer(result, 'Mirror snapshot')).toBeUndefined();
+        expect(text(result)).not.toContain('Open Access mirror');
+      },
+    );
+  });
+
+  describe('advertised outputSchema', () => {
+    /**
+     * One tool's advertised output schema. Every property is optional at the root, since a
+     * failed call carries `error` alone; the success branch of `anyOf` (the one that excludes
+     * `error`) lists the keys a successful call requires.
+     */
+    interface AdvertisedOutput {
+      anyOf?: Array<{ not?: unknown; required?: string[] }>;
+      properties: Record<string, unknown>;
+    }
+
+    let advertised: Map<string, AdvertisedOutput>;
+
+    beforeAll(async () => {
+      // The handler writes these into process.env; stubbing them first lets unstubAllEnvs restore them.
+      vi.stubEnv('IS_SERVERLESS', 'true');
+      vi.stubEnv('MCP_TRANSPORT_TYPE', 'http');
+      vi.stubEnv('MCP_LOG_LEVEL', 'error');
+      const handler = createWorkerHandler({
+        name: 'smithsonian-mcp-server',
+        tools: [
+          smithsonianSearchObjects,
+          smithsonianBrowseCategory,
+          smithsonianFindRelated,
+          smithsonianGetObject,
+          smithsonianGetMedia,
+          smithsonianListTerms,
+        ],
+      });
+      const response = await handler.fetch(
+        new Request('http://localhost/mcp', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json, text/event-stream',
+            'MCP-Protocol-Version': '2026-07-28',
+            'Mcp-Method': 'tools/list',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/list',
+            params: {
+              _meta: {
+                'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+                'io.modelcontextprotocol/clientCapabilities': {},
+              },
+            },
+          }),
+        }),
+        { LOG_LEVEL: 'error' } as never,
+        { waitUntil() {}, passThroughOnException() {} } as never,
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        result: { tools: Array<{ name: string; outputSchema: AdvertisedOutput }> };
+      };
+      advertised = new Map(body.result.tools.map((tool) => [tool.name, tool.outputSchema]));
+    });
+
+    /** Each tool's other advertised output keys: its fields, other enrichment, and `error`. */
+    const PAGE_ENRICHMENT = ['truncated', 'shown', 'cap', 'truncationCeiling', 'notice'];
+
+    it.each([
+      ['smithsonian_search_objects', ['objects', 'total_count', ...PAGE_ENRICHMENT, 'error']],
+      [
+        'smithsonian_browse_category',
+        [
+          'mode',
+          'value',
+          'total_count',
+          'sample_objects',
+          'museum_breakdown',
+          ...PAGE_ENRICHMENT,
+          'error',
+        ],
+      ],
+      [
+        'smithsonian_find_related',
+        ['anchor', 'related', 'search_signals_used', 'signals', ...PAGE_ENRICHMENT, 'error'],
+      ],
+      [
+        'smithsonian_get_object',
+        [
+          'record_id',
+          'title',
+          'unit_code',
+          'museum_name',
+          'holding_museum_name',
+          'dates',
+          'description',
+          'notes',
+          'scientific_names',
+          'taxonomy',
+          'coordinates',
+          'makers',
+          'materials',
+          'dimensions',
+          'place',
+          'culture',
+          'topics',
+          'exhibitions',
+          'credit_line',
+          'identifiers',
+          'object_rights',
+          'is_cc0',
+          'record_link',
+          'media_summary',
+          'error',
+        ],
+      ],
+      ['smithsonian_get_media', ['record_id', 'title', 'is_cc0', 'images', 'error']],
+    ])(
+      '%s advertises exactly sources and mirror_snapshot beyond its own keys, both optional',
+      (name, own) => {
+        const schema = advertised.get(name);
+
+        expect(Object.keys(schema?.properties ?? {}).sort()).toEqual(
+          [...own, 'sources', 'mirror_snapshot'].sort(),
+        );
+        const success = schema?.anyOf?.find((branch) => branch.not !== undefined);
+        expect(success?.required).toContain(own[0]);
+        expect(success?.required).not.toContain('sources');
+        expect(success?.required).not.toContain('mirror_snapshot');
+        expect(schema?.properties.sources).toMatchObject({
+          type: 'array',
+          items: { type: 'string', enum: ['oa_mirror', 'edan_api'] },
+        });
+        expect(schema?.properties.mirror_snapshot).toMatchObject({ type: 'string' });
+      },
+    );
+
+    it('smithsonian_list_terms advertises neither field', () => {
+      expect(
+        Object.keys(advertised.get('smithsonian_list_terms')?.properties ?? {}).sort(),
+      ).toEqual(['field', 'terms', 'total', 'labels', ...PAGE_ENRICHMENT, 'error'].sort());
     });
   });
 });

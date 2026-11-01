@@ -1,5 +1,6 @@
 /**
- * @fileoverview Smithsonian EDAN Open Access API service — search and content retrieval.
+ * @fileoverview Smithsonian EDAN Open Access API service — search and content retrieval, answered
+ * from the Open Access bulk mirror where it can and from the live API otherwise.
  * @module services/smithsonian/smithsonian-service
  */
 
@@ -12,13 +13,17 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
-import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, isRecord, logger, withRetry } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import type { FacetFilter, OaMirror } from './oa-mirror.js';
+import { ResponseCache } from './response-cache.js';
 import type {
   FullObject,
   ImageItem,
   MediaResolution,
+  NonImageMedia,
   ObjectSummary,
+  Provenance,
   RawContentResponse,
   RawEDAN,
   RawFreetextEntry,
@@ -44,6 +49,10 @@ import type {
  * shape only suggests an archive under NASM/NMAI/SAAM. Expanding them from that
  * pattern would ship a guess as a sourced fact on a public field, so they take the
  * raw-code fallback below instead.
+ *
+ * One key is not an indexed code: `SERC`, which eight `OCIO_DPO3D` records give as
+ * their `data_source` where the ninth gives the name. It resolves those to the name
+ * for `holding_museum_name`.
  *
  * Backs the `museum_name` field on every object-returning tool and the `labels`
  * map `smithsonian_list_terms` returns for `unit_code`.
@@ -95,6 +104,7 @@ export const MUSEUM_NAMES: Record<string, string> = {
     'Office of the Chief Information Officer - Digitization Program Office (3D digitization)',
   'OFEO-SG': 'Smithsonian Gardens',
   SAAM: 'Smithsonian American Art Museum',
+  SERC: 'Smithsonian Environmental Research Center',
   SI: 'Smithsonian Institution',
   SIA: 'Smithsonian Institution Archives',
   SIL: 'Smithsonian Libraries',
@@ -103,9 +113,14 @@ export const MUSEUM_NAMES: Record<string, string> = {
   SLA_SRO: 'Smithsonian Libraries and Archives',
 };
 
+/** The name {@link MUSEUM_NAMES} gives a unit code, from its own keys only: codes are upstream text. */
+function unitName(code: string): string | undefined {
+  return Object.hasOwn(MUSEUM_NAMES, code) ? MUSEUM_NAMES[code] : undefined;
+}
+
 /** Resolve a unit code to its museum name, echoing the raw code when unmapped. */
 function museumName(unitCode: string | undefined): string {
-  return (unitCode && MUSEUM_NAMES[unitCode]) ?? unitCode ?? 'Smithsonian Institution';
+  return (unitCode && unitName(unitCode)) ?? unitCode ?? 'Smithsonian Institution';
 }
 
 // ---------------------------------------------------------------------------
@@ -274,12 +289,43 @@ function firstThumbnail(raw: RawEDAN): string | undefined {
   return raw.content?.descriptiveNonRepeating?.online_media?.media?.[0]?.thumbnail;
 }
 
+/**
+ * The unit code a record is indexed under: top-level `unitCode`, the value a
+ * `unit_code:` filter and a museum browse match, falling back to the record's own
+ * `descriptiveNonRepeating.unit_code` only when the indexed code is absent (issue #64).
+ *
+ * The two agree on every sampled record outside `OCIO_DPO3D`. Those records are
+ * indexed under the 3D digitization office while their own code names the
+ * contributing unit — often a code EDAN never indexes (`SAO`, `DPO`, `SERC`,
+ * `NMAL`), so reporting it would hand the caller a filter that matches nothing.
+ */
+function indexedUnitCode(raw: RawEDAN): string {
+  return raw.unitCode || raw.content?.descriptiveNonRepeating?.unit_code || '';
+}
+
+/**
+ * The unit holding the object, by name, when the record's own unit code differs from
+ * the indexed one; undefined otherwise. Read from `data_source` rather than resolved
+ * from the record's code: `data_source` names the holder on every `OCIO_DPO3D`
+ * record, while the code is often unindexed and unmapped, and `DPO` names the
+ * digitization office itself rather than any holder. A `data_source` that is itself a
+ * mapped unit code (`SERC`) resolves to that unit's name.
+ */
+function holdingMuseumName(raw: RawEDAN): string | undefined {
+  const dnr = raw.content?.descriptiveNonRepeating;
+  if (!raw.unitCode || !dnr?.unit_code || dnr.unit_code === raw.unitCode) return undefined;
+  const source = dnr.data_source?.trim();
+  if (!source) return undefined;
+  return unitName(source) ?? source;
+}
+
 /** Normalize a raw EDAN record into an ObjectSummary. */
 function normalizeToSummary(raw: RawEDAN): ObjectSummary {
   const dnr = raw.content?.descriptiveNonRepeating;
   const indexed = raw.content?.indexedStructured;
   const recordId = dnr?.record_ID ?? raw.url?.replace(/^edanmdm:/, '') ?? raw.id ?? '';
-  const unitCode = dnr?.unit_code ?? raw.unitCode ?? '';
+  const unitCode = indexedUnitCode(raw);
+  const holdingName = holdingMuseumName(raw);
   const mediaCount = dnr?.online_media?.mediaCount ?? dnr?.online_media?.media?.length ?? 0;
   const objectType = indexed?.object_type?.[0];
   const date = indexed?.date?.[0];
@@ -289,6 +335,7 @@ function normalizeToSummary(raw: RawEDAN): ObjectSummary {
     title: toPlainText(raw.title ?? ''),
     unit_code: unitCode,
     museum_name: museumName(unitCode),
+    ...(holdingName !== undefined && { holding_museum_name: holdingName }),
     ...(objectType !== undefined && { object_type: objectType }),
     ...(date !== undefined && { date }),
     ...(thumbnailUrl !== undefined && { thumbnail_url: thumbnailUrl }),
@@ -302,7 +349,8 @@ function normalizeToFull(raw: RawEDAN): FullObject {
   const dnr = raw.content?.descriptiveNonRepeating;
   const freetext = raw.content?.freetext;
   const indexed = raw.content?.indexedStructured;
-  const unitCode = dnr?.unit_code ?? raw.unitCode ?? '';
+  const unitCode = indexedUnitCode(raw);
+  const holdingName = holdingMuseumName(raw);
   const recordId = dnr?.record_ID ?? raw.url?.replace(/^edanmdm:/, '') ?? raw.id ?? '';
 
   const taxonomy: NonNullable<FullObject['taxonomy']> = {};
@@ -428,7 +476,8 @@ function normalizeToFull(raw: RawEDAN): FullObject {
   // Media summary — cc0_image_count runs the SAME image pipeline as
   // smithsonian_get_media (extractImageItems → CC0 filter), so the two counts
   // reconcile by construction. `count` is the raw total across all media types
-  // (images, 3D models, video, …), which is why it can exceed cc0_image_count.
+  // (images, 3D models, scanned books, …), which is why it can exceed
+  // cc0_image_count; non_image_media lists the items that tool never delivers.
   const media = dnr?.online_media?.media ?? [];
   const cc0ImageCount = extractImageItems(media).filter((img) => img.is_cc0).length;
   const mediaCount = dnr?.online_media?.mediaCount ?? media.length;
@@ -439,6 +488,7 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     title: toPlainText(raw.title ?? ''),
     unit_code: unitCode,
     museum_name: museumName(unitCode),
+    ...(holdingName !== undefined && { holding_museum_name: holdingName }),
     dates,
     scientific_names: indexed?.scientific_name ?? [],
     ...(Object.keys(taxonomy).length > 0 && { taxonomy }),
@@ -462,8 +512,24 @@ function normalizeToFull(raw: RawEDAN): FullObject {
       cc0_image_count: cc0ImageCount,
       has_cc0_images: cc0ImageCount > 0,
       ...(thumbnailUrl !== undefined && { thumbnail_url: thumbnailUrl }),
+      non_image_media: extractNonImageMedia(media),
     },
   };
+}
+
+/** Return true when one media item's own `usage.access` is CC0 — images and non-image items alike. */
+function isMediaCC0(m: RawMediaItem): boolean {
+  return m.usage?.access === 'CC0';
+}
+
+/**
+ * The one media type test: an item is non-image when its `type` is set and is not
+ * `Images`. smithsonian_get_media treats everything else — `Images` and untyped
+ * items — as an image, so {@link extractImageItems} and {@link extractNonImageMedia}
+ * select complementary sets and no item can land in both or neither.
+ */
+function isNonImageMedia(m: RawMediaItem): m is RawMediaItem & { type: string } {
+  return Boolean(m.type) && m.type !== 'Images';
 }
 
 /** Build a MediaResolution without undefined optional fields. */
@@ -505,7 +571,7 @@ function normalizeToImage(m: RawMediaItem): ImageItem | null {
 
   return {
     media_id: mediaId,
-    is_cc0: m.usage?.access === 'CC0',
+    is_cc0: isMediaCC0(m),
     ...(m.altTextAccessibility !== undefined && { alt_text: m.altTextAccessibility }),
     ...(m.extDescrAccessibility !== undefined && { description: m.extDescrAccessibility }),
     ...(thumbnail_url !== undefined && { thumbnail_url }),
@@ -519,13 +585,27 @@ function normalizeToImage(m: RawMediaItem): ImageItem | null {
  * Select and normalize the image-type items from an online_media `media[]` array.
  * Mirrors smithsonian_get_media's selection (type 'Images' or untyped, with a
  * resolvable media id) so callers that count CC0 images agree with what
- * get_media actually returns. Non-image media (3D models, video) is excluded.
+ * get_media actually returns. Non-image media goes to {@link extractNonImageMedia}.
  */
 function extractImageItems(media: RawMediaItem[]): ImageItem[] {
   return media
-    .filter((m): m is RawMediaItem => m.type === 'Images' || !m.type)
+    .filter((m) => !isNonImageMedia(m))
     .map(normalizeToImage)
     .filter((m): m is ImageItem => m !== null);
+}
+
+/**
+ * The media items smithsonian_get_media does not deliver, each with its `content`
+ * link (issue #62). That link is the item's entry point — a 3D package's viewer, a
+ * scanned book's DOI or BHL page, a field book's viewer or PDF — so a package's
+ * per-file `resources[]` stay out.
+ */
+function extractNonImageMedia(media: RawMediaItem[]): NonImageMedia[] {
+  return media.filter(isNonImageMedia).map((m) => ({
+    type: m.type,
+    ...(m.content && { url: m.content }),
+    is_cc0: isMediaCC0(m),
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +630,22 @@ function extractImageItems(media: RawMediaItem[]): ImageItem[] {
  */
 export function luceneField(field: string, value: string): string {
   return `${field}:"${value.replace(/[\\"]/g, '\\$&')}"`;
+}
+
+/**
+ * The Lucene term the live API matches a facet filter with: an exact value as a
+ * {@link luceneField} phrase, `online_only` as any indexed `online_media_type`, and
+ * `cc0` as `media_usage:CC0` (records carrying CC0 media).
+ */
+export function luceneFilter(filter: FacetFilter): string {
+  switch (filter.field) {
+    case 'online_only':
+      return 'online_media_type:*';
+    case 'cc0':
+      return 'media_usage:CC0';
+    default:
+      return luceneField(filter.field, filter.value);
+  }
 }
 
 /**
@@ -581,8 +677,8 @@ const MAX_NEIGHBOR_PROBES = 48;
  * differ 15-fold in size: at 800 the clause is dropped for 0.36% of `culture`,
  * 0.38% of `place` and 0.65% of `topic`, and for nothing in `date` or `unit_code`.
  *
- * 800 is eight full pages of smithsonian_list_terms, whose page caps at 100 rows,
- * and it sits between the two live cases that fix the range. `place: "Nigeria"`
+ * 800 terms come back from one smithsonian_list_terms call (rows: 800), and the
+ * count sits between the two live cases that fix the range. `place: "Nigeria"`
  * lists 575 Nigerian place terms — wide, but every one of them is the thing the
  * caller asked about, so a ceiling that cuts it is the wrong ceiling.
  * `culture: "Rickarie"` bottoms out at `Ric`, whose 1,195 terms are mostly the
@@ -762,25 +858,120 @@ interface GetOptions {
   expectedStatuses?: number[];
   /** Request headers merged over `Accept` — every call site passes the API key here. */
   headers?: Record<string, string>;
+  /**
+   * The signal the request runs on, when it is not the caller's own. A cached
+   * read passes the response cache's signal, so one caller cancelling never
+   * cancels a request another caller is waiting on (issue #65).
+   */
+  signal?: AbortSignal | undefined;
+}
+
+/**
+ * Byte budget of the response cache, counted as the UTF-8 length of each stored
+ * entry's JSON. Measured against live responses: a normalized 1,000-row search
+ * page is 238–320 KB, a 20-row page 3.4–7.7 KB, and a `/content` record a median
+ * 4.1 KB (p99 25 KB, max 106 KB), so 64 MiB holds more than an hour of the key's
+ * 1,000 requests at typical sizes.
+ */
+const RESPONSE_CACHE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * One deadline across every attempt and backoff of a request. Four 15 s attempts
+ * with 2/4/8 s backoff would run 74 s, past the 60 s request timeout MCP SDK
+ * clients default to, so a hung upstream fails here first.
+ */
+const RETRY_DEADLINE_MS = 50_000;
+
+/**
+ * The caller's cancellation signal. `RequestContext` does not declare it; the
+ * handler `Context` every call arrives as does.
+ */
+function callerSignal(ctx: RequestContext): AbortSignal | undefined {
+  return (ctx as { signal?: AbortSignal }).signal;
+}
+
+/** One page of search results, with where it was answered (undefined without a mirror). */
+export interface SearchPage {
+  provenance?: Provenance;
+  rowCount: number;
+  rows: ObjectSummary[];
+}
+
+/** One object record, with where it was answered (undefined without a mirror). */
+export interface ContentRead {
+  provenance?: Provenance;
+  record: RawEDAN;
 }
 
 export class SmithsonianService {
-  constructor(private readonly storage: StorageService) {}
+  /**
+   * `/search` pages and `/content` records, keyed by request URL. Instance state,
+   * so every service starts empty. Not `storage`: its default in-memory provider
+   * has an entry cap and no byte bound, throws on `set` once full, and rejects
+   * URL characters in keys.
+   */
+  private readonly responses = new ResponseCache(RESPONSE_CACHE_BYTES);
 
-  /** Execute a GET request with retry/backoff. Handles error-in-200 responses. */
+  /**
+   * @param mirror The Open Access bulk mirror, when one is configured. Object reads and
+   *   filter-only searches try it before the live API; every read then reports its provenance.
+   */
+  constructor(
+    private readonly storage: StorageService,
+    private readonly mirror?: OaMirror,
+  ) {}
+
+  /** The provenance of a live answer: none without a mirror, so those responses stay unchanged. */
+  private live(): Provenance | undefined {
+    return this.mirror ? { source: 'edan_api' } : undefined;
+  }
+
+  /**
+   * Answer a read from the mirror, or undefined to send it live: no mirror is configured, none
+   * of its syncs has completed, `read` declines (a record it does not hold, a search past the
+   * scan budget), or the store fails. A store failure is logged here and never reaches the
+   * caller, who gets the live answer instead.
+   */
+  private async fromMirror<T>(
+    read: (mirror: OaMirror) => Promise<T | undefined>,
+    ctx: RequestContext,
+  ): Promise<{ provenance: Provenance; value: T } | undefined> {
+    const mirror = this.mirror;
+    if (!mirror) return undefined;
+    try {
+      if (!(await mirror.ready())) return undefined;
+      const value = await read(mirror);
+      if (value === undefined) return undefined;
+      const snapshot = await mirror.snapshot();
+      return { value, provenance: { source: 'oa_mirror', ...(snapshot && { snapshot }) } };
+    } catch (err: unknown) {
+      logger.error(
+        'Open Access mirror read failed; answering from the live API.',
+        err instanceof Error ? err : new Error(String(err)),
+        ctx,
+      );
+      return undefined;
+    }
+  }
+
+  /**
+   * Execute a GET request with retry/backoff. Handles error-in-200 responses. Every
+   * attempt and backoff runs on the request's signal, so cancelling it ends a backoff
+   * at once, and inside one {@link RETRY_DEADLINE_MS} deadline.
+   */
   private get<T extends { error?: { code?: string; message?: string } }>(
     url: string,
     ctx: RequestContext,
     options: GetOptions = {},
   ): Promise<T> {
+    const signal = options.signal ?? callerSignal(ctx);
     return withRetry(
-      async () => {
-        const signal = (ctx as { signal?: AbortSignal }).signal;
+      async (attempt) => {
         let response: Response;
         try {
           response = await fetchWithTimeout(url, 15_000, ctx, {
             headers: { Accept: 'application/json', ...options.headers },
-            ...(signal && { signal }),
+            signal: attempt.signal,
             ...(options.expectedStatuses && { expectedStatuses: options.expectedStatuses }),
           });
         } catch (err: unknown) {
@@ -824,29 +1015,54 @@ export class SmithsonianService {
 
         return raw;
       },
-      { operation: 'SmithsonianService.get', context: ctx, baseDelayMs: 2000, maxRetries: 3 },
+      {
+        operation: 'SmithsonianService.get',
+        context: ctx,
+        baseDelayMs: 2000,
+        maxRetries: 3,
+        deadlineMs: RETRY_DEADLINE_MS,
+        ...(signal && { signal }),
+      },
     );
   }
 
   /**
-   * Search across Smithsonian objects.
-   * Returns normalized summaries and the total row count.
+   * Search across Smithsonian objects. Returns normalized summaries and the total row count.
    *
-   * Field constraints are embedded in `q` as ANDed Lucene `field:value` terms
-   * (EDAN has no `fq` parameter), so each filter is a hard constraint rather
-   * than a scoring-only hint.
+   * A search with no query (`''` or `*`) is answered by facet filters alone, so the mirror
+   * serves it when it can do so within its scan budget: rows then come in mirror order, and
+   * the total is the facet count. Free text, an over-budget search, and every search on a
+   * server without a ready mirror go to the live API, from the response cache when the same
+   * request URL succeeded within the search TTL.
+   *
+   * On the live path each filter becomes a {@link luceneFilter} term ANDed into `q` (EDAN has
+   * no `fq` parameter), so each is a hard constraint rather than a scoring-only hint.
    */
   async search(
     params: {
       query: string;
       rows: number;
       start: number;
-      /** Lucene field:value terms, ANDed into the query as hard constraints (e.g. "unit_code:NASM"). */
-      filters?: string[];
+      /** Exact facet constraints, all of which a result matches. */
+      filters?: readonly FacetFilter[];
     },
     ctx: RequestContext,
-  ): Promise<{ rows: ObjectSummary[]; rowCount: number }> {
+  ): Promise<SearchPage> {
     const activeFilters = params.filters ?? [];
+    if (params.query === '' || params.query === '*') {
+      const mirrored = await this.fromMirror(async (mirror) => {
+        const result = await mirror.searchFacets(activeFilters, params.start, params.rows);
+        return result.kind === 'page' ? result : undefined;
+      }, ctx);
+      if (mirrored) {
+        return {
+          rows: mirrored.value.docs.map(normalizeToSummary),
+          rowCount: mirrored.value.total,
+          provenance: mirrored.provenance,
+        };
+      }
+    }
+
     const cfg = getServerConfig();
     const base = `${cfg.baseUrl}/search`;
 
@@ -857,7 +1073,7 @@ export class SmithsonianService {
     let q = params.query;
     if (activeFilters.length > 0) {
       const baseQ = q && q !== '*' ? (hasActiveLuceneSyntax(q) ? `(${q})` : q) : '';
-      const terms = activeFilters.join(' AND ');
+      const terms = activeFilters.map(luceneFilter).join(' AND ');
       q = baseQ ? `${baseQ} AND ${terms}` : terms;
     }
 
@@ -868,37 +1084,62 @@ export class SmithsonianService {
     });
     const url = `${base}?${qs.toString()}`;
 
-    // Pass API key as header (not query param) so it never appears in logs or errors.
-    const raw = await this.get<RawSearchResponse>(url, ctx, {
-      headers: { 'X-Api-Key': cfg.apiKey },
-      collectionEndpoint: true,
+    // Pass API key as header (not query param) so it never appears in logs, errors,
+    // or the cache key.
+    const ttlMs = cfg.searchCacheTtlSeconds * 1000;
+    const page = await this.responses.fetch(url, ttlMs, callerSignal(ctx), async (signal) => {
+      const raw = await this.get<RawSearchResponse>(url, ctx, {
+        headers: { 'X-Api-Key': cfg.apiKey },
+        collectionEndpoint: true,
+        signal,
+      });
+      const rows = (raw.response?.rows ?? []).map(normalizeToSummary);
+      return {
+        value: { rows, rowCount: raw.response?.rowCount ?? rows.length },
+        // A 200 without a page still reads as zero rows, but is not a success to keep.
+        storable: Array.isArray(raw.response?.rows) && typeof raw.response?.rowCount === 'number',
+      };
     });
-    const rows = (raw.response?.rows ?? []).map(normalizeToSummary);
-    return { rows, rowCount: raw.response?.rowCount ?? rows.length };
+    const provenance = this.live();
+    return provenance ? { ...page, provenance } : page;
   }
 
   /**
-   * Fetch a single object by record_id.
+   * Fetch a single object by record_id. Once the mirror is ready it answers any record it
+   * holds; a record it lacks, or a store failure, goes to the live API — from the response
+   * cache when the same request URL succeeded within the content TTL, so the bare and
+   * `edanmdm:` forms of an ID share an entry.
    * The content endpoint returns the object directly at `response` (not `response.rows[0]`).
    *
    * Both not-found throw sites carry `reason: 'not_found'` and no recovery: every
    * caller (`smithsonian_get_object`, `smithsonian_get_media`, `smithsonian_find_related`)
    * declares a `not_found` entry, and the framework fills that tool's own hint on the wire.
+   * Both sit outside the cached read, so each caller sharing a request is named by
+   * the ID it passed.
    */
-  async getContent(recordId: string, ctx: RequestContext): Promise<RawEDAN> {
-    const cfg = getServerConfig();
+  async getContent(recordId: string, ctx: RequestContext): Promise<ContentRead> {
     const prefixed = recordId.startsWith('edanmdm:') ? recordId : `edanmdm:${recordId}`;
+    const mirrored = await this.fromMirror((mirror) => mirror.getDoc(prefixed), ctx);
+    if (mirrored) return { record: mirrored.value, provenance: mirrored.provenance };
+
+    const cfg = getServerConfig();
     const url = `${cfg.baseUrl}/content/${encodeURIComponent(prefixed)}`;
 
-    // Pass API key as header (not query param) so it never appears in logs or errors.
-    let raw: RawContentResponse;
+    // Pass API key as header (not query param) so it never appears in logs, errors,
+    // or the cache key.
+    const ttlMs = cfg.contentCacheTtlSeconds * 1000;
+    let record: RawEDAN | undefined;
     try {
-      // EDAN returns a real HTTP 404 for a missing object; expect it so a bad ID
-      // logs at debug, not as a server error. The NotFound throw still fires and
-      // is rewrapped below with the declared reason.
-      raw = await this.get<RawContentResponse>(url, ctx, {
-        headers: { 'X-Api-Key': cfg.apiKey },
-        expectedStatuses: [404],
+      record = await this.responses.fetch(url, ttlMs, callerSignal(ctx), async (signal) => {
+        // EDAN returns a real HTTP 404 for a missing object; expect it so a bad ID
+        // logs at debug, not as a server error. The NotFound throw still fires and
+        // is rewrapped below with the declared reason.
+        const raw = await this.get<RawContentResponse>(url, ctx, {
+          headers: { 'X-Api-Key': cfg.apiKey },
+          expectedStatuses: [404],
+          signal,
+        });
+        return { value: raw.response, storable: isRecord(raw.response) };
       });
     } catch (err: unknown) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
@@ -910,13 +1151,14 @@ export class SmithsonianService {
       throw err;
     }
 
-    if (!raw.response) {
+    if (!record) {
       throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
         recordId,
         reason: 'not_found',
       });
     }
-    return raw.response;
+    const provenance = this.live();
+    return provenance ? { record, provenance } : { record };
   }
 
   /** Normalize a raw EDAN record to a full object. */
@@ -1005,7 +1247,7 @@ export class SmithsonianService {
       ? all.filter(
           (term) =>
             term.toLowerCase().includes(needle) ||
-            (labelled && MUSEUM_NAMES[term]?.toLowerCase().includes(needle) === true),
+            (labelled && unitName(term)?.toLowerCase().includes(needle) === true),
         )
       : all;
     const page = matched.slice(params.start, params.start + params.rows);
@@ -1013,7 +1255,7 @@ export class SmithsonianService {
 
     const labels: Record<string, string> = {};
     for (const term of page) {
-      const name = MUSEUM_NAMES[term];
+      const name = unitName(term);
       if (name) labels[term] = name;
     }
     return { terms: page, total: matched.length, labels };
@@ -1060,8 +1302,16 @@ export class SmithsonianService {
 
 let _service: SmithsonianService | undefined;
 
-export function initSmithsonianService(_config: AppConfig, storage: StorageService): void {
-  _service = new SmithsonianService(storage);
+/**
+ * Create the service the accessor returns, its response cache empty, reading through `mirror`
+ * when the server has one.
+ */
+export function initSmithsonianService(
+  _config: AppConfig,
+  storage: StorageService,
+  mirror?: OaMirror,
+): void {
+  _service = new SmithsonianService(storage, mirror);
 }
 
 export function getSmithsonianService(): SmithsonianService {

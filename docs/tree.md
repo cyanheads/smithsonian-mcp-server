@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-10-08 12:16:50
+Generated on: 2026-11-01 17:30:34
 
 ```text
 smithsonian-mcp-server/
@@ -39,6 +39,8 @@ smithsonian-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -136,6 +138,9 @@ smithsonian-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── smithsonian-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -145,33 +150,53 @@ smithsonian-mcp-server/
 │   │   ├── resources/
 │   │   │   └── definitions/
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── smithsonian-browse-category.tool.ts
-│   │           ├── smithsonian-find-related.tool.ts
-│   │           ├── smithsonian-get-media.tool.ts
-│   │           ├── smithsonian-get-object.tool.ts
-│   │           ├── smithsonian-list-terms.tool.ts
-│   │           └── smithsonian-search-objects.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── smithsonian-browse-category.tool.ts
+│   │       │   ├── smithsonian-find-related.tool.ts
+│   │       │   ├── smithsonian-get-media.tool.ts
+│   │       │   ├── smithsonian-get-object.tool.ts
+│   │       │   ├── smithsonian-list-terms.tool.ts
+│   │       │   └── smithsonian-search-objects.tool.ts
+│   │       ├── page-size.ts
+│   │       └── provenance.ts
+│   ├── mirror/
+│   │   ├── cli.ts
+│   │   └── server-mirror.ts
 │   ├── services/
 │   │   └── smithsonian/
+│   │       ├── oa-ingest.ts
+│   │       ├── oa-mirror.ts
+│   │       ├── response-cache.ts
 │   │       ├── smithsonian-service.ts
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
 │   ├── mcp-server/
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── smithsonian-browse-category.tool.test.ts
-│   │           ├── smithsonian-find-related.tool.test.ts
-│   │           ├── smithsonian-get-media.tool.test.ts
-│   │           ├── smithsonian-get-object.tool.test.ts
-│   │           ├── smithsonian-list-terms.tool.test.ts
-│   │           ├── smithsonian-search-objects.tool.test.ts
-│   │           └── tool-contract.test.ts
+│   │       ├── definitions/
+│   │       │   ├── smithsonian-browse-category.tool.test.ts
+│   │       │   ├── smithsonian-find-related.tool.test.ts
+│   │       │   ├── smithsonian-get-media.tool.test.ts
+│   │       │   ├── smithsonian-get-object.tool.test.ts
+│   │       │   ├── smithsonian-list-terms.tool.test.ts
+│   │       │   ├── smithsonian-search-objects.tool.test.ts
+│   │       │   ├── tool-contract.test.ts
+│   │       │   └── tool-result.ts
+│   │       └── page-size.test.ts
+│   ├── mirror/
+│   │   ├── fixtures/
+│   │   │   └── fake-mirror-cli.mjs
+│   │   └── server-mirror.test.ts
 │   ├── prompts/
 │   ├── resources/
 │   ├── services/
 │   │   └── smithsonian/
+│   │       ├── fixtures/
+│   │       │   └── oa-bulk-lines.jsonl
+│   │       ├── oa-bucket-fake.ts
+│   │       ├── oa-ingest.test.ts
+│   │       ├── oa-mirror.test.ts
+│   │       ├── response-cache.test.ts
 │   │       └── smithsonian-service.test.ts
 │   └── tools/
 ├── .dockerignore
@@ -190,7 +215,9 @@ smithsonian-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

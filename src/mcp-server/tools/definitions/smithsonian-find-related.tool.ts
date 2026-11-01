@@ -5,7 +5,22 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  enrichPageNotice,
+  pageSizeInput,
+  pageSizeMeta,
+  servePageSize,
+} from '@/mcp-server/tools/page-size.js';
+import {
+  enrichProvenance,
+  mirrorOrderNotice,
+  provenanceEnrichment,
+  provenanceTrailer,
+} from '@/mcp-server/tools/provenance.js';
+import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
+import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import type { Provenance } from '@/services/smithsonian/types.js';
 
 /**
  * Per-signal fetch depth cap. Each fan-out signal is fetched from the top
@@ -37,6 +52,12 @@ const RelatedObjectSchema = z
       .string()
       .describe(
         'Full museum name. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
+      ),
+    holding_museum_name: z
+      .string()
+      .optional()
+      .describe(
+        "The unit that holds the object, from the record's own data source, when it differs from the unit that indexes it (unit_code). Absent otherwise.",
       ),
     thumbnail_url: z.string().optional().describe('Thumbnail URL if available.'),
     is_cc0: z
@@ -105,20 +126,22 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .describe(
         'record_id of the anchor object (e.g. "nasm_A19670093000") from smithsonian_search_objects or smithsonian_get_object.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(20)
+    limit: pageSizeInput('smithsonian_find_related', 'limit')
       .default(10)
-      .describe('Maximum number of related objects to return (default 10, max 20).'),
+      .meta(
+        pageSizeMeta('smithsonian_find_related', (clamped, cap) =>
+          clamped
+            ? `Maximum number of related objects to return (default 10). A value above ${cap} is served at ${cap} with a notice.`
+            : `Maximum number of related objects to return (default 10, max ${cap}).`,
+        ),
+      ),
     start: z
       .number()
       .int()
       .min(0)
       .default(0)
       .describe(
-        `Pagination offset — 0-indexed. Page contiguously with start = page × limit; each signal is reachable to a depth of ${MAX_FETCH_PER_SIGNAL} objects, beyond which truncated stays true but deeper pages aren't retrievable.`,
+        `Pagination offset — 0-indexed. Page contiguously by advancing start by the number of objects returned (a truncated page names the next start in its notice); each signal is reachable to a depth of ${MAX_FETCH_PER_SIGNAL} objects, beyond which truncated stays true but deeper pages aren't retrievable.`,
       ),
   }),
 
@@ -169,7 +192,10 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         'True when the related list is incomplete — either capped by the limit or more results exist upstream past the current page (advance start to retrieve them).',
       ),
     shown: z.number().optional().describe('Number of related objects returned.'),
-    cap: z.number().optional().describe('The limit cap that was applied.'),
+    cap: z
+      .number()
+      .optional()
+      .describe('The page size served: limit as requested, or its cap when limit exceeded it.'),
     truncationCeiling: z
       .number()
       .optional()
@@ -180,9 +206,11 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .string()
       .optional()
       .describe(
-        'Composed partial-failure, empty-result, and paging guidance. Failed signals carry safe categories; start pages the related set and signals[].search_continuation reaches a broader signal.',
+        'Composed page-size, partial-failure, empty-result, and paging guidance. Opens with the page size served when limit exceeded its cap. Failed signals carry safe categories; start pages the related set and signals[].search_continuation reaches a broader signal.',
       ),
+    ...provenanceEnrichment,
   },
+  enrichmentTrailer: provenanceTrailer,
 
   errors: [
     {
@@ -210,10 +238,12 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
 
     ctx.signal?.throwIfAborted();
     const svc = getSmithsonianService();
-    ctx.log.info('Finding related objects', { id: input.id, limit: input.limit });
+    const pageSize = servePageSize('smithsonian_find_related', 'limit', input.limit, ctx);
+    const limit = pageSize.value;
+    ctx.log.info('Finding related objects', { id: input.id, limit });
 
     // Step 1: fetch anchor
-    const anchorRaw = await svc.getContent(input.id, ctx);
+    const { record: anchorRaw, provenance: anchorProvenance } = await svc.getContent(input.id, ctx);
     const anchorSummary = svc.toSummary(anchorRaw);
 
     const indexed = anchorRaw.content?.indexedStructured;
@@ -261,13 +291,13 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         );
 
     // Build fan-out queries: culture, named party, topic, period+type.
-    // Field constraints are embedded in q as Lucene field:value terms.
-    // `continuation` is the equivalent smithsonian_search_objects input, captured here
-    // where the raw signal values are still in hand rather than reverse-parsed
-    // out of the Lucene strings (issue #18).
+    // Field constraints are exact facet filters. `continuation` is the equivalent
+    // smithsonian_search_objects input, captured here where the raw signal values are still
+    // in hand (issue #18); the service routes it exactly as it routes the fan-out, so the
+    // continuation pages the same match set from the same source, in the same order.
     type FanOut = {
       query: string;
-      filters: string[];
+      filters: FacetFilter[];
       signal: string;
       continuation: z.infer<typeof SearchContinuationSchema>;
     };
@@ -276,7 +306,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     if (culture0) {
       fanOuts.push({
         query: '',
-        filters: [luceneField('culture', culture0)],
+        filters: [{ field: 'culture', value: culture0 }],
         signal: `culture: ${culture0}`,
         continuation: { query: '', filters: { culture: culture0 } },
       });
@@ -294,7 +324,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         namePick.hardFilter
           ? {
               query: '',
-              filters: [luceneField('name', namePick.value)],
+              filters: [{ field: 'name', value: namePick.value }],
               signal,
               continuation: { query: '', filters: { name: namePick.value } },
             }
@@ -308,17 +338,16 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     if (topic0) {
       fanOuts.push({
         query: '',
-        filters: [luceneField('topic', topic0)],
+        filters: [{ field: 'topic', value: topic0 }],
         signal: `topic: ${topic0}`,
         continuation: { query: '', filters: { topic: topic0 } },
       });
     }
     // Always add period+type combo
     if (period || objType) {
-      const filters = [
-        period && luceneField('date', period),
-        objType && luceneField('object_type', objType),
-      ].filter((x): x is string => Boolean(x));
+      const filters: FacetFilter[] = [];
+      if (period) filters.push({ field: 'date', value: period });
+      if (objType) filters.push({ field: 'object_type', value: objType });
       const signal = [period && `period: ${period}`, objType && `type: ${objType}`]
         .filter(Boolean)
         .join(', ');
@@ -352,7 +381,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     // upstream total, used for the ceiling and truncation below. A chunk rejection
     // bubbles to the outer allSettled, dropping the whole signal rather than leaving a
     // gap in the middle of its contiguous range.
-    const neededDepth = Math.min(input.start + input.limit, MAX_FETCH_PER_SIGNAL);
+    const neededDepth = Math.min(input.start + limit, MAX_FETCH_PER_SIGNAL);
     const fetchSignal = async (fo: FanOut) => {
       const wave1 = await svc.search(
         {
@@ -364,6 +393,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         ctx,
       );
       const items = [...wave1.rows];
+      const reads: Array<Provenance | undefined> = [wave1.provenance];
       const reachable = Math.min(neededDepth, wave1.rowCount);
       if (reachable > MAX_ROWS_PER_UPSTREAM_CALL) {
         const starts: number[] = [];
@@ -383,9 +413,12 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
             ),
           ),
         );
-        for (const chunk of laterChunks) items.push(...chunk.rows);
+        for (const chunk of laterChunks) {
+          items.push(...chunk.rows);
+          reads.push(chunk.provenance);
+        }
       }
-      return { items, signal: fo.signal, rowCount: wave1.rowCount };
+      return { items, signal: fo.signal, rowCount: wave1.rowCount, reads };
     };
     const fanOutResults = await Promise.allSettled(fanOuts.map(fetchSignal));
     ctx.signal?.throwIfAborted();
@@ -484,13 +517,14 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     }
 
     // Offset into the interleaved sequence and take one page.
-    const page = merged.slice(input.start, input.start + input.limit);
+    const page = merged.slice(input.start, input.start + limit);
 
     const related = page.map(({ item, signals }) => ({
       record_id: item.record_id,
       title: item.title,
       unit_code: item.unit_code,
       museum_name: item.museum_name,
+      holding_museum_name: item.holding_museum_name,
       thumbnail_url: item.thumbnail_url,
       is_cc0: item.is_cc0,
       similarity_signals: signals,
@@ -514,9 +548,11 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     // exist upstream. Comparing rowCount to the targeted fetch depth (not the
     // page-local count) avoids false-positiving on a trailing page that lands on the
     // exact end of a signal — there rowCount never exceeds neededDepth.
-    const moreInMerged = merged.length > input.start + input.limit;
+    const moreInMerged = merged.length > input.start + limit;
     const moreUpstream = buckets.some((b) => b.rowCount > neededDepth);
-    const notices: string[] = [];
+    // Enrichment `notice` is last-wins, so the clamp sentence leads the one composed
+    // string. Signal labels are catalog text inside rendered Markdown, so they are escaped.
+    const notices = pageSize.notice ? [pageSize.notice] : [];
     if (failures.length > 0) {
       const failedSignals = failures.map(({ signal, error }) => {
         const category =
@@ -525,7 +561,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
             : error instanceof McpError && error.code === JsonRpcErrorCode.RateLimited
               ? 'rate limited'
               : 'unavailable';
-        return `${signal.slice(0, 120).replace(/\s+/g, ' ')} (${category})`;
+        return `${escapeMarkdownInline(signal.slice(0, 120).replace(/\s+/g, ' '))} (${category})`;
       });
       notices.push(
         `Partial results: signal searches failed for ${failedSignals.join('; ')}. Retry this call to include those signals.`,
@@ -542,24 +578,27 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
               : 'The fetched windows contained no non-anchor matches. Try signals[].search_continuation with smithsonian_search_objects for a signal with more rows, or another anchor.',
       );
     }
-    if (moreInMerged || moreUpstream) {
-      // Two-tier continuation: `start` pages the merged interleave up to each
-      // signal's MAX_FETCH_PER_SIGNAL reach; signals[].search_continuation is the
-      // only path past it. Name both, because a broad signal exhausts the first
-      // long before the ceiling is reached.
-      ctx.enrich.truncated({
-        shown: related.length,
-        cap: input.limit,
-        ceiling,
-        guidance: [
-          ...notices,
-          `Showing ${related.length} related objects from offset ${input.start}. ` +
-            'Advance start (start = page × limit) for the next page. Each signal is reachable ' +
-            `to ${MAX_FETCH_PER_SIGNAL} objects this way — see signals[].row_count for a signal's true size, ` +
-            'and pass its search_continuation to smithsonian_search_objects to retrieve the rest.',
-        ].join(' '),
-      });
-    } else if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    // The mirror-order sentence closes the notice whenever a signal page came from the mirror.
+    const pageReads = fanOutResults.flatMap((r) => (r.status === 'fulfilled' ? r.value.reads : []));
+    // Truncated pages carry two-tier continuation: `start` pages the merged interleave up
+    // to each signal's MAX_FETCH_PER_SIGNAL reach; signals[].search_continuation is the
+    // only path past it. Name both, because a broad signal exhausts the first long before
+    // the ceiling is reached. The next start is named outright: after a clamp,
+    // start = page × limit with the requested limit would skip candidates.
+    enrichPageNotice(ctx, {
+      leading: notices,
+      trailing: mirrorOrderNotice(pageReads),
+      truncation:
+        moreInMerged || moreUpstream
+          ? {
+              shown: related.length,
+              cap: limit,
+              ceiling,
+              guidance: `Showing ${related.length} related objects from offset ${input.start}. Advance start to ${input.start + related.length} for the next page. Each signal is reachable to ${MAX_FETCH_PER_SIGNAL} objects this way — see signals[].row_count for a signal's true size, and pass its search_continuation to smithsonian_search_objects to retrieve the rest.`,
+            }
+          : undefined,
+    });
+    enrichProvenance(ctx, [anchorProvenance, ...pageReads]);
 
     ctx.signal?.throwIfAborted();
 
@@ -584,6 +623,9 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     for (const obj of result.related) {
       lines.push(`### ${obj.title}`);
       lines.push(`**ID:** ${obj.record_id} | **Museum:** ${obj.museum_name} (${obj.unit_code})`);
+      if (obj.holding_museum_name) {
+        lines.push(`**Held by:** ${escapeMarkdownInline(obj.holding_museum_name)}`);
+      }
       lines.push(`**Connected by:** ${obj.similarity_signals.join(', ')}`);
       lines.push(`**CC0:** ${obj.is_cc0 ? 'Yes' : 'No'}`);
       if (obj.thumbnail_url) lines.push(`**Thumbnail:** ${obj.thumbnail_url}`);

@@ -5,7 +5,22 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getSmithsonianService, luceneField } from '@/services/smithsonian/smithsonian-service.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  enrichPageNotice,
+  PAGE_CAPS,
+  pageSizeInput,
+  pageSizeMeta,
+  servePageSize,
+} from '@/mcp-server/tools/page-size.js';
+import {
+  enrichProvenance,
+  mirrorOrderNotice,
+  provenanceEnrichment,
+  provenanceTrailer,
+} from '@/mcp-server/tools/provenance.js';
+import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
+import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
 import type { TermDescription } from '@/services/smithsonian/types.js';
 
 /**
@@ -103,6 +118,12 @@ const ObjectSummarySchema = z
       .describe(
         'Full museum name for the unit code. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
       ),
+    holding_museum_name: z
+      .string()
+      .optional()
+      .describe(
+        "The unit that holds the object, from the record's own data source, when it differs from the unit that indexes it (unit_code). Absent otherwise.",
+      ),
     object_type: z
       .string()
       .optional()
@@ -142,7 +163,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     query: z
       .string()
       .describe(
-        'Free-text search. Use specific terms for precision ("Tlingit totem pole") or broad terms for browsing ("quilt").',
+        'Free-text search. Every word is required — OR does not widen a search, while NOT excludes. Use specific terms for precision ("Tlingit totem pole") or broad terms for browsing ("quilt").',
       ),
     filters: z
       .object({
@@ -174,7 +195,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .string()
           .optional()
           .describe(
-            'Geographic place (e.g. "United States of America"). The full set is enumerable via smithsonian_list_terms (field "place").',
+            'Geographic place term, matched exactly (e.g. "United States"). Variants are separate terms with no hierarchy — "United States of America" is a different, far smaller term, and a record filed under a state alone carries no country term. The full set is enumerable via smithsonian_list_terms (field "place").',
           ),
         topic: z
           .string()
@@ -198,7 +219,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .string()
           .optional()
           .describe(
-            'Exact indexed scientific name from smithsonian_get_object.scientific_names, e.g. "Crotalus horridus". Not enumerable via smithsonian_list_terms.',
+            'Exact indexed scientific name from smithsonian_get_object.scientific_names, e.g. "Crotalus horridus"; a bare genus ("Crotalus") also matches, across its species. Not enumerable via smithsonian_list_terms.',
           ),
         online_media_type: z
           .string()
@@ -213,9 +234,20 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
             'When true, restrict to records that have CC0-licensed media attached (the Lucene term media_usage:CC0). This selects on media presence, not license status — the roughly 9.2M records it excludes are CC0 too, they simply have nothing digitized. Read has_media on each result to decide whether smithsonian_get_media will return anything.',
           ),
       })
+      .strict()
       .optional()
-      .describe('Optional structured filters to narrow the search.'),
-    rows: z.number().int().min(1).max(100).default(20).describe('Page size (default 20, max 100).'),
+      .describe(
+        'Optional structured filters to narrow the search. A key outside this set is rejected by name.',
+      ),
+    rows: pageSizeInput('smithsonian_search_objects', 'rows')
+      .default(20)
+      .meta(
+        pageSizeMeta('smithsonian_search_objects', (clamped, cap) =>
+          clamped
+            ? `Page size (default 20). A value above ${cap} is served at ${cap} with a notice.`
+            : `Page size (default 20, max ${cap}).`,
+        ),
+      ),
     start: z
       .number()
       .int()
@@ -251,8 +283,12 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance naming the input that retrieves the objects this page omitted.'),
+      .describe(
+        'Guidance naming the input that retrieves the objects this page omitted. Opens with the page size served when rows exceeded its cap.',
+      ),
+    ...provenanceEnrichment,
   },
+  enrichmentTrailer: provenanceTrailer,
 
   errors: [
     {
@@ -273,21 +309,23 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
   async handler(input, ctx) {
     const svc = getSmithsonianService();
 
-    // Build Lucene field:value filters to embed in q.
-    // Multi-word values are quoted; single tokens are bare.
-    const filters: string[] = [];
+    // Exact facet constraints, in the order the live query ANDs them. The service matches
+    // them in the mirror or turns each into a quoted Lucene term for the live API.
+    const filters: FacetFilter[] = [];
     const f = input.filters;
-    if (f?.unit_code) filters.push(luceneField('unit_code', f.unit_code));
-    if (f?.object_type) filters.push(luceneField('object_type', f.object_type));
-    if (f?.date) filters.push(luceneField('date', f.date));
-    if (f?.culture) filters.push(luceneField('culture', f.culture));
-    if (f?.place) filters.push(luceneField('place', f.place));
-    if (f?.topic) filters.push(luceneField('topic', f.topic));
-    if (f?.name) filters.push(luceneField('name', f.name));
-    if (f?.scientific_name) filters.push(luceneField('scientific_name', f.scientific_name));
-    if (f?.online_media_type) filters.push(luceneField('online_media_type', f.online_media_type));
-    if (f?.online_only) filters.push('online_media_type:*');
-    if (f?.cc0_only) filters.push('media_usage:CC0');
+    if (f?.unit_code) filters.push({ field: 'unit_code', value: f.unit_code });
+    if (f?.object_type) filters.push({ field: 'object_type', value: f.object_type });
+    if (f?.date) filters.push({ field: 'date', value: f.date });
+    if (f?.culture) filters.push({ field: 'culture', value: f.culture });
+    if (f?.place) filters.push({ field: 'place', value: f.place });
+    if (f?.topic) filters.push({ field: 'topic', value: f.topic });
+    if (f?.name) filters.push({ field: 'name', value: f.name });
+    if (f?.scientific_name) filters.push({ field: 'scientific_name', value: f.scientific_name });
+    if (f?.online_media_type) {
+      filters.push({ field: 'online_media_type', value: f.online_media_type });
+    }
+    if (f?.online_only) filters.push({ field: 'online_only' });
+    if (f?.cc0_only) filters.push({ field: 'cc0' });
 
     // EDAN rejects an entirely empty q with a raw 400 (issue #39). Filters alone
     // already assemble a non-empty q, so only a query-less, filter-less call needs
@@ -295,7 +333,8 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     // what an empty search asks for, instead of a transport-level fetch failure.
     const query = !input.query && filters.length === 0 ? '*' : input.query;
 
-    const rows = Math.min(input.rows, 100);
+    const served = servePageSize('smithsonian_search_objects', 'rows', input.rows, ctx);
+    const rows = served.value;
     ctx.log.info('Searching Smithsonian', {
       query,
       rows,
@@ -303,10 +342,11 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       filters,
     });
 
-    const { rows: objects, rowCount } = await svc.search(
-      { query, rows, start: input.start, filters },
-      ctx,
-    );
+    const {
+      rows: objects,
+      rowCount,
+      provenance,
+    } = await svc.search({ query, rows, start: input.start, filters }, ctx);
 
     // Guard on the TRUE match count, not the page-local length. A deep `start`
     // past the end of a real result set returns an empty page with rowCount > 0 —
@@ -351,10 +391,12 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
         );
 
         // Harvest only when object_type/unit_code is the culprit — those are the only
-        // filters whose exact values an unfiltered re-query can surface.
+        // filters whose exact values an unfiltered re-query can surface — and only for
+        // a non-blank query: without one the re-query has nothing to sample against,
+        // and EDAN answers its empty q with a 400 (issue #67).
         let objectTypes: string[] = [];
         let unitCodes: string[] = [];
-        if (f?.object_type || f?.unit_code) {
+        if ((f?.object_type || f?.unit_code) && input.query.trim()) {
           try {
             const { rows: sample } = await svc.search(
               { query: input.query, rows: 100, start: 0, filters: [] },
@@ -392,17 +434,26 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     // Account for the offset already consumed: a page is incomplete only when
     // objects remain BEYOND it. Comparing the page-local length against the total
     // reports truncated on every page past the first, including the terminal and
-    // past-the-end pages the rowCount guard above now lets through.
-    if (input.start + objects.length < rowCount) {
-      ctx.enrich.truncated({
-        shown: objects.length,
-        cap: rows,
-        ceiling: rowCount,
-        guidance:
-          `${rowCount} objects match; this page shows ${objects.length} from offset ${input.start}. ` +
-          'Retrieve the rest by advancing start (start = page × rows, rows max 100), or narrow with filters.',
-      });
-    }
+    // past-the-end pages the rowCount guard above now lets through. The next start
+    // is named outright: after a clamp, start = page × rows would skip the objects
+    // between the served page and the rows the caller asked for. Enrichment notice
+    // is last-wins, so the clamp sentence opens the one composed string and the
+    // mirror-order sentence closes it.
+    const next = input.start + objects.length;
+    enrichPageNotice(ctx, {
+      leading: [served.notice],
+      trailing: mirrorOrderNotice([provenance]),
+      truncation:
+        next < rowCount
+          ? {
+              shown: objects.length,
+              cap: rows,
+              ceiling: rowCount,
+              guidance: `${rowCount} objects match; this page shows ${objects.length} from offset ${input.start}. Retrieve the rest by advancing start (the next page starts at ${next}; a page holds at most ${PAGE_CAPS.smithsonian_search_objects} objects), or narrow with filters.`,
+            }
+          : undefined,
+    });
+    enrichProvenance(ctx, [provenance]);
 
     return { objects, total_count: rowCount };
   },
@@ -414,6 +465,9 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     for (const obj of result.objects) {
       lines.push(`### ${obj.title}`);
       lines.push(`**ID:** ${obj.record_id} | **Museum:** ${obj.museum_name} (${obj.unit_code})`);
+      if (obj.holding_museum_name) {
+        lines.push(`**Held by:** ${escapeMarkdownInline(obj.holding_museum_name)}`);
+      }
       if (obj.object_type) lines.push(`**Type:** ${obj.object_type}`);
       if (obj.date) lines.push(`**Date:** ${obj.date}`);
       lines.push(

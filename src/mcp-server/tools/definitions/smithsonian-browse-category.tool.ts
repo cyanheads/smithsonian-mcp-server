@@ -7,8 +7,21 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
 import {
+  enrichPageNotice,
+  PAGE_CAPS,
+  pageSizeInput,
+  pageSizeMeta,
+  servePageSize,
+} from '@/mcp-server/tools/page-size.js';
+import {
+  enrichProvenance,
+  mirrorOrderNotice,
+  provenanceEnrichment,
+  provenanceTrailer,
+} from '@/mcp-server/tools/provenance.js';
+import type { ValueFacet } from '@/services/smithsonian/oa-mirror.js';
+import {
   getSmithsonianService,
-  luceneField,
   type SmithsonianService,
 } from '@/services/smithsonian/smithsonian-service.js';
 import type { TermDescription } from '@/services/smithsonian/types.js';
@@ -26,7 +39,7 @@ type BrowseMode = 'museum' | 'culture' | 'period' | 'medium' | 'topic';
  * smithsonian_list_terms recovery instead of becoming a free-text search whose hit
  * count was reported as a museum total.
  */
-const MODE_FIELD: Record<BrowseMode, string> = {
+const MODE_FIELD: Record<BrowseMode, ValueFacet> = {
   museum: 'unit_code',
   culture: 'culture',
   period: 'date',
@@ -188,19 +201,23 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
       .describe(
         'Category value appropriate to the mode. museum: a unit code like "NASM", "SAAM", or "NMNHBIRDS", matched literally and case-sensitively — not a museum name. culture: term, often plural or qualified ("Aztecs", "Plains Indian"). period: an indexed date term — commonly a decade ("1940s", "1860s"), but year ranges ("500-1500"), century terms ("21st century"), and BCE forms ("-2500", "BCE 1000s") are indexed too. medium: object type, usually plural ("Paintings", "Aircraft"). topic: subject term ("Quilts", "Aviation"). Smithsonian uses a controlled vocabulary — for museum (unit_code), culture, period (date), and topic, call smithsonian_list_terms to find exact terms; medium (object_type) is not enumerable there, so harvest it from smithsonian_search_objects results. Every mode matches its value exactly and case-sensitively, and for medium that split is load-bearing: casing variants are indexed as SEPARATE categories, each reporting its own total_count ("button" and "Button" are different categories, and neither casing is reliably the larger), so browse the variants of a harvested value rather than assuming one covers the concept.',
       ),
-    rows: z
-      .number()
-      .int()
-      .min(1)
-      .max(50)
+    rows: pageSizeInput('smithsonian_browse_category', 'rows')
       .default(10)
-      .describe('Number of sample objects to return (default 10, max 50).'),
+      .meta(
+        pageSizeMeta('smithsonian_browse_category', (clamped, cap) =>
+          clamped
+            ? `Number of sample objects to return (default 10). A value above ${cap} is served at ${cap} with a notice.`
+            : `Number of sample objects to return (default 10, max ${cap}).`,
+        ),
+      ),
     start: z
       .number()
       .int()
       .min(0)
       .default(0)
-      .describe('Pagination offset — 0-indexed. Page contiguously with start = page × rows.'),
+      .describe(
+        'Pagination offset — 0-indexed. Page contiguously by advancing start by the number of objects returned; a truncated page names the next start in its notice.',
+      ),
   }),
 
   output: z.object({
@@ -214,7 +231,7 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
     sample_objects: z
       .array(SampleObjectSchema)
       .describe(
-        'The requested page of objects matching the category, in upstream order. Empty when start is past the end of the category.',
+        'The requested page of objects matching the category, in upstream order, or in mirror order when sources names oa_mirror. Empty when start is past the end of the category.',
       ),
     museum_breakdown: z
       .array(
@@ -245,7 +262,10 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
         'True when matching objects remain past this page. False on a terminal or past-the-end page, where nothing is being withheld.',
       ),
     shown: z.number().optional().describe('Number of sample objects returned.'),
-    cap: z.number().optional().describe('The rows cap that was applied.'),
+    cap: z
+      .number()
+      .optional()
+      .describe('The page size served: rows as requested, or its cap when rows exceeded it.'),
     truncationCeiling: z
       .number()
       .optional()
@@ -253,8 +273,12 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance naming the input that retrieves the objects this page omitted.'),
+      .describe(
+        'Guidance naming the input that retrieves the objects this page omitted. Opens with the page size served when rows exceeded its cap.',
+      ),
+    ...provenanceEnrichment,
   },
+  enrichmentTrailer: provenanceTrailer,
 
   errors: [
     {
@@ -269,12 +293,13 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
   async handler(input, ctx) {
     const svc = getSmithsonianService();
 
-    // The category IS the query: the mode's field constraint is embedded in q as a
-    // Lucene field:value term (EDAN has no fq param) with no free-text base query.
-    // luceneField's quoting and escaping are load-bearing — an unquoted value ends
-    // the field term at the first space and leaks its trailing words back out as free
-    // text, and an unquoted single-token `*` becomes a wildcard over the whole field.
-    const filters = [luceneField(MODE_FIELD[input.mode], input.value)];
+    // The category IS the query: one exact facet constraint on the mode's field, with no
+    // free-text base query. The mirror matches it as that exact value; the live path sends
+    // it as a quoted, escaped Lucene term (luceneField), since an unquoted value ends the
+    // field term at the first space and leaks its trailing words back out as free text,
+    // and an unquoted single-token `*` becomes a wildcard over the whole field.
+    const filters = [{ field: MODE_FIELD[input.mode], value: input.value }];
+    const pageSize = servePageSize('smithsonian_browse_category', 'rows', input.rows, ctx);
 
     ctx.log.info('Browsing Smithsonian category', {
       mode: input.mode,
@@ -283,10 +308,11 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
       start: input.start,
     });
 
-    const { rows: objects, rowCount } = await svc.search(
-      { query: '', rows: input.rows, start: input.start, filters },
-      ctx,
-    );
+    const {
+      rows: objects,
+      rowCount,
+      provenance,
+    } = await svc.search({ query: '', rows: pageSize.value, start: input.start, filters }, ctx);
 
     // Guard on the TRUE match count, not the page-local length. A start past the
     // end of a real category returns an empty page with rowCount > 0 — normal
@@ -351,16 +377,24 @@ export const smithsonianBrowseCategory = tool('smithsonian_browse_category', {
     // not merely a page smaller than the category. The page-local comparison would
     // report truncated on the genuine last page (where length is rowCount − start)
     // and on the past-the-end page the rowCount guard above now lets through.
-    if (input.start + sampleObjects.length < rowCount) {
-      ctx.enrich.truncated({
-        shown: sampleObjects.length,
-        cap: input.rows,
-        ceiling: rowCount,
-        guidance:
-          `${rowCount} objects match this category; this page shows ${sampleObjects.length} from offset ${input.start}. ` +
-          'Retrieve the rest by advancing start (start = page × rows, rows max 50).',
-      });
-    }
+    // The guidance names the next start outright: after a clamp, start = page × rows
+    // with the requested rows would skip everything between the cap and that value.
+    // `notice` is last-wins, so the clamp sentence opens the same string and the
+    // mirror-order sentence closes it.
+    enrichPageNotice(ctx, {
+      leading: [pageSize.notice],
+      trailing: mirrorOrderNotice([provenance]),
+      truncation:
+        input.start + sampleObjects.length < rowCount
+          ? {
+              shown: sampleObjects.length,
+              cap: pageSize.value,
+              ceiling: rowCount,
+              guidance: `${rowCount} objects match this category; this page shows ${sampleObjects.length} from offset ${input.start}. Retrieve the rest by advancing start — the next page starts at ${input.start + sampleObjects.length}, and a page holds at most ${PAGE_CAPS.smithsonian_browse_category} objects.`,
+            }
+          : undefined,
+    });
+    enrichProvenance(ctx, [provenance]);
 
     return {
       mode: input.mode,

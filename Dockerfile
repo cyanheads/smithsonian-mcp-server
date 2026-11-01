@@ -14,7 +14,7 @@
 # output. A stage that compiles a native addon needs the target-arch toolchain
 # and cannot cross-compile this way — drop the flag there.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS build
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS build
 
 WORKDIR /usr/src/app
 
@@ -28,6 +28,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 
 # Copy the rest of the source code
 COPY . .
+RUN mkdir -p skills
 
 # Build the application
 RUN bun run build
@@ -46,7 +47,7 @@ RUN bun run build
 # A clean image rather than `FROM build`: the build stage's node_modules holds
 # devDependencies.
 # ==============================================================================
-FROM --platform=$BUILDPLATFORM oven/bun:1.4.3 AS deps
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.4 AS deps
 
 WORKDIR /usr/src/app
 
@@ -114,7 +115,7 @@ RUN rm -rf node_modules/@socketsecurity/bun-security-scanner
 # dependencies and build artifacts. Its only Bun invocations are HEALTHCHECK
 # and CMD, which run on the real target at container start.
 # ==============================================================================
-FROM oven/bun:1.4.3-slim AS production
+FROM oven/bun:1.4.4-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -136,12 +137,18 @@ COPY --from=deps /usr/src/app/node_modules ./node_modules
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
+COPY --from=build /usr/src/app/skills ./skills
 
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
 
 # Create and set permissions for the log directory, assigning ownership to the 'bun' user.
 RUN mkdir -p /var/log/smithsonian-mcp-server && chown -R bun:bun /var/log/smithsonian-mcp-server
+
+# Home for the Open Access bulk mirror, owned by the runtime user. Mount a persistent volume
+# here, point SMITHSONIAN_MIRROR_PATH at a file inside it, and build it once with
+# `docker exec <container> bun run mirror:init` (the `mirror:*` scripts run dist/mirror/cli.js).
+RUN mkdir -p /var/lib/smithsonian-mcp-server && chown -R bun:bun /var/lib/smithsonian-mcp-server
 
 # Switch to the non-root user
 USER bun

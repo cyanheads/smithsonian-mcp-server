@@ -55,7 +55,7 @@ describe('smithsonianGetMedia', () => {
 
   it('returns CC0 images for a valid CC0 object', async () => {
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(makeCc0Raw(1, true)),
+      getContent: vi.fn().mockResolvedValue({ record: makeCc0Raw(1, true) }),
       isCC0: vi.fn().mockReturnValue(true),
       toImageItems: vi.fn().mockReturnValue([makeCc0Image()]),
     } as unknown as svcModule.SmithsonianService);
@@ -81,7 +81,7 @@ describe('smithsonianGetMedia', () => {
       if (title === undefined) delete raw.title;
       else raw.title = title;
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-        getContent: vi.fn().mockResolvedValue(raw),
+        getContent: vi.fn().mockResolvedValue({ record: raw }),
         isCC0: vi.fn().mockReturnValue(true),
         toImageItems: vi
           .fn()
@@ -126,7 +126,7 @@ describe('smithsonianGetMedia', () => {
 
   it('throws no_media when object has no online media', async () => {
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(makeCc0Raw(0, true)),
+      getContent: vi.fn().mockResolvedValue({ record: makeCc0Raw(0, true) }),
       isCC0: vi.fn().mockReturnValue(true),
       toImageItems: vi.fn().mockReturnValue([]),
     } as unknown as svcModule.SmithsonianService);
@@ -160,7 +160,7 @@ describe('smithsonianGetMedia', () => {
       },
     };
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(raw),
+      getContent: vi.fn().mockResolvedValue({ record: raw }),
       isCC0: vi.fn().mockReturnValue(true),
       toImageItems: vi.fn().mockReturnValue([]),
     } as unknown as svcModule.SmithsonianService);
@@ -196,7 +196,7 @@ describe('smithsonianGetMedia', () => {
       },
     };
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(raw),
+      getContent: vi.fn().mockResolvedValue({ record: raw }),
       isCC0: vi.fn().mockReturnValue(true),
       toImageItems: vi.fn().mockReturnValue([]),
     } as unknown as svcModule.SmithsonianService);
@@ -215,7 +215,7 @@ describe('smithsonianGetMedia', () => {
 
   it('throws not_cc0 when object has images but none are CC0', async () => {
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(makeCc0Raw(1, false)),
+      getContent: vi.fn().mockResolvedValue({ record: makeCc0Raw(1, false) }),
       isCC0: vi.fn().mockReturnValue(false),
       toImageItems: vi
         .fn()
@@ -236,7 +236,7 @@ describe('smithsonianGetMedia', () => {
     // per-image (media[].usage.access). An object can be CC0-metadata but have restricted images.
     // The tool gates on the per-image flag — only cc0Images.length > 0 passes.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(makeCc0Raw(2, true)), // object-level CC0=true
+      getContent: vi.fn().mockResolvedValue({ record: makeCc0Raw(2, true) }), // object-level CC0=true
       isCC0: vi.fn().mockReturnValue(true), // object says CC0
       toImageItems: vi.fn().mockReturnValue([
         // Both images have per-image CC0=false — individual restriction overrides object level
@@ -255,7 +255,7 @@ describe('smithsonianGetMedia', () => {
   it('returns only the CC0 images when mixed CC0 and restricted images exist', async () => {
     // Partial case: some images are CC0, some aren't — only the CC0 ones should be returned
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(makeCc0Raw(2, true)),
+      getContent: vi.fn().mockResolvedValue({ record: makeCc0Raw(2, true) }),
       isCC0: vi.fn().mockReturnValue(true),
       toImageItems: vi.fn().mockReturnValue([
         { media_id: 'NASM-IMG-CC0', is_cc0: true, thumbnail_url: 'https://ids.si.edu/thumb1' },
@@ -328,6 +328,78 @@ describe('smithsonianGetMedia', () => {
     // All URLs must point to ids.si.edu (IDS), not iiif.* or manifests
     expect(text).toContain('ids.si.edu');
     expect(text).not.toContain('iiif');
+  });
+
+  describe('no_images recovery routes to media_summary.non_image_media (issue #62)', () => {
+    /** The error text on `content[]`, joined. */
+    const textOf = (result: { content?: unknown }) =>
+      ((result.content ?? []) as Array<{ type: string; text?: string }>)
+        .map((b) => (b.type === 'text' ? (b.text ?? '') : ''))
+        .join('\n');
+
+    function stubService(media: NonNullable<RawEDAN['content']>['descriptiveNonRepeating']) {
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        getContent: vi.fn().mockResolvedValue({
+          record: {
+            title: 'Cassiopeia A Supernova Remnant',
+            content: {
+              descriptiveNonRepeating: {
+                record_ID: 'dpo_3d_200012',
+                metadata_usage: { access: 'CC0' },
+                ...media,
+              },
+            },
+          } satisfies RawEDAN,
+        }),
+        isCC0: vi.fn().mockReturnValue(true),
+        toImageItems: vi.fn().mockReturnValue([]),
+      } as unknown as svcModule.SmithsonianService);
+    }
+
+    it('names non_image_media, not record_link, in the runtime hint on both surfaces', async () => {
+      // dpo_3d_200012 carries one 3d_voyager item and no record_link.
+      stubService({
+        online_media: {
+          mediaCount: 1,
+          media: [{ type: '3d_voyager', content: 'https://3d-api.si.edu/voyager/x' }],
+        },
+      });
+      const result = await runToolContract(smithsonianGetMedia, { id: 'dpo_3d_200012' });
+      const hint = (
+        result.structuredContent as {
+          error?: { data?: { reason?: string; recovery?: { hint?: string } } };
+        }
+      ).error?.data;
+      expect(hint?.reason).toBe('no_images');
+      expect(hint?.recovery?.hint).toContain('3d_voyager');
+      expect(hint?.recovery?.hint).toContain(
+        'smithsonian_get_object { id: "dpo_3d_200012" } and read media_summary.non_image_media',
+      );
+      expect(hint?.recovery?.hint).not.toContain('record_link');
+      expect(textOf(result)).toContain('media_summary.non_image_media');
+      expect(textOf(result)).not.toContain('record_link');
+    });
+
+    it('names non_image_media, not record_link, in the declared recovery on both surfaces', async () => {
+      // Untyped items with no media id: nothing normalizes to an image and no type
+      // can be named, so the declared recovery is what reaches the caller.
+      stubService({ online_media: { mediaCount: 1, media: [{}] } });
+      const declared = smithsonianGetMedia.errors?.find((e) => e.reason === 'no_images')?.recovery;
+      expect(declared).toContain('media_summary.non_image_media');
+      expect(declared).not.toContain('record_link');
+
+      const result = await runToolContract(smithsonianGetMedia, { id: 'dpo_3d_200012' });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'no_images', recovery: { hint: declared } } },
+      });
+      expect(textOf(result)).toContain('media_summary.non_image_media');
+    });
+
+    it('no longer cites sound recordings, which carry no media items and end at no_media', () => {
+      const entry = smithsonianGetMedia.errors?.find((e) => e.reason === 'no_images');
+      expect(entry?.when).not.toMatch(/sound recording/i);
+      expect(smithsonianGetMedia.description).not.toMatch(/sound recording/i);
+    });
   });
 
   it('format renders media_id, CC0 status, and image URLs', () => {

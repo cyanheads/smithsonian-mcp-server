@@ -11,8 +11,10 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
+import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, RawEDAN, RawIndexedName } from '@/services/smithsonian/types.js';
 
@@ -65,7 +67,7 @@ function makeRelatedRows(): ObjectSummary[] {
 describe('smithsonianFindRelated', () => {
   function fanoutService(search: ReturnType<typeof vi.fn>, raw = makeAnchorRaw()) {
     const service = new svcModule.SmithsonianService(createInMemoryStorage());
-    vi.spyOn(service, 'getContent').mockResolvedValue(raw);
+    vi.spyOn(service, 'getContent').mockResolvedValue({ record: raw });
     vi.spyOn(service, 'search').mockImplementation(search);
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
     return service;
@@ -75,7 +77,7 @@ describe('smithsonianFindRelated', () => {
     const search = vi
       .fn()
       .mockImplementation(({ filters }) =>
-        filters[0]?.startsWith('culture:')
+        filters[0]?.field === 'culture'
           ? Promise.reject(new Error('SECRET upstream body'))
           : Promise.resolve({ rows: makeRelatedRows(), rowCount: 100 }),
       );
@@ -169,7 +171,7 @@ describe('smithsonianFindRelated', () => {
 
   it('discloses a later-chunk failure without retaining a gapped signal', async () => {
     const search = vi.fn().mockImplementation(async ({ start, rows, filters }) => {
-      if (start > 0 && filters[0]?.startsWith('culture:')) throw new Error('SECRET chunk failure');
+      if (start > 0 && filters[0]?.field === 'culture') throw new Error('SECRET chunk failure');
       return {
         rows: Array.from({ length: rows }, (_, i) => ({
           ...makeRelatedRows()[0]!,
@@ -217,6 +219,26 @@ describe('smithsonianFindRelated', () => {
     expect(notice.length).toBeLessThan(600);
   });
 
+  it('escapes a failed signal label inside the Markdown notice', async () => {
+    // Signal labels are catalog text, and the framework renders a notice as Markdown
+    // without escaping it, so a raw `*` would italicize the rest of the sentence.
+    const raw = makeAnchorRaw();
+    raw.content!.indexedStructured!.culture = ['Plains *Indian*'];
+    fanoutService(
+      vi
+        .fn()
+        .mockImplementation(({ filters }) =>
+          filters[0]?.field === 'culture'
+            ? Promise.reject(new Error('down'))
+            : Promise.resolve({ rows: makeRelatedRows(), rowCount: 2 }),
+        ),
+      raw,
+    );
+    const result = await runToolContract(smithsonianFindRelated, { id: 'nasm_TEST001' });
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('culture: Plains \\*Indian\\* (unavailable)');
+  });
+
   it('describes anchor-only fetched windows without claiming the full signal is empty', async () => {
     const service = fanoutService(vi.fn());
     vi.mocked(service.search).mockResolvedValue({
@@ -238,7 +260,7 @@ describe('smithsonianFindRelated', () => {
   it('returns related objects for a valid anchor ID', async () => {
     const anchorRaw = makeAnchorRaw();
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor Object',
@@ -305,7 +327,7 @@ describe('smithsonianFindRelated', () => {
     // Fan-out returns overlapping results
     const duplicated = [...makeRelatedRows(), makeRelatedRows()[0]!];
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor Object',
@@ -338,7 +360,7 @@ describe('smithsonianFindRelated', () => {
       has_media: false,
     }));
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -405,7 +427,7 @@ describe('smithsonianFindRelated', () => {
       .mockResolvedValue({ rows: [], rowCount: 0 });
 
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue(anchorSummary),
       search: searchFn,
     } as unknown as svcModule.SmithsonianService);
@@ -438,7 +460,7 @@ describe('smithsonianFindRelated', () => {
       has_media: true,
     };
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue(anchorSummary),
       // Every search returns only the anchor itself — all deduplicated away
       search: vi.fn().mockResolvedValue({
@@ -464,7 +486,7 @@ describe('smithsonianFindRelated', () => {
     // (the pre-fix contract) threw on this path.
     const anchorRaw = makeAnchorRaw();
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor Object',
@@ -506,7 +528,7 @@ describe('smithsonianFindRelated', () => {
       .mockResolvedValueOnce({ rows: [shared], rowCount: 1 }) // topic: Aviation
       .mockResolvedValue({ rows: [], rowCount: 0 }); // period + type
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -536,7 +558,7 @@ describe('smithsonianFindRelated', () => {
     const anchorRaw = makeAnchorRaw();
     const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -567,7 +589,7 @@ describe('smithsonianFindRelated', () => {
     const anchorRaw = makeAnchorRaw();
     const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -609,9 +631,9 @@ describe('smithsonianFindRelated', () => {
     // from start:0 (the deep fetch never offsets the upstream query for depths ≤ 1 chunk).
     const searchFn = vi
       .fn()
-      .mockImplementation((params: { rows: number; start: number; filters?: string[] }) =>
+      .mockImplementation((params: { rows: number; start: number; filters?: FacetFilter[] }) =>
         Promise.resolve(
-          params.filters?.some((f) => f.startsWith('culture:'))
+          params.filters?.some((f) => f.field === 'culture')
             ? {
                 rows: fullSeq.slice(params.start, params.start + params.rows),
                 rowCount: fullSeq.length,
@@ -620,7 +642,7 @@ describe('smithsonianFindRelated', () => {
         ),
       );
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -670,9 +692,9 @@ describe('smithsonianFindRelated', () => {
     // Slice by BOTH start and rows so wave 2 (start:1000) returns the correct window.
     const searchFn = vi
       .fn()
-      .mockImplementation((params: { rows: number; start: number; filters?: string[] }) =>
+      .mockImplementation((params: { rows: number; start: number; filters?: FacetFilter[] }) =>
         Promise.resolve(
-          params.filters?.some((f) => f.startsWith('culture:'))
+          params.filters?.some((f) => f.field === 'culture')
             ? {
                 rows: fullSeq.slice(params.start, params.start + params.rows),
                 rowCount: fullSeq.length,
@@ -681,7 +703,7 @@ describe('smithsonianFindRelated', () => {
         ),
       );
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -707,8 +729,8 @@ describe('smithsonianFindRelated', () => {
     // wave 2 (start:1000, rows:20). Both start values were requested; the >1000-row
     // single call was never issued.
     const cultureCalls = searchFn.mock.calls
-      .map((c) => c[0] as { start: number; rows: number; filters?: string[] })
-      .filter((p) => p.filters?.some((f) => f.startsWith('culture:')));
+      .map((c) => c[0] as { start: number; rows: number; filters?: FacetFilter[] })
+      .filter((p) => p.filters?.some((f) => f.field === 'culture'));
     expect(cultureCalls.map((p) => p.start)).toEqual([0, 1000]);
     expect(cultureCalls.find((p) => p.start === 0)?.rows).toBe(1000);
     expect(cultureCalls.find((p) => p.start === 1000)?.rows).toBe(20);
@@ -731,15 +753,15 @@ describe('smithsonianFindRelated', () => {
       is_cc0: true,
       has_media: false,
     }));
-    const searchFn = vi.fn().mockImplementation((params: { filters?: string[] }) =>
+    const searchFn = vi.fn().mockImplementation((params: { filters?: FacetFilter[] }) =>
       Promise.resolve(
-        params.filters?.some((f) => f.startsWith('culture:'))
+        params.filters?.some((f) => f.field === 'culture')
           ? { rows: cultureRows, rowCount: 8000 } // far more upstream than the 5000 reach
           : { rows: [], rowCount: 0 },
       ),
     );
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -780,7 +802,7 @@ describe('smithsonianFindRelated', () => {
       .mockResolvedValueOnce({ rows: cultureRows, rowCount: 215 }) // culture — more upstream
       .mockResolvedValue({ rows: [], rowCount: 0 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -822,15 +844,15 @@ describe('smithsonianFindRelated', () => {
     // prefix from start:0 (rowCount is the full 15 — everything is fetchable).
     const searchFn = vi
       .fn()
-      .mockImplementation((params: { rows: number; filters?: string[] }) =>
+      .mockImplementation((params: { rows: number; filters?: FacetFilter[] }) =>
         Promise.resolve(
-          params.filters?.some((f) => f.startsWith('culture:'))
+          params.filters?.some((f) => f.field === 'culture')
             ? { rows: fullRows.slice(0, params.rows), rowCount: fullRows.length }
             : { rows: [], rowCount: 0 },
         ),
       );
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -870,15 +892,15 @@ describe('smithsonianFindRelated', () => {
     // from row 0, exactly as the real API does when queried with start:0.
     const searchFn = vi
       .fn()
-      .mockImplementation((params: { rows: number; filters?: string[] }) =>
+      .mockImplementation((params: { rows: number; filters?: FacetFilter[] }) =>
         Promise.resolve(
-          params.filters?.some((f) => f.startsWith('culture:'))
+          params.filters?.some((f) => f.field === 'culture')
             ? { rows: fullSeq.slice(0, params.rows), rowCount: fullSeq.length }
             : { rows: [], rowCount: 0 },
         ),
       );
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -935,17 +957,19 @@ describe('smithsonianFindRelated', () => {
       is_cc0: true,
       has_media: false,
     });
-    const searchFn = vi.fn().mockImplementation((params: { query: string; filters?: string[] }) => {
-      if (params.filters?.some((f) => f.startsWith('culture:')))
-        return Promise.resolve({ rows: [row('culture_1')], rowCount: 14662 });
-      if (params.query === 'Lockheed')
-        return Promise.resolve({ rows: [row('maker_1')], rowCount: 199 });
-      if (params.filters?.some((f) => f.startsWith('topic:')))
-        return Promise.resolve({ rows: [row('topic_1')], rowCount: 63 });
-      return Promise.resolve({ rows: [row('period_1')], rowCount: 12 });
-    });
+    const searchFn = vi
+      .fn()
+      .mockImplementation((params: { query: string; filters?: FacetFilter[] }) => {
+        if (params.filters?.some((f) => f.field === 'culture'))
+          return Promise.resolve({ rows: [row('culture_1')], rowCount: 14662 });
+        if (params.query === 'Lockheed')
+          return Promise.resolve({ rows: [row('maker_1')], rowCount: 199 });
+        if (params.filters?.some((f) => f.field === 'topic'))
+          return Promise.resolve({ rows: [row('topic_1')], rowCount: 63 });
+        return Promise.resolve({ rows: [row('period_1')], rowCount: 12 });
+      });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -974,7 +998,7 @@ describe('smithsonianFindRelated', () => {
     // signal kinds maps differently, so all four are pinned.
     const anchorRaw = makeAnchorRaw();
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -1020,7 +1044,7 @@ describe('smithsonianFindRelated', () => {
       anchorRaw.content!.indexedStructured!.date = [period];
       const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-        getContent: vi.fn().mockResolvedValue(anchorRaw),
+        getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
         toSummary: vi.fn().mockReturnValue({
           record_id: 'nasm_TEST001',
           title: 'Anchor',
@@ -1047,9 +1071,9 @@ describe('smithsonianFindRelated', () => {
       // fan-out quotes the date term exactly as the sibling tool would — always,
       // not only when the term contains a space (issue #42).
       const fanOutFilters = searchFn.mock.calls
-        .map((call) => (call[0] as { filters: string[] }).filters)
-        .find((filters) => filters.some((f) => f.startsWith('date:')));
-      expect(fanOutFilters).toContain(`date:"${period}"`);
+        .map((call) => (call[0] as { filters: FacetFilter[] }).filters)
+        .find((filters) => filters.some((f) => f.field === 'date'));
+      expect(fanOutFilters?.map(svcModule.luceneFilter)).toContain(`date:"${period}"`);
       // The whole continuation must parse as smithsonian_search_objects input.
       expect(() =>
         smithsonianSearchObjects.input.parse(periodSignal?.search_continuation),
@@ -1063,7 +1087,7 @@ describe('smithsonianFindRelated', () => {
     anchorRaw.content!.indexedStructured!.culture = ['Plains Indian'];
     anchorRaw.content!.indexedStructured!.object_type = ['Crewed spacecraft'];
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -1093,13 +1117,13 @@ describe('smithsonianFindRelated', () => {
     const anchorRaw = makeAnchorRaw();
     const searchFn = vi
       .fn()
-      .mockImplementation((params: { filters?: string[] }) =>
-        params.filters?.some((f) => f.startsWith('culture:'))
+      .mockImplementation((params: { filters?: FacetFilter[] }) =>
+        params.filters?.some((f) => f.field === 'culture')
           ? Promise.reject(new Error('upstream 503'))
           : Promise.resolve({ rows: [], rowCount: 11 }),
       );
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -1137,7 +1161,7 @@ describe('smithsonianFindRelated', () => {
       has_media: false,
     }));
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -1148,9 +1172,9 @@ describe('smithsonianFindRelated', () => {
       }),
       search: vi
         .fn()
-        .mockImplementation((params: { filters?: string[] }) =>
+        .mockImplementation((params: { filters?: FacetFilter[] }) =>
           Promise.resolve(
-            params.filters?.some((f) => f.startsWith('culture:'))
+            params.filters?.some((f) => f.field === 'culture')
               ? { rows: cultureRows, rowCount: 14662 }
               : { rows: [], rowCount: 0 },
           ),
@@ -1192,7 +1216,7 @@ describe('smithsonianFindRelated', () => {
       anchorRaw.content!.freetext!.name = anchor.freetextNames ?? [];
       const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 4 });
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-        getContent: vi.fn().mockResolvedValue(anchorRaw),
+        getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
         toSummary: vi.fn().mockReturnValue({
           record_id: 'nasm_TEST001',
           title: 'Anchor',
@@ -1211,7 +1235,7 @@ describe('smithsonianFindRelated', () => {
       );
       return {
         result,
-        calls: searchFn.mock.calls.map((c) => c[0] as { query: string; filters: string[] }),
+        calls: searchFn.mock.calls.map((c) => c[0] as { query: string; filters: FacetFilter[] }),
       };
     }
 
@@ -1287,8 +1311,10 @@ describe('smithsonianFindRelated', () => {
       });
 
       expect(result.search_signals_used).toContain('name: Möller, Major J. A. L.');
-      const nameCall = calls.find((c) => c.filters.some((f) => f.startsWith('name:')));
-      expect(nameCall?.filters).toContain('name:"Möller, Major J. A. L."');
+      const nameCall = calls.find((c) => c.filters.some((f) => f.field === 'name'));
+      expect(nameCall?.filters.map(svcModule.luceneFilter)).toContain(
+        'name:"Möller, Major J. A. L."',
+      );
       // A hard filter, not a free-text query.
       expect(nameCall?.query).toBe('');
       expect(calls.some((c) => c.query.includes('Möller'))).toBe(false);
@@ -1321,8 +1347,10 @@ describe('smithsonianFindRelated', () => {
       });
 
       expect(result.search_signals_used).toContain('name: Mitchell, Stephanie L.');
-      const nameCall = calls.find((c) => c.filters.some((f) => f.startsWith('name:')));
-      expect(nameCall?.filters).toContain('name:"Mitchell, Stephanie L."');
+      const nameCall = calls.find((c) => c.filters.some((f) => f.field === 'name'));
+      expect(nameCall?.filters.map(svcModule.luceneFilter)).toContain(
+        'name:"Mitchell, Stephanie L."',
+      );
       expect(result.signals.find((s) => s.signal.startsWith('name:'))?.search_continuation).toEqual(
         {
           query: '',
@@ -1359,7 +1387,7 @@ describe('smithsonianFindRelated', () => {
     const anchorRaw = makeAnchorRaw();
     const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 1134 });
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue(anchorRaw),
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
       toSummary: vi.fn().mockReturnValue({
         record_id: 'nasm_TEST001',
         title: 'Anchor',
@@ -1378,10 +1406,10 @@ describe('smithsonianFindRelated', () => {
     );
 
     const topicCall = searchFn.mock.calls
-      .map((c) => c[0] as { query: string; filters: string[] })
-      .find((p) => p.filters.some((f) => f.startsWith('topic:')));
+      .map((c) => c[0] as { query: string; filters: FacetFilter[] })
+      .find((p) => p.filters.some((f) => f.field === 'topic'));
     // Always quoted (issue #42) — 80 of the 133,113 topic terms carry a `"`.
-    expect(topicCall?.filters).toEqual(['topic:"Aviation"']);
+    expect(topicCall?.filters.map(svcModule.luceneFilter)).toEqual(['topic:"Aviation"']);
     expect(topicCall?.query).toBe('');
     expect(searchFn.mock.calls.some((c) => (c[0] as { query: string }).query === 'Aviation')).toBe(
       false,
@@ -1499,7 +1527,11 @@ describe('smithsonianFindRelated', () => {
       vi.stubGlobal(
         'fetch',
         vi.fn().mockImplementation((url: string) => {
-          const anchor = url.includes('/content/');
+          const { pathname } = new URL(url);
+          const anchor = pathname.startsWith('/openaccess/api/v1.0/content/');
+          if (!anchor && pathname !== '/openaccess/api/v1.0/search') {
+            return Promise.reject(new Error('unmocked fetch'));
+          }
           const body = anchor
             ? {
                 status: 200,
@@ -1565,6 +1597,218 @@ describe('smithsonianFindRelated', () => {
       expect(text).toContain("The Sun's Open Magnetic Flux");
       expect(text).toContain("Pregnant Women's Concerns");
       expect(text).not.toContain('&#39;');
+    });
+  });
+
+  /** Every text block of a result, the trailer that carries the notice included. */
+  function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+    return result.content.map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('\n');
+  }
+
+  describe('page-size clamp (issue #63)', () => {
+    /**
+     * Only the culture fan-out matches: `total` objects served the way EDAN pages
+     * them, `rows` from `start`, so the requests the tool sends decide what comes back.
+     */
+    function routeCulture(total: number) {
+      const search = vi
+        .fn()
+        .mockImplementation(
+          async ({
+            rows,
+            start,
+            filters,
+          }: {
+            rows: number;
+            start: number;
+            filters: FacetFilter[];
+          }) =>
+            filters[0]?.field === 'culture'
+              ? {
+                  rows: Array.from(
+                    { length: Math.max(0, Math.min(rows, total - start)) },
+                    (_, i) => ({ ...makeRelatedRows()[0]!, record_id: `culture_${start + i}` }),
+                  ),
+                  rowCount: total,
+                }
+              : { rows: [], rowCount: 0 },
+        );
+      fanoutService(search);
+      return search;
+    }
+
+    /** The `limit` property as `tools/list` advertises it, serialized as on the wire. */
+    function advertisedLimit(): Record<string, unknown> {
+      const schema = smithsonianFindRelated.input['~standard'].jsonSchema.input({
+        target: 'draft-2020-12',
+      }) as { properties: Record<string, unknown> };
+      return JSON.parse(JSON.stringify(schema.properties.limit));
+    }
+
+    const CLAMP = 'limit 1500 exceeds the cap of 1000; the page was served with limit 1000.';
+
+    it('serves limit 1500 at 1000: one 1000-row fetch per signal and a 1000-object page', async () => {
+      const search = routeCulture(3000);
+
+      const result = await runToolContract(smithsonianFindRelated, {
+        id: 'nasm_TEST001',
+        limit: 1500,
+      });
+
+      expect(result.isError).not.toBe(true);
+      // Four fan-outs (culture, named party, topic, period+type), each fetched once
+      // from the top at the served depth — a 1500-deep fetch would add a second
+      // chunk at start 1000 for the culture signal.
+      expect(search.mock.calls.map(([params]) => [params.start, params.rows])).toEqual([
+        [0, 1000],
+        [0, 1000],
+        [0, 1000],
+        [0, 1000],
+      ]);
+      const sc = result.structuredContent as {
+        related: Array<{ record_id: string }>;
+        truncated?: boolean;
+        cap?: number;
+        notice?: string;
+      };
+      expect(sc.related).toHaveLength(1000);
+      expect(sc.related.at(-1)?.record_id).toBe('culture_999');
+      expect(sc).toMatchObject({ truncated: true, cap: 1000 });
+      expect(
+        sc.notice?.startsWith(
+          `${CLAMP} Showing 1000 related objects from offset 0. Advance start to 1000 for the next page.`,
+        ),
+      ).toBe(true);
+      expect(textOf(result)).toContain(CLAMP);
+      expect(textOf(result)).toContain('Advance start to 1000 for the next page.');
+    });
+
+    it('carries the clamp sentence alone when nothing lies past the clamped page', async () => {
+      routeCulture(2);
+
+      const result = await runToolContract(smithsonianFindRelated, {
+        id: 'nasm_TEST001',
+        limit: 1500,
+      });
+
+      const sc = result.structuredContent as {
+        related: unknown[];
+        truncated?: boolean;
+        notice?: string;
+      };
+      expect(sc.related).toHaveLength(2);
+      expect(sc.truncated).toBeUndefined();
+      expect(sc.notice).toBe(CLAMP);
+      expect(textOf(result)).toContain(CLAMP);
+    });
+
+    it('serves limit 1000 as asked, with no clamp sentence', async () => {
+      const search = routeCulture(3000);
+
+      const result = await runToolContract(smithsonianFindRelated, {
+        id: 'nasm_TEST001',
+        limit: 1000,
+      });
+
+      expect(search.mock.calls.every(([params]) => params.rows === 1000)).toBe(true);
+      const sc = result.structuredContent as { related: unknown[]; cap?: number; notice?: string };
+      expect(sc.related).toHaveLength(1000);
+      expect(sc.cap).toBe(1000);
+      expect(sc.notice).toContain('Advance start to 1000 for the next page.');
+      expect(sc.notice).not.toContain('exceeds the cap');
+    });
+
+    it('advertises limit with no maximum and the clamp wording by default', () => {
+      const limit = advertisedLimit();
+      expect(limit).toMatchObject({ type: 'integer', minimum: 1, default: 10 });
+      expect(limit.maximum).toBeUndefined();
+      expect(limit.description).toContain('A value above 1000 is served at 1000 with a notice.');
+    });
+
+    describe('with SMITHSONIAN_CLAMP_LIMITS=false', () => {
+      beforeEach(() => {
+        vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+        loadClampSwitch();
+      });
+      afterEach(() => {
+        vi.unstubAllEnvs();
+        loadClampSwitch();
+      });
+
+      it('rejects limit 1001 before the anchor fetch and serves limit 1000', async () => {
+        const search = routeCulture(3000);
+        const service = svcModule.getSmithsonianService();
+
+        const rejected = await runToolContract(smithsonianFindRelated, {
+          id: 'nasm_TEST001',
+          limit: 1001,
+        });
+        expect(rejected.isError).toBe(true);
+        expect(rejected.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+        });
+        expect(textOf(rejected)).toContain('limit');
+        expect(service.getContent).not.toHaveBeenCalled();
+        expect(search).not.toHaveBeenCalled();
+
+        const served = await runToolContract(smithsonianFindRelated, {
+          id: 'nasm_TEST001',
+          limit: 1000,
+        });
+        expect(served.isError).not.toBe(true);
+        expect((served.structuredContent as { related: unknown[] }).related).toHaveLength(1000);
+      });
+
+      it('advertises maximum 1000 and the strict wording', () => {
+        const limit = advertisedLimit();
+        expect(limit).toMatchObject({ type: 'integer', maximum: 1000, default: 10 });
+        expect(limit.description).toBe(
+          'Maximum number of related objects to return (default 10, max 1000).',
+        );
+      });
+    });
+  });
+
+  describe('holding_museum_name (issue #64)', () => {
+    const HOLDER = 'Smithsonian Astrophysical Observatory';
+
+    it('carries the holder on both surfaces for the related row that has one, and only there', async () => {
+      const held: ObjectSummary = {
+        record_id: 'dpo_3d_200012',
+        title: 'Held Object',
+        unit_code: 'OCIO_DPO3D',
+        museum_name:
+          'Office of the Chief Information Officer - Digitization Program Office (3D digitization)',
+        holding_museum_name: HOLDER,
+        is_cc0: true,
+        has_media: true,
+      };
+      fanoutService(
+        vi.fn().mockResolvedValue({ rows: [held, makeRelatedRows()[0]!], rowCount: 2 }),
+      );
+
+      const result = await runToolContract(smithsonianFindRelated, { id: 'nasm_TEST001' });
+
+      const related = (result.structuredContent as { related: Array<Record<string, unknown>> })
+        .related;
+      expect(related.map((r) => r.record_id)).toEqual(['dpo_3d_200012', 'nasm_RELATED001']);
+      expect(related[0]).toMatchObject({ unit_code: 'OCIO_DPO3D', holding_museum_name: HOLDER });
+      // Serialized as the wire carries it: a row without a holder has no such key.
+      expect(JSON.parse(JSON.stringify(related[1]))).not.toHaveProperty('holding_museum_name');
+
+      const lines = textOf(result).split('\n');
+      const museumLine = lines.findIndex((l) => l.startsWith('**ID:** dpo_3d_200012 |'));
+      expect(lines[museumLine]).toContain('**Museum:** Office of the Chief Information Officer');
+      expect(lines[museumLine + 1]).toBe(`**Held by:** ${HOLDER}`);
+      expect(lines.filter((l) => l.startsWith('**Held by:**'))).toHaveLength(1);
+    });
+
+    it('declares the field optional with its holder description', () => {
+      const field = smithsonianFindRelated.output.shape.related.element.shape.holding_museum_name;
+      expect(field.isOptional()).toBe(true);
+      expect(field.description).toBe(
+        "The unit that holds the object, from the record's own data source, when it differs from the unit that indexes it (unit_code). Absent otherwise.",
+      );
     });
   });
 });

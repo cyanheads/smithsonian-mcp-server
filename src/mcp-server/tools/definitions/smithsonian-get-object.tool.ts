@@ -5,12 +5,18 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
+import {
+  enrichProvenance,
+  provenanceEnrichment,
+  provenanceTrailer,
+} from '@/mcp-server/tools/provenance.js';
 import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
 
 export const smithsonianGetObject = tool('smithsonian_get_object', {
   title: 'Get Smithsonian Object',
   description:
-    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns title, dates, description, labeled notes, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. Natural-history records can include scientific_names, taxonomy, and collection coordinates without inferred precision. The media summary is a count; full image URLs come from smithsonian_get_media.',
+    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns title, dates, description, labeled notes, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. Natural-history records can include scientific_names, taxonomy, and collection coordinates without inferred precision. The media summary counts the media and links every non-image item (3D models, scanned books, documents); full image URLs come from smithsonian_get_media.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -24,11 +30,21 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
   output: z.object({
     record_id: z.string().describe('Unique object identifier.'),
     title: z.string().describe('Object title.'),
-    unit_code: z.string().describe('Museum unit code.'),
+    unit_code: z
+      .string()
+      .describe(
+        'Museum unit code the object is indexed under — the value a unit_code filter matches.',
+      ),
     museum_name: z
       .string()
       .describe(
         'Full museum name. A few rarely-indexed archive sub-unit codes have no mapped name and fall back to the raw unit code.',
+      ),
+    holding_museum_name: z
+      .string()
+      .optional()
+      .describe(
+        "The unit that holds the object, from the record's own data source, when it differs from the unit that indexes it (unit_code). Absent otherwise.",
       ),
     dates: z
       .array(
@@ -179,9 +195,36 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
           .boolean()
           .describe('True when at least one CC0 image is available (cc0_image_count > 0).'),
         thumbnail_url: z.string().optional().describe('Thumbnail URL from the first media item.'),
+        non_image_media: z
+          .array(
+            z
+              .object({
+                type: z
+                  .string()
+                  .describe(
+                    'Upstream media type, e.g. "3d_voyager", "Scanned books", "slideshowXML", "Electronic resource".',
+                  ),
+                url: z
+                  .string()
+                  .optional()
+                  .describe(
+                    "The item's link — a 3D viewer, a scanned book, a document viewer, or a PDF. Absent when the catalog gives none.",
+                  ),
+                is_cc0: z.boolean().describe('True when this item is CC0 open access.'),
+              })
+              .describe('A non-image media item.'),
+          )
+          .describe(
+            'Every media item smithsonian_get_media does not deliver — each item typed as something other than Images — in catalog order. Empty when there are none.',
+          ),
       })
-      .describe('Media availability summary. Call smithsonian_get_media for full image URLs.'),
+      .describe(
+        'Media availability summary, with a link to each non-image item. Call smithsonian_get_media for full image URLs.',
+      ),
   }),
+
+  enrichment: provenanceEnrichment,
+  enrichmentTrailer: provenanceTrailer,
 
   errors: [
     {
@@ -210,8 +253,8 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     const svc = getSmithsonianService();
     ctx.log.info('Fetching Smithsonian object', { id: input.id });
 
-    const raw = await svc.getContent(input.id, ctx);
-    const obj = svc.toFullObject(raw);
+    const { record, provenance } = await svc.getContent(input.id, ctx);
+    const obj = svc.toFullObject(record);
 
     ctx.log.info('Object fetched', {
       record_id: obj.record_id,
@@ -219,6 +262,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       is_cc0: obj.is_cc0,
     });
 
+    enrichProvenance(ctx, [provenance]);
     return obj;
   },
 
@@ -228,6 +272,9 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     lines.push(
       `**ID:** ${result.record_id} | **Museum:** ${result.museum_name} (${result.unit_code})`,
     );
+    if (result.holding_museum_name) {
+      lines.push(`**Held by:** ${escapeMarkdownInline(result.holding_museum_name)}`);
+    }
     lines.push(`**CC0:** ${result.is_cc0 ? 'Yes' : 'No'}`);
     if (result.record_link) lines.push(`**Link:** ${result.record_link}`);
     if (result.description) {
@@ -299,6 +346,15 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     );
     if (media.thumbnail_url) {
       lines.push(`**Thumbnail:** ${media.thumbnail_url}`);
+    }
+    if (media.non_image_media.length > 0) {
+      lines.push('**Non-image media:**');
+      for (const item of media.non_image_media) {
+        const label = item.url
+          ? markdownLink(item.type, item.url)
+          : `${escapeMarkdownInline(item.type)} (no URL)`;
+        lines.push(`- ${label} · CC0: ${item.is_cc0 ? 'Yes' : 'No'}`);
+      }
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

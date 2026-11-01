@@ -4,15 +4,19 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
   createInMemoryStorage,
   createMockContext,
   getEnrichment,
+  runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianBrowseCategory } from '@/mcp-server/tools/definitions/smithsonian-browse-category.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
+import { luceneTermsOf } from './tool-result.js';
 
 /**
  * Fixture rows alternate two codes from the live `unit_code` vocabulary. A bare
@@ -236,10 +240,9 @@ describe('smithsonianBrowseCategory', () => {
         ctx,
       );
 
-      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
       // Always quoted (issue #42) — an unquoted single-token value is parsed for
       // Lucene syntax, so quoting is not conditional on the value containing a space.
-      expect(calledParams.filters).toContain(`date:"${value}"`);
+      expect(luceneTermsOf(searchFn)).toContain(`date:"${value}"`);
     },
   );
 
@@ -265,9 +268,9 @@ describe('smithsonianBrowseCategory', () => {
     });
     await smithsonianBrowseCategory.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
+    const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
     // Multi-word culture value must be quoted in the Lucene term
-    expect(calledParams.filters).toContain('culture:"Plains Indian"');
+    expect(luceneTermsOf(searchFn)).toContain('culture:"Plains Indian"');
     // Culture mode uses filter only — no free-text query
     expect(calledParams.query).toBe('');
   });
@@ -282,10 +285,10 @@ describe('smithsonianBrowseCategory', () => {
     const input = smithsonianBrowseCategory.input.parse({ mode: 'topic', value: 'Quilts' });
     const result = await smithsonianBrowseCategory.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
+    const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
     // Always quoted, so a topic term carrying a `"` (80 of the 133k do) stays one
     // literal term rather than closing the phrase early.
-    expect(calledParams.filters).toEqual(['topic:"Quilts"']);
+    expect(luceneTermsOf(searchFn)).toEqual(['topic:"Quilts"']);
     expect(calledParams.query).toBe('');
     expect(result.mode).toBe('topic');
     expect(result.total_count).toBe(1134);
@@ -303,8 +306,8 @@ describe('smithsonianBrowseCategory', () => {
     const input = smithsonianBrowseCategory.input.parse({ mode: 'period', value: '1940s' });
     await smithsonianBrowseCategory.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toContain('date:"1940s"');
+    const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
+    expect(luceneTermsOf(searchFn)).toContain('date:"1940s"');
     expect(calledParams.query).toBe('');
   });
 
@@ -318,8 +321,8 @@ describe('smithsonianBrowseCategory', () => {
     const input = smithsonianBrowseCategory.input.parse({ mode: 'museum', value: 'NASM' });
     await smithsonianBrowseCategory.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toContain('unit_code:"NASM"');
+    const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
+    expect(luceneTermsOf(searchFn)).toContain('unit_code:"NASM"');
     // Museum mode uses the filter only — no free-text query
     expect(calledParams.query).toBe('');
   });
@@ -340,8 +343,8 @@ describe('smithsonianBrowseCategory', () => {
     const input = smithsonianBrowseCategory.input.parse({ mode: 'museum', value: code });
     await smithsonianBrowseCategory.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toEqual([`unit_code:"${code}"`]);
+    const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
+    expect(luceneTermsOf(searchFn)).toEqual([`unit_code:"${code}"`]);
     expect(calledParams.query).toBe('');
   });
 
@@ -356,8 +359,7 @@ describe('smithsonianBrowseCategory', () => {
     const input = smithsonianBrowseCategory.input.parse({ mode: 'museum', value: 'NMAfA' });
     await smithsonianBrowseCategory.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
-    expect(calledParams.filters).toEqual(['unit_code:"NMAfA"']);
+    expect(luceneTermsOf(searchFn)).toEqual(['unit_code:"NMAfA"']);
   });
 
   it('a full museum name is filtered, never free-texted, and fails with museum recovery (issues #26, #31)', async () => {
@@ -387,9 +389,9 @@ describe('smithsonianBrowseCategory', () => {
 
     // #26: the value is filtered as one quoted phrase term, never free-texted. Unquoted,
     // EDAN parses the trailing words as free text and matches ~1.7M records.
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[]; query: string };
+    const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
     expect(calledParams.query).toBe('');
-    expect(calledParams.filters).toEqual(['unit_code:"National Museum of Natural History"']);
+    expect(luceneTermsOf(searchFn)).toEqual(['unit_code:"National Museum of Natural History"']);
   });
 
   it('keeps the contains substring in the museum hint for a spaceless code (issue #31)', async () => {
@@ -888,8 +890,7 @@ describe('smithsonianBrowseCategory', () => {
       ctx,
     );
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-    expect(calledParams.filters).toEqual(['culture:"Early Iron Age, \\"Tomb Age\\""']);
+    expect(luceneTermsOf(searchFn)).toEqual(['culture:"Early Iron Age, \\"Tomb Age\\""']);
   });
 
   it('neutralizes a wildcard category value instead of matching the whole field (issue #42)', async () => {
@@ -907,8 +908,7 @@ describe('smithsonianBrowseCategory', () => {
       ctx,
     );
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-    expect(calledParams.filters).toEqual(['culture:"*"']);
+    expect(luceneTermsOf(searchFn)).toEqual(['culture:"*"']);
   });
 
   describe('upstream markup and entities (issue #49)', () => {
@@ -919,33 +919,41 @@ describe('smithsonianBrowseCategory', () => {
 
     it('decodes sample titles in output and format() — the real service, not a stand-in', async () => {
       vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      const body = {
+        status: 200,
+        responseCode: 1,
+        response: {
+          rows: [
+            {
+              id: 'ld1-markup',
+              title: 'Pregnant Women&#39;s Concerns &amp; Vaccination',
+              unitCode: 'SLA_SRO',
+              url: 'edanmdm:slasro_171906',
+              content: {
+                descriptiveNonRepeating: {
+                  record_ID: 'slasro_171906',
+                  unit_code: 'SLA_SRO',
+                  metadata_usage: { access: 'CC0' },
+                },
+              },
+            },
+          ],
+          rowCount: 1,
+        },
+      };
+      // Only /search is answered; any other upstream path fails loudly.
       vi.stubGlobal(
         'fetch',
-        vi.fn().mockResolvedValue({
-          ok: true,
-          status: 200,
-          json: async () => ({
+        vi.fn().mockImplementation(async (url: string) => {
+          if (new URL(url).pathname !== '/openaccess/api/v1.0/search') {
+            throw new Error('unmocked fetch');
+          }
+          return {
+            ok: true,
             status: 200,
-            responseCode: 1,
-            response: {
-              rows: [
-                {
-                  id: 'ld1-markup',
-                  title: 'Pregnant Women&#39;s Concerns &amp; Vaccination',
-                  unitCode: 'SLA_SRO',
-                  url: 'edanmdm:slasro_171906',
-                  content: {
-                    descriptiveNonRepeating: {
-                      record_ID: 'slasro_171906',
-                      unit_code: 'SLA_SRO',
-                      metadata_usage: { access: 'CC0' },
-                    },
-                  },
-                },
-              ],
-              rowCount: 1,
-            },
-          }),
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          };
         }),
       );
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
@@ -963,6 +971,181 @@ describe('smithsonianBrowseCategory', () => {
       expect(text).toContain("Pregnant Women's Concerns & Vaccination");
       expect(text).not.toContain('&#39;');
       expect(text).not.toContain('&amp;');
+    });
+  });
+
+  describe('page-size clamp (issue #63)', () => {
+    /**
+     * A category of `total` objects served the way EDAN pages it: each call returns
+     * the `rows` objects from `start`, so the requests the tool sends decide what
+     * comes back.
+     */
+    function routeCategory(total: number) {
+      const search = vi
+        .fn()
+        .mockImplementation(async ({ rows, start }: { rows: number; start: number }) => ({
+          rows: Array.from({ length: Math.max(0, Math.min(rows, total - start)) }, (_, i) => ({
+            ...makeSamples(1)[0]!,
+            record_id: `quilt_${start + i}`,
+          })),
+          rowCount: total,
+        }));
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search,
+      } as unknown as svcModule.SmithsonianService);
+      return search;
+    }
+
+    /** Every text block of a result, the trailer that carries the notice included. */
+    function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+      return result.content.map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('\n');
+    }
+
+    /** The `rows` property as `tools/list` advertises it, serialized as on the wire. */
+    function advertisedRows(): Record<string, unknown> {
+      const schema = smithsonianBrowseCategory.input['~standard'].jsonSchema.input({
+        target: 'draft-2020-12',
+      }) as { properties: Record<string, unknown> };
+      return JSON.parse(JSON.stringify(schema.properties.rows));
+    }
+
+    const CLAMP = 'rows 1500 exceeds the cap of 1000; the page was served with rows 1000.';
+
+    it('serves rows 1500 at 1000 upstream and leads the paging guidance with the clamp sentence', async () => {
+      const search = routeCategory(2694);
+
+      const result = await runToolContract(smithsonianBrowseCategory, {
+        mode: 'topic',
+        value: 'Quilts',
+        rows: 1500,
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(search.mock.calls.map(([params]) => params.rows)).toEqual([1000]);
+      const sc = result.structuredContent as {
+        sample_objects: unknown[];
+        truncated?: boolean;
+        cap?: number;
+        notice?: string;
+      };
+      expect(sc.sample_objects).toHaveLength(1000);
+      expect(sc).toMatchObject({ truncated: true, cap: 1000 });
+      expect(sc.notice?.startsWith(`${CLAMP} 2694 objects match this category`)).toBe(true);
+      expect(sc.notice).toContain('the next page starts at 1000');
+      expect(textOf(result)).toContain(CLAMP);
+      expect(textOf(result)).toContain('the next page starts at 1000');
+    });
+
+    it('carries the clamp sentence alone when the clamped page holds the whole category', async () => {
+      routeCategory(3);
+
+      const result = await runToolContract(smithsonianBrowseCategory, {
+        mode: 'topic',
+        value: 'Quilts',
+        rows: 1500,
+      });
+
+      const sc = result.structuredContent as { truncated?: boolean; notice?: string };
+      expect(sc.truncated).toBeUndefined();
+      expect(sc.notice).toBe(CLAMP);
+      expect(textOf(result)).toContain(CLAMP);
+    });
+
+    it('serves rows 1000 as asked, with no clamp sentence', async () => {
+      const search = routeCategory(2694);
+
+      const result = await runToolContract(smithsonianBrowseCategory, {
+        mode: 'topic',
+        value: 'Quilts',
+        rows: 1000,
+      });
+
+      expect(search.mock.calls.map(([params]) => params.rows)).toEqual([1000]);
+      const sc = result.structuredContent as { cap?: number; notice?: string };
+      expect(sc.cap).toBe(1000);
+      expect(sc.notice).toContain('the next page starts at 1000');
+      expect(sc.notice).not.toContain('exceeds the cap');
+    });
+
+    it('reaches every object exactly once when a clamped caller follows the named next start', async () => {
+      const total = 2694;
+      const search = routeCategory(total);
+      const seen: string[] = [];
+      let start = 0;
+      for (let page = 0; page < 5; page++) {
+        const result = await runToolContract(smithsonianBrowseCategory, {
+          mode: 'topic',
+          value: 'Quilts',
+          rows: 1500,
+          start,
+        });
+        const sc = result.structuredContent as {
+          sample_objects: Array<{ record_id: string }>;
+          truncated?: boolean;
+          notice?: string;
+        };
+        seen.push(...sc.sample_objects.map((o) => o.record_id));
+        if (!sc.truncated) break;
+        const next = start + sc.sample_objects.length;
+        expect(sc.notice).toContain(`the next page starts at ${next}`);
+        start = next;
+      }
+
+      expect(seen).toHaveLength(total);
+      expect(new Set(seen).size).toBe(total);
+      expect(search.mock.calls.map(([params]) => [params.start, params.rows])).toEqual([
+        [0, 1000],
+        [1000, 1000],
+        [2000, 1000],
+      ]);
+    });
+
+    it('advertises rows with no maximum and the clamp wording by default', () => {
+      const rows = advertisedRows();
+      expect(rows).toMatchObject({ type: 'integer', minimum: 1, default: 10 });
+      expect(rows.maximum).toBeUndefined();
+      expect(rows.description).toContain('A value above 1000 is served at 1000 with a notice.');
+    });
+
+    describe('with SMITHSONIAN_CLAMP_LIMITS=false', () => {
+      beforeEach(() => {
+        vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+        loadClampSwitch();
+      });
+      afterEach(() => {
+        vi.unstubAllEnvs();
+        loadClampSwitch();
+      });
+
+      it('rejects rows 1001 before any upstream call and serves rows 1000', async () => {
+        const search = routeCategory(2694);
+
+        const rejected = await runToolContract(smithsonianBrowseCategory, {
+          mode: 'topic',
+          value: 'Quilts',
+          rows: 1001,
+        });
+        expect(rejected.isError).toBe(true);
+        expect(rejected.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+        });
+        expect(textOf(rejected)).toContain('rows');
+        expect(search).not.toHaveBeenCalled();
+
+        const served = await runToolContract(smithsonianBrowseCategory, {
+          mode: 'topic',
+          value: 'Quilts',
+          rows: 1000,
+        });
+        expect(served.isError).not.toBe(true);
+        expect(search.mock.calls.map(([params]) => params.rows)).toEqual([1000]);
+      });
+
+      it('advertises maximum 1000 and the strict wording', () => {
+        const rows = advertisedRows();
+        expect(rows).toMatchObject({ type: 'integer', maximum: 1000, default: 10 });
+        expect(rows.description).toBe('Number of sample objects to return (default 10, max 1000).');
+      });
     });
   });
 });

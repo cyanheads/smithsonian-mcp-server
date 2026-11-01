@@ -5,6 +5,14 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import {
+  enrichPageNotice,
+  PAGE_CAPS,
+  pageSizeInput,
+  pageSizeMeta,
+  servePageSize,
+} from '@/mcp-server/tools/page-size.js';
 import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
 
 export const smithsonianListTerms = tool('smithsonian_list_terms', {
@@ -25,13 +33,15 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .min(0)
       .default(0)
       .describe('Pagination offset (0-indexed). Use with rows to page through large vocabularies.'),
-    rows: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
+    rows: pageSizeInput('smithsonian_list_terms', 'rows')
       .default(50)
-      .describe('Number of terms to return per page (default 50, max 100).'),
+      .meta(
+        pageSizeMeta('smithsonian_list_terms', (clamped, cap) =>
+          clamped
+            ? `Number of terms to return per page (default 50). A value above ${cap} is served at ${cap} with a notice.`
+            : `Number of terms to return per page (default 50, max ${cap}).`,
+        ),
+      ),
     contains: z
       .string()
       .optional()
@@ -74,7 +84,10 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
         'True when matching terms remain past this page. False on a terminal or past-the-end page, where nothing is being withheld.',
       ),
     shown: z.number().optional().describe('Number of terms returned in this page.'),
-    cap: z.number().optional().describe('The rows cap that was applied.'),
+    cap: z
+      .number()
+      .optional()
+      .describe('The page size served: rows as requested, or its cap when rows exceeded it.'),
     truncationCeiling: z
       .number()
       .optional()
@@ -85,7 +98,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .string()
       .optional()
       .describe(
-        'Guidance naming the input that retrieves the terms this page omitted, or how to broaden a contains filter that matched nothing.',
+        'Guidance naming the input that retrieves the terms this page omitted, or how to broaden a contains filter that matched nothing. Opens with the page size served when rows exceeded its cap.',
       ),
   },
 
@@ -101,18 +114,19 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
 
   async handler(input, ctx) {
     const svc = getSmithsonianService();
+    const pageSize = servePageSize('smithsonian_list_terms', 'rows', input.rows, ctx);
 
     ctx.log.info('Listing Smithsonian terms', {
       field: input.field,
       start: input.start,
-      rows: input.rows,
+      rows: pageSize.value,
     });
 
     const { terms, total, labels } = await svc.listTerms(
       {
         field: input.field,
         start: input.start,
-        rows: input.rows,
+        rows: pageSize.value,
         ...(input.contains !== undefined && { contains: input.contains }),
       },
       ctx,
@@ -129,30 +143,33 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
 
     ctx.log.info('Terms listed', { field: input.field, count: terms.length, total });
 
-    // These two branches both write the same enrichment `notice` key, so only the
-    // last to run would survive. They stay mutually exclusive by construction: the
-    // filtered-empty branch needs total === 0, and the truncation trigger below
-    // needs something past the page, which total === 0 can never satisfy.
+    // Enrichment `notice` is last-wins, so every sentence for this call — the clamp,
+    // the filtered-empty confirmation, the paging guidance — composes into one string.
+    // `contains` is caller text inside rendered Markdown, so it is escaped.
+    const notices = pageSize.notice ? [pageSize.notice] : [];
     if (input.contains && total === 0) {
-      ctx.enrich.notice(
-        `No term in the "${input.field}" vocabulary contains "${input.contains}". ` +
-          'Broaden or re-spell the substring, or omit contains to browse the full vocabulary.',
+      notices.push(
+        `No term in the "${input.field}" vocabulary contains "${escapeMarkdownInline(input.contains)}". Broaden or re-spell the substring, or omit contains to browse the full vocabulary.`,
       );
     }
 
     // Account for the offset already consumed — terms remaining BEYOND this page,
     // not merely a page smaller than the vocabulary. The page-local comparison
-    // reported truncated with shown: 0 on a past-the-end page (issue #30).
-    if (input.start + terms.length < total) {
-      ctx.enrich.truncated({
-        shown: terms.length,
-        cap: input.rows,
-        ceiling: total,
-        guidance:
-          `${total} terms match; this page shows ${terms.length} from offset ${input.start}. ` +
-          'Retrieve the rest by advancing start by rows, or narrow the vocabulary with contains.',
-      });
-    }
+    // reported truncated with shown: 0 on a past-the-end page (issue #30). The
+    // guidance names the next start outright: after a clamp, advancing by the
+    // requested rows would skip everything between the cap and that value.
+    enrichPageNotice(ctx, {
+      leading: notices,
+      truncation:
+        input.start + terms.length < total
+          ? {
+              shown: terms.length,
+              cap: pageSize.value,
+              ceiling: total,
+              guidance: `${total} terms match; this page shows ${terms.length} from offset ${input.start}. Retrieve the rest with start: ${input.start + terms.length} (a page holds at most ${PAGE_CAPS.smithsonian_list_terms} rows), or narrow the vocabulary with contains.`,
+            }
+          : undefined,
+    });
 
     return { field: input.field, terms, total, ...(labels && { labels }) };
   },

@@ -1,12 +1,8 @@
 # smithsonian-mcp-server — Design
 
-## ⚠️ API Key Required
+## API key
 
-> **`SMITHSONIAN_API_KEY` is REQUIRED.** The Smithsonian Open Access API does NOT allow keyless access — a probe against `api.si.edu/openaccess/api/v1.0/search` without a key returns `{"error": {"code": "API_KEY_MISSING", ...}}` immediately.
->
-> The key is **free**: sign up at [https://api.data.gov/signup](https://api.data.gov/signup). It's issued instantly with no review process. Until Casey provisions a key and sets `SMITHSONIAN_API_KEY`, **live field-testing is blocked**.
->
-> DEMO_KEY works at low rate limits (~5 req/min) and was used for all live API probing in this design.
+`SMITHSONIAN_API_KEY` is required: the Smithsonian Open Access API has no keyless access, and a request without a key returns `{"error": {"code": "API_KEY_MISSING", ...}}`. The key is free and issued instantly at [https://api.data.gov/signup](https://api.data.gov/signup), and allows 1,000 requests per hour.
 
 ---
 
@@ -20,7 +16,7 @@
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms, plus a `labels` map of museum names for `unit_code`; `contains` narrows the vocabulary by a case-insensitive substring, matching the museum name as well as the code for `unit_code`. Each field's vocabulary is cached (`SMITHSONIAN_TERMS_CACHE_TTL_SECONDS`) since upstream returns the whole set on every call. | `field` (unit_code, culture, place, date, online_media_type, topic), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
 | `smithsonian_get_object` | Normalized metadata by ID, including labeled notes, scientific names, reported taxonomy/coordinates, and a media summary. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_browse_category` | Paginated browse within one exact category. Mode: `museum` \| `culture` \| `period` \| `medium` \| `topic`; `value` must be an exact indexed category term, not free text. Searches a constrained query internally and returns the category total, a page of matching objects, and a museum breakdown of that page. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `invalid_category` (ValidationError) |
-| `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, named party, topics). Returns up to 20 related objects, each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, named party, topics). Returns a page of related objects (default 10), each tagged with the signals that connected it. | `id`, `limit`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_get_media` | Returns CC0 image URLs at multiple resolutions for an object. Filters by each image's license and reports the object metadata license separately. Includes alt text and accessibility descriptions from the catalog. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `no_images` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
 ### Resources
@@ -66,7 +62,7 @@ The `smithsonian_browse_category` tool is a workflow over the `search` operation
 |:--------|:------|:--------|
 | `SmithsonianService` | Smithsonian EDAN Open Access API | All tools |
 
-Single service — one API, one base URL, one auth pattern. Two primary methods internally: `search(params)` and `getContent(id)`. The service handles `api_key` injection, retry/backoff, and response normalization.
+Single service — one API, one base URL, one auth pattern. Two primary methods internally: `search(params)` and `getContent(id)`. The service handles `api_key` injection, retry/backoff, response normalization, an in-process response cache, and the optional Open Access mirror (see [Open Access mirror](#open-access-mirror)).
 
 ## Config
 
@@ -75,12 +71,19 @@ Single service — one API, one base URL, one auth pattern. Two primary methods 
 | `SMITHSONIAN_API_KEY` | **Yes** | API key from https://api.data.gov/signup. Server fails to start without it. |
 | `SMITHSONIAN_BASE_URL` | No | Override the API base URL (default: `https://api.si.edu/openaccess/api/v1.0`). |
 | `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` | No | Seconds each field's term vocabulary is cached in the `StorageService` (default: `3600`). `/terms/{field}` ignores paging and always returns the whole vocabulary — `place` alone is ~114k terms — so every uncached call re-downloads it. `0` disables caching. |
+| `SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS` | No | Seconds each normalized `/search` page is cached in memory, keyed by request URL (default: `3600`). `0` disables the cache and the sharing of concurrent identical requests. |
+| `SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS` | No | Seconds each `/content` record is cached in memory, keyed by request URL (default: `86400`). `0` disables the cache and the sharing of concurrent identical requests. |
+| `SMITHSONIAN_CLAMP_LIMITS` | No | Default `true`: an over-cap `rows` or `limit` is served at its cap with a notice. `false` rejects it and advertises each cap as the schema `maximum`. |
+| `SMITHSONIAN_MIRROR_PATH` | No | SQLite file path of the Open Access mirror. Empty or unset turns the mirror off (the default). |
+| `SMITHSONIAN_MIRROR_REFRESH_CRON` | No | Cron expression, in server local time, on which an HTTP server refreshes the mirror (default: `0 12 * * *`). Empty turns the in-server refresh off. Validated at startup when the mirror is on. |
+
+The mirror variables stay out of `server.json` and `manifest.json`: the mirror is an operator feature for self-hosted HTTP deployments, not part of the one-click install.
 
 ## Implementation Order
 
 1. Config (`src/config/server-config.ts`) — `SMITHSONIAN_API_KEY`, base URL. Hard-fail on missing key.
 2. `SmithsonianService` — `search()` + `getContent()` with retry/backoff, URL construction, API key injection, response normalization helpers (flatten `freetext[]` label-content arrays, extract media, check CC0).
-3. `smithsonian_search_objects` — search returning up to `rows` (≤100) curated summaries with offset pagination.
+3. `smithsonian_search_objects` — search returning up to `rows` (≤1,000) curated summaries with offset pagination.
 4. `smithsonian_get_object` — single content fetch with full field normalization.
 5. `smithsonian_get_media` — extract and gate images from a fetched object.
 6. `smithsonian_browse_category` — mode-dispatch to constrained searches.
@@ -98,7 +101,7 @@ Each step is independently testable.
 
 **Input:**
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`). Filters append hard `AND` constraints; plain words and quoted phrases remain ungrouped because EDAN changes implicit matching inside parentheses. Active Lucene expressions are grouped to preserve Boolean precedence; quoted and escaped punctuation stays literal.
-- `filters?: object` — Optional structured filters:
+- `filters?: object` — Optional structured filters. The object is strict: an unknown key is rejected by name as a schema validation error, so a misspelled filter fails loudly instead of widening the search.
   - `online_media_type?: string` — exact indexed category from `smithsonian_list_terms { field: "online_media_type" }`, such as Images, 3D Models, or Sound recordings. Quoted and escaped as a hard constraint, composing with availability filters. Invalid terms follow vocabulary-aware `invalid_filter` recovery; valid terms with no overlap are identified as exact. An Images match does not guarantee attached/CC0 images; read `get_object.media_summary`. Media terms feed search only, with no browse mode.
   - `scientific_name?: string` — exact value from `smithsonian_get_object.scientific_names`, quoted and escaped as a hard constraint. Not enumerable through `smithsonian_list_terms`; filtered-zero recovery names the object field as the source.
   - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. Matched exactly and case-sensitively (`"NMAfA"` carries a lowercase f); `smithsonian_list_terms` with `field: "unit_code"` enumerates the live vocabulary.
@@ -110,17 +113,17 @@ Each step is independently testable.
   - `name?: string` — indexed named party from `indexedStructured.name` (e.g. `"Warhol, Andy"`), covering every role the catalog records — maker, collector, donor, issuing authority. Written surname-first. Not enumerable via `smithsonian_list_terms`. A `smithsonian_find_related` name signal carries the indexed form verbatim and is the reliable source; `smithsonian_get_object`'s `makers[]` reads the free-text block, which names the same parties in a different form often enough to miss (`"Major J. A. L. Möller (Jacob A.L. Möller/Monty Möller), Non-Indian, 1883-1957"` for the indexed `"Möller, Major J. A. L."`), so it is a starting guess rather than an exact value. Also a hard constraint: `name:"Warhol, Andy"` matches 421 against 715 for the same string as free text. Added so `smithsonian_find_related`'s indexed-name fan-out has a reproducible `search_continuation`.
   - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to records carrying an indexed `online_media_type` value. That vocabulary covers digitized surrogates (finding aids, catalog cards, scanned books, full text, electronic resources) alongside images, 3D models, and video; the surrogate types often have no deliverable media attached, so a match can still report `has_media: false`. `has_media` reads `descriptiveNonRepeating.online_media` — a separate upstream signal — and is what predicts a `smithsonian_get_media` outcome.
   - `cc0_only?: boolean` — when true, ANDs the Lucene term `media_usage:CC0` into `q`. That term marks a record as *having CC0 media attached*, not as being CC0-licensed, so this selects on media presence rather than license: of 14.5M records, 5.25M carry the term and the 9.24M excluded are CC0 too, just undigitized. `has_media` remains the signal that predicts a `smithsonian_get_media` outcome.
-- `rows?: number` — page size (default 20, max 100).
+- `rows?: number` — page size (default 20, cap 1,000, EDAN's own `/search` maximum). A larger value is served at the cap and the `notice` opens with "rows N exceeds the cap of 1000; the page was served with rows 1000."; with `SMITHSONIAN_CLAMP_LIMITS=false` it is rejected and the schema advertises `maximum: 1000`.
 - `start?: number` — offset for pagination (default 0). A `start` past the end returns a successful empty page, not an error.
 
 **Output:**
-- `objects[]` — curated summaries: `{ record_id, title, date, unit_code, museum_name, object_type, thumbnail_url, is_cc0, has_media }`. Empty on a page past the end of the result set.
+- `objects[]` — curated summaries: `{ record_id, title, date, unit_code, museum_name, holding_museum_name?, object_type, thumbnail_url, is_cc0, has_media }`. `unit_code` is the code the record is indexed under (top-level `unitCode`, falling back to `descriptiveNonRepeating.unit_code`); `holding_museum_name` is read from `descriptiveNonRepeating.data_source` and set only when the record's own code differs from the indexed one, as for the `OCIO_DPO3D` 3D scans, which are indexed under the digitization office while `data_source` names the holder. The record's own code is not reported because EDAN often does not index it, so it would hand the caller a filter that matches nothing. Empty on a page past the end of the result set.
 - `total_count` — total matching objects before pagination.
-- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names `start` as the retrieval path.
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names the next `start` outright (a clamped page makes `start = page × rows` skip data). With a mirror configured, `sources` / `mirror_snapshot` (see [Open Access mirror](#open-access-mirror)).
 
 **Errors:**
 - `no_results` (NotFound) — an unfiltered query matches nothing at all (`rowCount === 0`). Recovery: broaden the query or check spelling. Deliberately keyed to the true match count rather than the page-local length, so a deep `start` against a query with real matches is never told to check its spelling.
-- `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: a culture/place/date/topic value is checked against its vocabulary first, and the hint branches on the answer — a value outside it routes to `smithsonian_list_terms { field, contains: <value> }`, while a value the index already enumerates is named as exact (resolving it returns the same value) and the caller is told to drop it or pick a different term. For object_type/unit_code, exact co-occurring values are harvested into the hint. `name` gets neither — it is not enumerable upstream and not carried in result summaries — so it falls to the static hint, which routes to a `smithsonian_find_related` name signal for the indexed form and flags `makers[]` as the free-text approximation. Then retry with an exact term.
+- `invalid_filter` (ValidationError) — a filtered search matched nothing, most often a filter value outside the Smithsonian controlled vocabulary (e.g. singular `"Painting"` instead of `"Paintings"`). Recovery: a culture/place/date/topic value is checked against its vocabulary first, and the hint branches on the answer — a value outside it routes to `smithsonian_list_terms { field, contains: <value> }`, while a value the index already enumerates is named as exact (resolving it returns the same value) and the caller is told to drop it or pick a different term. For object_type/unit_code, exact co-occurring values are harvested into the hint, but only for a non-blank query: with a blank or whitespace-only query the re-query has nothing to sample against and EDAN answers its empty `q` with a 400, so the harvest is skipped and the hint stays static. `name` gets neither — it is not enumerable upstream and not carried in result summaries — so it falls to the static hint, which routes to a `smithsonian_find_related` name signal for the indexed form and flags `makers[]` as the free-text approximation. Then retry with an exact term.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
 
@@ -134,7 +137,7 @@ Each step is independently testable.
 - `id: string` — Object `record_id` as returned by `smithsonian_search_objects` (e.g. `"nasm_A19670093000"`). The service prepends `edanmdm:` automatically.
 
 **Output:**
-- `record_id`, `title`, `unit_code`, `museum_name`
+- `record_id`, `title`, `unit_code` (the code the record is indexed under), `museum_name`, `holding_museum_name?` (the holder, when it differs from `unit_code`; rendered as `Held by` in the text output)
 - `dates[]` — all labeled date fields (Date, Accession Date, etc.)
 - `description` — optional prose from Summary, Physical Description, then Brief Description matching labels; followed by exact Description, Description (Brief), then Citation labels. Administrative notes never become descriptions.
 - `notes[]` — every nonempty note as `{ label, content }` in source order, preserving repeated labels and using `Note` when the label is absent. Selected prose and notes use the shared decode-once plain-text projection.
@@ -153,7 +156,8 @@ Each step is independently testable.
 - `object_rights` — CC0 or other rights statement from `freetext.objectRights`
 - `is_cc0` — boolean gated on `metadata_usage.access === 'CC0'`
 - `record_link` — canonical SI URL for the object
-- `media_summary` — `{ count, cc0_image_count, has_cc0_images, thumbnail_url }` — `count` is the raw total across all media types (images, 3D models, video); `cc0_image_count` is what `smithsonian_get_media` returns, so the two reconcile. Call `smithsonian_get_media` for the full image list
+- `media_summary` — `{ count, cc0_image_count, has_cc0_images, thumbnail_url, non_image_media[] }` — `count` is the raw total across all media types (images, 3D models, video); `cc0_image_count` is what `smithsonian_get_media` returns, so the two reconcile. `non_image_media[]` holds `{ type, url?, is_cc0 }` for every media item typed as something other than Images, in catalog order, so images and non-image items together partition the record's media; the text output renders each as `- [<type>](<url>) · CC0: Yes|No`. Call `smithsonian_get_media` for the full image list
+- With a mirror configured: `sources`, `mirror_snapshot` (see [Open Access mirror](#open-access-mirror))
 
 **Errors:**
 - `not_found` (NotFound) — no object with that ID in the catalog. Recovery: verify the ID via `smithsonian_search_objects`.
@@ -175,14 +179,14 @@ Each step is independently testable.
   - `period`: indexed date term (`"1940s"`, `"500-1500"`, `"21st century"`, `"-2500"`) — no shape gate, since most of the indexed `date` vocabulary is not decade-shaped
   - `medium`: object type, usually plural (`"Paintings"`, `"Aircraft"`)
   - `topic`: subject term (`"Quilts"`, `"Aviation"`) from the 133k-term `topic` vocabulary
-- `rows?: number` — sample objects to return (default 10, max 50).
-- `start?: number` — pagination offset into the category's match set (default 0, 0-indexed). Page contiguously with `start = page × rows`; the category query and upstream ordering are identical across pages, so adjacent pages reconstruct the full set gap-free. A `start` past the end returns a successful empty page, not an error.
+- `rows?: number` — sample objects to return (default 10, cap 1,000; served at the cap with a notice, like search).
+- `start?: number` — pagination offset into the category's match set (default 0, 0-indexed). Page contiguously by advancing `start` by the number of objects returned (the notice names it); the category query and upstream ordering are identical across pages, so adjacent pages reconstruct the full set gap-free. A `start` past the end returns a successful empty page, not an error.
 
 **Output:**
 - `mode`, `value`, `total_count` — how many objects match
 - `sample_objects[]` — the requested page: `{ record_id, title, unit_code, thumbnail_url, is_cc0 }`
 - `museum_breakdown[]` — when mode is not `museum`, top 5 contributing units with counts, computed from the current page (helps plan museum-focused follow-up searches)
-- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names `start` as the retrieval path
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when objects remain past this page (`start + shown < total_count`), so a terminal or past-the-end page reports nothing withheld; `notice` names the next `start` outright, after the clamp sentence when `rows` exceeded the cap. With a mirror configured, `sources` / `mirror_snapshot`
 
 **Errors:**
 - `invalid_category` (ValidationError) — the category matches nothing at all (`rowCount === 0`). A browse category is an exact indexed facet, so a zero match means the supplied value did not resolve to retrievable objects, not that an object is missing. Recovery is mode-specific and names the literal next call. For `museum` / `culture` / `period` / `topic` the value is first checked against its vocabulary: outside it, the hint routes to `smithsonian_list_terms { field, contains: value }` (for `unit_code` that call matches museum names as well as codes, so a museum name resolves through it too); inside it — 14 of the 48 unit codes and a long tail of culture terms are indexed with zero objects — the hint says so and routes to a different term or a `smithsonian_search_objects` free-text query, since resolving the value returns it verbatim and loops the caller through the same failure. `medium` gets no vocabulary check (`object_type` is not enumerable upstream); it names the `object_type` values harvested from re-running the value as a free-text search, falling back to routing the caller to that search when the harvest is empty. Candidates are listed, never auto-selected. Not raised for a `start` past the end of a real category, which is normal pagination completion.
@@ -204,15 +208,16 @@ Each step is independently testable.
 
 **Input:**
 - `id: string` — `record_id` of the anchor object (from `smithsonian_search_objects` or `smithsonian_get_object`).
-- `limit?: number` — max related objects to return (default 10, max 20).
-- `start?: number` — pagination offset into the interleaved related-object sequence (default 0). Page contiguously with `start = page × limit`: page N+1 continues where page N ended. Each contributing signal is reachable to a depth of 5,000 objects, fetched from upstream in ≤1,000-row chunks. Near a seam a bounded number of objects (up to the active-signal count) can shift by one page, since a deeper page fetches more per signal and may reallocate an object that ranks very differently across signals. Beyond 5,000 matches for a signal, `truncated` stays true but deeper pages aren't reachable.
+- `limit?: number` — max related objects to return (default 10, cap 1,000; served at the cap with a notice).
+- `start?: number` — pagination offset into the interleaved related-object sequence (default 0). Page contiguously by advancing `start` by the number of objects returned (the notice names it): page N+1 continues where page N ended. Each contributing signal is reachable to a depth of 5,000 objects, fetched from upstream in ≤1,000-row chunks. Near a seam a bounded number of objects (up to the active-signal count) can shift by one page, since a deeper page fetches more per signal and may reallocate an object that ranks very differently across signals. Beyond 5,000 matches for a signal, `truncated` stays true but deeper pages aren't reachable.
 
 **Output:**
 - `anchor` — summary of the anchor object (`{ record_id, title, unit_code }`)
-- `related[]` — `{ record_id, title, unit_code, museum_name, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
+- `related[]` — `{ record_id, title, unit_code, museum_name, holding_museum_name?, thumbnail_url, is_cc0, similarity_signals[] }` where `similarity_signals` is a string array of **every** metadata term that connected this object (an object surfaced by multiple fan-out signals carries all of them, e.g. `["culture: Plains Indian", "topic: Basketry"]`)
 - `search_signals_used[]` — which metadata fields drove the fan-out searches
+- With a mirror configured: `sources`, `mirror_snapshot` (see [Open Access mirror](#open-access-mirror)); the anchor read can come from the mirror while the signal searches stay live
 - `signals[]` — per-signal breakdown of every fan-out that returned: `{ signal, row_count, search_continuation }`. `row_count` is the signal's true upstream match count, uncapped — unlike `truncationCeiling` it is not clamped to the 5,000 per-signal reach, so the two disagree exactly when a signal is broader than this tool can page. `search_continuation` is the `smithsonian_search_objects` input (`{ query, filters? }`) that reproduces that fan-out's query exactly, and `smithsonian_search_objects` applies `start` straight to the upstream offset with no depth cap — so it is the retrieval path for everything past the 5,000 reach. A fan-out whose upstream call failed is omitted (it has no known row count); `search_signals_used` still lists it.
-- `notice` — composes safe partial-failure categories and failed-signal labels with empty-result and paging guidance on both wire surfaces. No signals, no non-anchor matches, partial empty results, and exhausted pages have distinct guidance. A later-chunk failure drops the entire signal to avoid a gap; if every attempted signal fails, the first failure in signal order is thrown. Caller cancellation rejects even after a successful signal.
+- `notice` — composes the clamp sentence (when `limit` exceeded its cap), safe partial-failure categories and failed-signal labels (escaped for the rendered Markdown), and empty-result and paging guidance, which names the next `start`, on both wire surfaces. No signals, no non-anchor matches, partial empty results, and exhausted pages have distinct guidance. A later-chunk failure drops the entire signal to avoid a gap; if every attempted signal fails, the first failure in signal order is thrown. Caller cancellation rejects even after a successful signal.
 - Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` disclose when related objects were omitted — capped by `limit` or more matches available upstream (page with `start`); `truncationCeiling` is an upper bound on the *reachable* related pool — each signal's upstream match count is capped at its per-signal reach (5,000) before summing, so the ceiling never exceeds what `start` can retrieve. `notice` names both continuation tiers: `start` for the next page, `signals[].search_continuation` for a signal past the reach.
 
 **Errors:**
@@ -233,6 +238,7 @@ Each step is independently testable.
 **Output:**
 - `record_id`, `title`
 - `is_cc0` — boolean, whether the object metadata is CC0
+- With a mirror configured: `sources`, `mirror_snapshot` (see [Open Access mirror](#open-access-mirror))
 - `images[]` — per-image entries, each with:
   - `media_id` — IDS identifier
   - `is_cc0` — whether this specific image is CC0 (may differ from the object-level flag)
@@ -246,7 +252,7 @@ Each step is independently testable.
 **Errors:**
 - `not_found` (NotFound) — object not in catalog. Recovery: verify via `smithsonian_search_objects`.
 - `no_media` (NotFound) — object found but has no online media. Recovery: the physical object may not have been digitized.
-- `no_images` (NotFound) — object found with media, but all of it is non-image (scanned books, 3D models, sound recordings). Recovery: the hint names the media types present and points at `smithsonian_get_object`'s `media_summary` and `record_link`.
+- `no_images` (NotFound) — object found with media, but all of it is non-image (scanned books, 3D models, sound recordings). Recovery: the hint names the media types present and points at `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item.
 - `not_cc0` (Forbidden) — object found with images, but none of them is CC0. Recovery: use `smithsonian_search_objects` with `filters.cc0_only: true` to find CC0 objects.
 - `invalid_id` (ValidationError) — ID format is clearly malformed.
 
@@ -298,7 +304,33 @@ The API response has two ID-like fields: `url` (e.g. `"edanmdm:nasm_A19670093000
 
 ### No DataCanvas — direct paginated returns
 
-An earlier iteration spilled large result sets to a DuckDB-backed DataCanvas (`rows > 20` routed the full page to a SQL-queryable table). It was removed: the result set is catalog object summaries capped at ≤100 rows, where the workflow is find-the-object-then-drill-in, not aggregate-over-rows — the wrong shape for SQL, and `smithsonian_browse_category` already covers the cross-museum breakdown case. `smithsonian_search_objects` now returns up to `rows` (≤100) summaries directly; page through larger result sets with `start` + `rows`.
+An earlier iteration spilled large result sets to a DuckDB-backed DataCanvas (`rows > 20` routed the full page to a SQL-queryable table). It was removed: the result set is catalog object summaries, where the workflow is find-the-object-then-drill-in, not aggregate-over-rows — the wrong shape for SQL, and `smithsonian_browse_category` already covers the cross-museum breakdown case. `smithsonian_search_objects` returns up to `rows` (≤1,000) summaries directly; page through larger result sets with `start` + `rows`.
+
+### Page sizes are served at their cap, not rejected
+
+`rows` and `limit` accept any whole number of at least 1. Above the tool's cap (search, browse, and related 1,000; `smithsonian_list_terms` 40,000) the page is served at the cap and the `notice` opens with "<field> <n> exceeds the cap of <cap>; the page was served with <field> <cap>." Rejecting would cost the caller a round trip to learn a number the server can act on itself. The caps are EDAN's own `/search` maximum of 1,000 rows, and for `list_terms` (a vocabulary EDAN returns whole) a response-size choice that keeps a page near 1 MB per output surface. `SMITHSONIAN_CLAMP_LIMITS=false` restores rejection and advertises each cap as the schema `maximum`, for clients that validate against the schema. Paging notices name the next `start` outright: after a clamp, `start = page × rows` would skip data.
+
+### Response cache
+
+`SmithsonianService` keeps an in-process cache of normalized search pages (keyed by request URL, `SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS`, default 1 hour) and raw content records (`SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS`, default 24 hours). The api.data.gov key allows 1,000 requests per hour and every caller of a deployment shares it, so the repeated identical search and the get_object → get_media → find_related chain on one record (three reads of one record) cost one request per TTL. The cache is per instance, holds 64 MiB counted in UTF-8 bytes of the stored JSON, and evicts least recently used first. It stores successes only, so an error is never replayed, and concurrent identical requests share one load. The bare and `edanmdm:` forms of an ID share an entry. A TTL of `0` disables both caching and the sharing for that kind of read. Every upstream read also runs inside one 50 s deadline across attempts and backoff, which keeps a hung upstream under the 60 s request timeout MCP SDK clients default to; cancelling a call ends a pending backoff at once.
+
+### Open Access mirror
+
+The Smithsonian publishes the whole Open Access corpus as bulk metadata in a public S3 bucket. The server can hold a local SQLite copy and answer from it, which spends none of the shared 1,000-per-hour key budget.
+
+- **Off by default.** The full mirror needs about 17 GB of disk (measured on a 75k-record sample and extrapolated per unit) and an operator-run first build, and a default install should work with only an API key. `SMITHSONIAN_MIRROR_PATH` turns it on; the variable stays out of `server.json` and `manifest.json` because the one-click install has no place to build a corpus.
+- **What it answers.** Object reads (`get_object`, `get_media`, the `find_related` anchor) once the mirror is ready, falling back to the live API on a miss or a store error. Filter-only searches (empty or `*` query) within a 100,000-index-entry scan budget, measured to keep a mirror query to tens of milliseconds of synchronous work. Free text, over-budget searches, and `list_terms` stay live.
+- **Ordering.** Mirror pages run in ingest order, not the live API's, so a notice says so and a walk lines up only while `sources` stays the same.
+- **Provenance.** The five object-reading tools gain `sources` (`oa_mirror`, `edan_api`) and `mirror_snapshot` (ISO date of the bulk publish) when a mirror is configured, so an agent can cite the snapshot beside a count. A server without a mirror sets neither field.
+- **Build and refresh.** `mirror:init`, `mirror:refresh`, and `mirror:status` run `dist/mirror/cli.js`; init and refresh run the same shard-by-shard pass, resumable after an interrupt. On HTTP, a cron job (`SMITHSONIAN_MIRROR_REFRESH_CRON`, default `0 12 * * *` in server local time, empty for none) runs the CLI refresh in a child process so its per-shard transactions never stall serving threads or `/healthz`; the expression is validated at startup. On stdio the operator refreshes out-of-band. Teardown stops the refresh child and closes the store.
+- **Only init starts a build.** A refresh of a store holding no shards fails with `mirror_not_built` before any request. The first build downloads the whole bucket, so a scheduled refresh of a mistyped `SMITHSONIAN_MIRROR_PATH` must not start one. Startup opens a missing file as an empty store, logs a warning naming the variable, and answers live. That keeps the documented Docker flow working: the container starts first and `mirror:init` runs inside it. A file that isn't a SQLite store fails startup with a `ConfigurationError` naming the variable.
+- **Never VACUUM the store.** The `facets` index stores `objects.rowid`, which `VACUUM` may renumber for a table without an integer primary key, pointing facet entries at the wrong records.
+- **Dependencies.** `node-cron` schedules the refresh. `better-sqlite3` is an optional peer, needed on Node only.
+- **Docker.** The image creates `/var/lib/smithsonian-mcp-server`, owned by the runtime user, for a mounted volume; the operator sets the path and runs `docker exec <container> bun run mirror:init`.
+
+### Published agent skill
+
+`skills/smithsonian-guide/SKILL.md` carries the gates that tool descriptions can't hold: `OR` never widens a search, a museum that spans several unit codes, place terms that are separate strings, the `name` filter matching every role, and mirror-served pages. It ships in the npm package, the Docker image, plugin installs, and the `.mcpb` bundle, and `createApp({ skills: 'skills' })` serves it over MCP as `skill://smithsonian-guide/SKILL.md`. The server `instructions` point to it.
 
 ### Object metadata and image licenses are separate
 
@@ -314,7 +346,7 @@ The catalog has two distinct CC0 flags:
 
 - **No category browse endpoint**: The open API exposes `/terms/{field}` for flat filter vocabularies (what `smithsonian_list_terms` reads) but no `/category/search`. `smithsonian_browse_category` works around this via constrained search and can't return true hierarchical category trees.
 - **Some filter values require object discovery**: `object_type` and `name` are not enumerable through `list_terms`; harvest object types from search and indexed names from related-search continuations. Scientific names come from `get_object.scientific_names`. Other supported vocabularies, including media types, are enumerable through `list_terms`.
-- **Rate limits**: The free api.data.gov tier has ~1,000 req/hr. The `smithsonian_find_related` workflow makes ~5 calls for a shallow page — more when paging a broad signal deep (each 1,000-row chunk is one call, capped per signal); a session of 50 related searches could hit the hourly limit. The service layer must implement backoff on 429.
+- **Rate limits**: The free api.data.gov tier has ~1,000 req/hr. The `smithsonian_find_related` workflow makes ~5 calls for a shallow page — more when paging a broad signal deep (each 1,000-row chunk is one call, capped per signal); a session of 50 related searches could hit the hourly limit. The service layer implements backoff on 429 and caches responses, so repeated identical searches, and the get_object → get_media → find_related chain on one record, cost one request per TTL. The optional mirror removes object reads and filter-only searches from the budget entirely.
 - **Objects without media**: A significant portion of catalog objects have no digitized media — `smithsonian_get_media` returns `no_media` for these.
 - **EDAN content type variety**: Not all records are `type: edanmdm`. The catalog also has `type: ead_component`, `edanmdm`, library records, etc. The design targets `edanmdm` type records (the museum objects), but some search results may be library records with different field structures. The service normalizer should handle sparse/absent fields gracefully.
 
@@ -334,7 +366,7 @@ The catalog has two distinct CC0 flags:
 | Param | Type | Notes |
 |:------|:-----|:------|
 | `q` | string | Full-text query |
-| `rows` | number | Upstream page size (max 1,000); `smithsonian_search_objects` caps at 100, while related searches use chunks of up to 1,000. |
+| `rows` | number | Upstream page size (max 1,000); `smithsonian_search_objects` and `smithsonian_browse_category` cap at 1,000, and related searches use chunks of up to 1,000. |
 | `start` | number | Offset (0-indexed) |
 | `fq` | — | Not a working EDAN parameter. Structured filters are ANDed into `q` as Lucene `field:value` terms instead (e.g. `q=quilt AND unit_code:NASM`). |
 
@@ -467,6 +499,6 @@ Key difference from search: the item object is `response` (not `response.rows[0]
 ### Resilience
 
 - **Error-in-200 responses**: The service checks the top-level `error` before treating a 200 as success. `API_KEY_MISSING` raises non-retryable `InternalError`; `OVER_RATE_LIMIT` raises retryable `ServiceUnavailable`. Real HTTP 429 responses map to `RateLimited`.
-- Transient failures retry with exponential backoff (base 2s, max 3 retries).
+- Transient failures retry with exponential backoff (base 2s, max 3 retries), all inside one 50 s deadline.
 - `fetchWithTimeout` maps non-OK HTTP statuses to their corresponding error codes. A 404 on `/search` or `/terms/{field}` is reclassified as retryable `ServiceUnavailable`; `/content/{id}` retains `NotFound`.
 - The API key is sent in the `X-Api-Key` header, never in URLs.

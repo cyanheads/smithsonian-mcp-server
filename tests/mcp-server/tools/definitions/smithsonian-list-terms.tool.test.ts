@@ -11,6 +11,7 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 
@@ -220,8 +221,153 @@ describe('smithsonianListTerms', () => {
     expect(() => smithsonianListTerms.input.parse({ field: 'media_usage' })).toThrow();
   });
 
-  it('rejects rows > 100', () => {
-    expect(() => smithsonianListTerms.input.parse({ field: 'unit_code', rows: 101 })).toThrow();
+  describe('page-size clamp (issue #63)', () => {
+    /**
+     * The real service's listTerms over a stubbed vocabulary of `size` terms, so the
+     * rows the tool serves reach the actual slice.
+     */
+    function serveVocabulary(size: number) {
+      const service = new svcModule.SmithsonianService(createInMemoryStorage());
+      vi.spyOn(
+        service as unknown as { vocabulary: () => Promise<string[]> },
+        'vocabulary',
+      ).mockResolvedValue(Array.from({ length: size }, (_, i) => `term ${i}`));
+      const listTerms = vi.spyOn(service, 'listTerms');
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+      return listTerms;
+    }
+
+    /** Every text block of a result, the trailer that carries the notice included. */
+    function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+      return result.content.map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('\n');
+    }
+
+    /** The `rows` property as `tools/list` advertises it, serialized as on the wire. */
+    function advertisedRows(): Record<string, unknown> {
+      const schema = smithsonianListTerms.input['~standard'].jsonSchema.input({
+        target: 'draft-2020-12',
+      }) as { properties: Record<string, unknown> };
+      return JSON.parse(JSON.stringify(schema.properties.rows));
+    }
+
+    const CLAMP = 'rows 50000 exceeds the cap of 40000; the page was served with rows 40000.';
+
+    it('slices 40,000 terms for rows 50000 and leads the paging guidance with the clamp sentence', async () => {
+      const listTerms = serveVocabulary(45_000);
+
+      const result = await runToolContract(smithsonianListTerms, { field: 'topic', rows: 50_000 });
+
+      expect(result.isError).not.toBe(true);
+      expect(listTerms.mock.calls[0]?.[0]).toMatchObject({ start: 0, rows: 40_000 });
+      const sc = result.structuredContent as {
+        terms: string[];
+        total: number;
+        truncated?: boolean;
+        cap?: number;
+        notice?: string;
+      };
+      expect(sc.terms).toHaveLength(40_000);
+      expect(sc.terms.at(-1)).toBe('term 39999');
+      expect(sc).toMatchObject({ total: 45_000, truncated: true, cap: 40_000 });
+      expect(sc.notice?.startsWith(`${CLAMP} 45000 terms match`)).toBe(true);
+      expect(sc.notice).toContain('start: 40000');
+      expect(textOf(result)).toContain(CLAMP);
+      expect(textOf(result)).toContain('start: 40000');
+    });
+
+    it('composes the clamp sentence with the filtered-empty notice', async () => {
+      serveVocabulary(10);
+
+      const result = await runToolContract(smithsonianListTerms, {
+        field: 'topic',
+        rows: 50_000,
+        contains: 'zzznope',
+      });
+
+      const sc = result.structuredContent as { truncated?: boolean; notice?: string };
+      expect(sc.truncated).toBeUndefined();
+      expect(sc.notice).toBe(
+        `${CLAMP} No term in the "topic" vocabulary contains "zzznope". Broaden or re-spell the substring, or omit contains to browse the full vocabulary.`,
+      );
+      expect(textOf(result)).toContain(CLAMP);
+    });
+
+    it('serves rows 40000 as asked, with no clamp sentence', async () => {
+      const listTerms = serveVocabulary(45_000);
+
+      const result = await runToolContract(smithsonianListTerms, { field: 'topic', rows: 40_000 });
+
+      expect(listTerms.mock.calls[0]?.[0]).toMatchObject({ rows: 40_000 });
+      const sc = result.structuredContent as { terms: string[]; cap?: number; notice?: string };
+      expect(sc.terms).toHaveLength(40_000);
+      expect(sc.cap).toBe(40_000);
+      expect(sc.notice).toContain('start: 40000');
+      expect(sc.notice).not.toContain('exceeds the cap');
+    });
+
+    it('advertises rows with no maximum and the clamp wording by default', () => {
+      const rows = advertisedRows();
+      expect(rows).toMatchObject({ type: 'integer', minimum: 1, default: 50 });
+      expect(rows.maximum).toBeUndefined();
+      expect(rows.description).toContain('A value above 40000 is served at 40000 with a notice.');
+    });
+
+    describe('with SMITHSONIAN_CLAMP_LIMITS=false', () => {
+      beforeEach(() => {
+        vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+        loadClampSwitch();
+      });
+      afterEach(() => {
+        vi.unstubAllEnvs();
+        loadClampSwitch();
+      });
+
+      it('rejects rows 40001 before the vocabulary is read and serves rows 40000', async () => {
+        const listTerms = serveVocabulary(45_000);
+
+        const rejected = await runToolContract(smithsonianListTerms, {
+          field: 'topic',
+          rows: 40_001,
+        });
+        expect(rejected.isError).toBe(true);
+        expect(rejected.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+        });
+        expect(textOf(rejected)).toContain('rows');
+        expect(listTerms).not.toHaveBeenCalled();
+
+        const served = await runToolContract(smithsonianListTerms, {
+          field: 'topic',
+          rows: 40_000,
+        });
+        expect(served.isError).not.toBe(true);
+        expect(listTerms.mock.calls[0]?.[0]).toMatchObject({ rows: 40_000 });
+      });
+
+      it('advertises maximum 40000 and the strict wording', () => {
+        const rows = advertisedRows();
+        expect(rows).toMatchObject({ type: 'integer', maximum: 40_000, default: 50 });
+        expect(rows.description).toBe(
+          'Number of terms to return per page (default 50, max 40000).',
+        );
+      });
+    });
+  });
+
+  it('escapes the caller-supplied contains substring inside the Markdown notice', async () => {
+    // The framework renders a notice as Markdown and escapes nothing, so a raw
+    // `*` in the echoed substring would turn the rest of the sentence italic.
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 0)),
+    } as unknown as svcModule.SmithsonianService);
+
+    const result = await runToolContract(smithsonianListTerms, {
+      field: 'culture',
+      contains: 'zz*nope*',
+    });
+
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toContain('contains "zz\\*nope\\*".');
   });
 
   it('non-truncated result validates against the effective output schema (issue #13)', async () => {
@@ -362,14 +508,20 @@ describe('smithsonianListTerms', () => {
       // The real service over a stubbed fetch — the reclassification lives in the
       // service's retry closure, so a service stand-in cannot exercise it.
       vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      // Only /terms/culture is answered; any other upstream path fails loudly.
       vi.stubGlobal(
         'fetch',
-        vi.fn().mockResolvedValue({
-          ok: false,
-          status: 404,
-          statusText: 'Not Found',
-          headers: { get: () => null },
-          text: async () => "404 Not Found: Requested route ('api.si.edu') does not exist.",
+        vi.fn().mockImplementation(async (url: string) => {
+          if (new URL(url).pathname !== '/openaccess/api/v1.0/terms/culture') {
+            throw new Error('unmocked fetch');
+          }
+          return {
+            ok: false,
+            status: 404,
+            statusText: 'Not Found',
+            headers: { get: () => null },
+            text: async () => "404 Not Found: Requested route ('api.si.edu') does not exist.",
+          };
         }),
       );
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(

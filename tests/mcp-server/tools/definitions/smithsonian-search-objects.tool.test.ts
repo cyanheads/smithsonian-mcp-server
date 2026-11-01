@@ -12,9 +12,21 @@ import {
   runToolContract,
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
+import { luceneTermsOf, textOf } from './tool-result.js';
+
+/** The error envelope a failed contract call puts on `structuredContent`. */
+function errorOf(result: { structuredContent?: unknown }): {
+  code?: number;
+  data?: { reason?: string; recovery?: { hint?: string } };
+} {
+  return (
+    (result.structuredContent as { error?: ReturnType<typeof errorOf> } | undefined)?.error ?? {}
+  );
+}
 
 function makeObjectSummary(id = 'nasm_TEST001'): ObjectSummary {
   return {
@@ -86,7 +98,7 @@ describe('smithsonianSearchObjects', () => {
       query: 'moon',
       filters: { online_media_type: 'Images "special"\\value', online_only: true, cc0_only: true },
     });
-    expect(search.mock.calls[0]![0].filters).toEqual([
+    expect(luceneTermsOf(search)).toEqual([
       'online_media_type:"Images \\"special\\"\\\\value"',
       'online_media_type:*',
       'media_usage:CC0',
@@ -692,13 +704,13 @@ describe('smithsonianSearchObjects', () => {
     });
     await smithsonianSearchObjects.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
+    const terms = luceneTermsOf(searchFn);
     // Filters are passed as Lucene terms to embed in q — not as separate fq params
-    expect(calledParams.filters).toContain('unit_code:"NASM"');
-    expect(calledParams.filters).toContain('object_type:"Aircraft"');
+    expect(terms).toContain('unit_code:"NASM"');
+    expect(terms).toContain('object_type:"Aircraft"');
     // Not luceneField calls — these two are intentional wildcards and stay unquoted.
-    expect(calledParams.filters).toContain('media_usage:CC0');
-    expect(calledParams.filters).toContain('online_media_type:*');
+    expect(terms).toContain('media_usage:CC0');
+    expect(terms).toContain('online_media_type:*');
   });
 
   it('embeds topic and name as hard Lucene field terms', async () => {
@@ -719,8 +731,7 @@ describe('smithsonianSearchObjects', () => {
       ctx,
     );
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-    expect(calledParams.filters).toEqual(['topic:"Quilts"', 'name:"Warhol, Andy"']);
+    expect(luceneTermsOf(searchFn)).toEqual(['topic:"Quilts"', 'name:"Warhol, Andy"']);
   });
 
   it('online_only matches the index field, so a result may report has_media false (issue #28)', async () => {
@@ -747,8 +758,7 @@ describe('smithsonianSearchObjects', () => {
     });
     const result = await smithsonianSearchObjects.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-    expect(calledParams.filters).toEqual(['online_media_type:*']);
+    expect(luceneTermsOf(searchFn)).toEqual(['online_media_type:*']);
     expect(result.objects[0]?.record_id).toBe('siris_sil_813668');
     expect(result.objects[0]?.has_media).toBe(false);
   });
@@ -798,9 +808,9 @@ describe('smithsonianSearchObjects', () => {
     });
     await smithsonianSearchObjects.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-    expect(calledParams.filters).toContain('culture:"Plains Indian"');
-    expect(calledParams.filters).toContain('place:"United States of America"');
+    const terms = luceneTermsOf(searchFn);
+    expect(terms).toContain('culture:"Plains Indian"');
+    expect(terms).toContain('place:"United States of America"');
   });
 
   it('quotes a multi-word unit_code so it cannot leak into free text (issue #32)', async () => {
@@ -819,9 +829,9 @@ describe('smithsonianSearchObjects', () => {
     });
     await smithsonianSearchObjects.handler(input, ctx);
 
-    const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-    expect(calledParams.filters).toContain('unit_code:"National Air and Space Museum"');
-    expect(calledParams.filters).not.toContain('unit_code:National Air and Space Museum');
+    const terms = luceneTermsOf(searchFn);
+    expect(terms).toContain('unit_code:"National Air and Space Museum"');
+    expect(terms).not.toContain('unit_code:National Air and Space Museum');
   });
 
   it('defaults rows to 20 and start to 0', async () => {
@@ -839,8 +849,21 @@ describe('smithsonianSearchObjects', () => {
     expect(calledParams.start).toBe(0);
   });
 
-  it('caps rows at 100', () => {
-    expect(() => smithsonianSearchObjects.input.parse({ query: 'test', rows: 101 })).toThrow();
+  it('serves rows above the cap at 1,000 instead of rejecting them (issue #63)', async () => {
+    const searchFn = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+    const input = smithsonianSearchObjects.input.parse({ query: 'test', rows: 1001 });
+    await smithsonianSearchObjects.handler(input, ctx);
+
+    expect(searchFn.mock.calls[0]?.[0]).toMatchObject({ rows: 1000 });
+  });
+
+  it.each([0, 2.5, -1])('still rejects rows %s at the schema', (rows) => {
+    expect(() => smithsonianSearchObjects.input.parse({ query: 'test', rows })).toThrow();
   });
 
   describe('date filter accepts the whole indexed vocabulary (issue #36)', () => {
@@ -861,10 +884,9 @@ describe('smithsonianSearchObjects', () => {
         const input = smithsonianSearchObjects.input.parse({ query: 'test', filters: { date } });
         await smithsonianSearchObjects.handler(input, ctx);
 
-        const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
         // Always quoted (issue #42) — an unquoted single-token value is parsed for
         // Lucene syntax, so quoting is not conditional on the value containing a space.
-        expect(calledParams.filters).toContain(`date:"${date}"`);
+        expect(luceneTermsOf(searchFn)).toContain(`date:"${date}"`);
       },
     );
 
@@ -910,9 +932,9 @@ describe('smithsonianSearchObjects', () => {
       });
       await smithsonianSearchObjects.handler(input, ctx);
 
-      const calledParams = searchFn.mock.calls[0]?.[0] as { query: string; filters: string[] };
+      const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
       expect(calledParams.query).toBe('');
-      expect(calledParams.filters).toEqual(['unit_code:"NASM"']);
+      expect(luceneTermsOf(searchFn)).toEqual(['unit_code:"NASM"']);
     });
 
     it('leaves a whitespace-only query untouched', async () => {
@@ -992,8 +1014,7 @@ describe('smithsonianSearchObjects', () => {
         ctx,
       );
 
-      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-      expect(calledParams.filters).toEqual(['culture:"Early Iron Age, \\"Tomb Age\\""']);
+      expect(luceneTermsOf(searchFn)).toEqual(['culture:"Early Iron Age, \\"Tomb Age\\""']);
     });
 
     it('escapes a quote-bearing name value instead of truncating the phrase', async () => {
@@ -1014,8 +1035,7 @@ describe('smithsonianSearchObjects', () => {
         ctx,
       );
 
-      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-      expect(calledParams.filters).toEqual(['name:"Smith, John \\"Jack\\""']);
+      expect(luceneTermsOf(searchFn)).toEqual(['name:"Smith, John \\"Jack\\""']);
     });
 
     it('escapes a quote-bearing topic term — 80 of the 133k topic terms carry one', async () => {
@@ -1033,8 +1053,7 @@ describe('smithsonianSearchObjects', () => {
         ctx,
       );
 
-      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-      expect(calledParams.filters).toEqual(['topic:"Operation \\"Overlord\\""']);
+      expect(luceneTermsOf(searchFn)).toEqual(['topic:"Operation \\"Overlord\\""']);
     });
 
     it('quotes a bare wildcard place term so it stays one literal term', async () => {
@@ -1052,9 +1071,9 @@ describe('smithsonianSearchObjects', () => {
         ctx,
       );
 
-      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-      expect(calledParams.filters).toEqual(['place:"*"']);
-      expect(calledParams.filters).not.toContain('place:*');
+      const terms = luceneTermsOf(searchFn);
+      expect(terms).toEqual(['place:"*"']);
+      expect(terms).not.toContain('place:*');
     });
 
     it('leaves the two intentional wildcard literals unquoted', async () => {
@@ -1074,8 +1093,7 @@ describe('smithsonianSearchObjects', () => {
         ctx,
       );
 
-      const calledParams = searchFn.mock.calls[0]?.[0] as { filters: string[] };
-      expect(calledParams.filters).toEqual(['online_media_type:*', 'media_usage:CC0']);
+      expect(luceneTermsOf(searchFn)).toEqual(['online_media_type:*', 'media_usage:CC0']);
     });
   });
 
@@ -1163,6 +1181,338 @@ describe('smithsonianSearchObjects', () => {
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(err.data?.reason).toBe('upstream_unavailable');
       expect(err.data?.reason).not.toBe('no_results');
+    });
+  });
+
+  describe('requests sent through the live service (issues #61, #63, #67)', () => {
+    const SEARCH_PATH = '/openaccess/api/v1.0/search';
+
+    /** One raw EDAN `/search` row whose indexed and record unit codes agree. */
+    function edanRow(i: number) {
+      return {
+        id: `ld1-${i}`,
+        title: `Quilt ${i}`,
+        unitCode: 'NMAH',
+        url: `edanmdm:nmah_Q${i}`,
+        content: {
+          descriptiveNonRepeating: {
+            record_ID: `nmah_Q${i}`,
+            unit_code: 'NMAH',
+            metadata_usage: { access: 'CC0' },
+          },
+          indexedStructured: { object_type: ['Quilts'] },
+        },
+      };
+    }
+
+    /** A `/search` responder over a corpus of `total` rows, sliced by the request's own paging. */
+    function corpus(total: number) {
+      return (params: URLSearchParams) => {
+        const start = Number(params.get('start'));
+        const count = Math.max(0, Math.min(Number(params.get('rows')), total - start));
+        return {
+          rows: Array.from({ length: count }, (_, i) => edanRow(start + i)),
+          rowCount: total,
+        };
+      };
+    }
+
+    /**
+     * Run the real service over a fetch stub that answers `/search` by pathname and
+     * rejects every other request as unmocked. Returns the query params of each
+     * `/search` request, in order.
+     */
+    function routeSearch(
+      respond: (params: URLSearchParams) => { rows: unknown[]; rowCount: number },
+    ): URLSearchParams[] {
+      const sent: URLSearchParams[] = [];
+      const fetchMock = vi.fn(async (request: string | URL | Request) => {
+        const url = new URL(request instanceof Request ? request.url : String(request));
+        if (url.pathname !== SEARCH_PATH) throw new Error('unmocked fetch');
+        sent.push(url.searchParams);
+        return new Response(
+          JSON.stringify({ status: 200, responseCode: 1, response: respond(url.searchParams) }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      });
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      vi.stubGlobal('fetch', fetchMock);
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+      return sent;
+    }
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    describe('blank filter values keep the form-client contract (issue #61)', () => {
+      it.each([
+        ['a blank unit_code', { query: 'quilt', filters: { unit_code: '' }, rows: 3 }, 'quilt'],
+        ['an omitted filters object', { query: 'quilt', rows: 3 }, 'quilt'],
+        [
+          'a blank query with a unit_code',
+          { query: '', filters: { unit_code: 'NMAH' }, rows: 3 },
+          'unit_code:"NMAH"',
+        ],
+      ] as const)('sends the same q for %s', async (_label, input, q) => {
+        const sent = routeSearch(() => ({ rows: [edanRow(0)], rowCount: 1 }));
+
+        const result = await runToolContract(smithsonianSearchObjects, input);
+
+        expect(result.isError).toBeFalsy();
+        expect(sent.map((p) => p.get('q'))).toEqual([q]);
+      });
+    });
+
+    describe('page size served at its cap (issue #63)', () => {
+      it('serves rows 1500 at 1,000 with the clamp and the continuation in one notice', async () => {
+        const sent = routeSearch(corpus(2694));
+
+        const result = await runToolContract(smithsonianSearchObjects, {
+          query: 'quilt',
+          rows: 1500,
+        });
+
+        expect(sent.map((p) => p.get('rows'))).toEqual(['1000']);
+        const sc = result.structuredContent as { objects: unknown[]; notice?: string };
+        expect(sc.objects).toHaveLength(1000);
+        expect(sc).toMatchObject({
+          truncated: true,
+          shown: 1000,
+          cap: 1000,
+          truncationCeiling: 2694,
+        });
+        for (const surface of [sc.notice ?? '', textOf(result)]) {
+          expect(surface).toContain(
+            'rows 1500 exceeds the cap of 1000; the page was served with rows 1000.',
+          );
+          expect(surface).toContain('2694 objects match');
+          expect(surface).toContain('the next page starts at 1000');
+        }
+      });
+
+      it('carries the clamp sentence alone when the clamped page withholds nothing', async () => {
+        const sent = routeSearch(corpus(2));
+
+        const result = await runToolContract(smithsonianSearchObjects, {
+          query: 'quilt',
+          rows: 5000,
+        });
+
+        expect(sent.map((p) => p.get('rows'))).toEqual(['1000']);
+        const sc = result.structuredContent as { truncated?: boolean; notice?: string };
+        expect(sc.truncated).toBeUndefined();
+        expect(sc.notice).toBe(
+          'rows 5000 exceeds the cap of 1000; the page was served with rows 1000.',
+        );
+        expect(textOf(result)).toContain(
+          'rows 5000 exceeds the cap of 1000; the page was served with rows 1000.',
+        );
+      });
+
+      it('serves rows 1000 as asked, with no clamp sentence', async () => {
+        const sent = routeSearch(corpus(2694));
+
+        const result = await runToolContract(smithsonianSearchObjects, {
+          query: 'quilt',
+          rows: 1000,
+        });
+
+        expect(sent.map((p) => p.get('rows'))).toEqual(['1000']);
+        const sc = result.structuredContent as { notice?: string };
+        expect(sc).toMatchObject({ truncated: true, cap: 1000 });
+        expect(sc.notice).toContain('2694 objects match');
+        expect(sc.notice).not.toContain('exceeds the cap');
+      });
+
+      it('pages every match exactly once at rows 1000, following the named next start', async () => {
+        const total = 2694;
+        const sent = routeSearch(corpus(total));
+        const seen: string[] = [];
+        let start = 0;
+        for (let page = 0; page < 5; page++) {
+          const result = await runToolContract(smithsonianSearchObjects, {
+            query: 'quilt',
+            rows: 1000,
+            start,
+          });
+          const sc = result.structuredContent as {
+            objects: Array<{ record_id: string }>;
+            truncated?: boolean;
+            notice?: string;
+          };
+          seen.push(...sc.objects.map((o) => o.record_id));
+          if (!sc.truncated) break;
+          const next = start + sc.objects.length;
+          expect(sc.notice).toContain(`the next page starts at ${next}`);
+          start = next;
+        }
+
+        expect(seen).toHaveLength(total);
+        expect(new Set(seen).size).toBe(total);
+        expect(sent.map((p) => p.get('start'))).toEqual(['0', '1000', '2000']);
+        expect(sent.map((p) => p.get('rows'))).toEqual(['1000', '1000', '1000']);
+      });
+    });
+
+    describe('invalid_filter harvest (issue #67)', () => {
+      it.each([
+        ['an empty query', ''],
+        ['a whitespace-only query', '   '],
+      ])('skips the harvest re-query for %s', async (_label, query) => {
+        const sent = routeSearch(() => ({ rows: [], rowCount: 0 }));
+
+        const result = await runToolContract(smithsonianSearchObjects, {
+          query,
+          filters: { unit_code: 'SAO' },
+          rows: 1,
+        });
+
+        expect(errorOf(result).data?.reason).toBe('invalid_filter');
+        expect(errorOf(result).data?.recovery?.hint).toBe(
+          smithsonianSearchObjects.errors?.find((e) => e.reason === 'invalid_filter')?.recovery,
+        );
+        expect(sent).toHaveLength(1);
+        expect(sent[0]!.get('q')).toContain('unit_code:"SAO"');
+      });
+
+      it('still harvests for a non-blank query', async () => {
+        const sent = routeSearch((params) =>
+          params.get('q') === 'quilt'
+            ? { rows: [edanRow(0)], rowCount: 2694 }
+            : { rows: [], rowCount: 0 },
+        );
+
+        const result = await runToolContract(smithsonianSearchObjects, {
+          query: 'quilt',
+          filters: { unit_code: 'SAO' },
+        });
+
+        expect(errorOf(result).data?.reason).toBe('invalid_filter');
+        expect(sent.map((p) => p.get('q'))).toEqual(['quilt AND unit_code:"SAO"', 'quilt']);
+        expect(errorOf(result).data?.recovery?.hint).toContain('unit_code: NMAH');
+      });
+    });
+  });
+
+  describe('page-size clamp wiring (issue #63)', () => {
+    it.each([
+      [1500, 1],
+      [1000, 0],
+    ])('rows %s writes %s clamp log record(s)', async (rows, records) => {
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 }),
+      } as unknown as svcModule.SmithsonianService);
+
+      const ctx = createMockContext({ errors: smithsonianSearchObjects.errors });
+      await smithsonianSearchObjects.handler(
+        smithsonianSearchObjects.input.parse({ query: 'quilt', rows }),
+        ctx,
+      );
+
+      const clampLogs = (
+        ctx.log as unknown as { calls: Array<{ msg: string; data?: unknown }> }
+      ).calls.filter((c) => c.msg === 'Served rows at its cap');
+      expect(clampLogs).toHaveLength(records);
+      if (records > 0) {
+        expect(clampLogs[0]!.data).toMatchObject({
+          tool: 'smithsonian_search_objects',
+          input: 'rows',
+          requested: 1500,
+          served: 1000,
+        });
+      }
+    });
+
+    describe('with SMITHSONIAN_CLAMP_LIMITS=false', () => {
+      afterEach(() => {
+        vi.unstubAllEnvs();
+        loadClampSwitch();
+      });
+
+      it('rejects rows past 1,000 before the upstream call and serves rows 1000', async () => {
+        vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+        loadClampSwitch();
+        const search = vi.fn().mockResolvedValue({ rows: [makeObjectSummary()], rowCount: 1 });
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+          search,
+        } as unknown as svcModule.SmithsonianService);
+
+        const rejected = await runToolContract(smithsonianSearchObjects, {
+          query: 'quilt',
+          rows: 1001,
+        });
+        expect(errorOf(rejected)).toMatchObject({
+          code: JsonRpcErrorCode.InvalidParams,
+          data: { reason: 'invalid_arguments' },
+        });
+        expect(search).not.toHaveBeenCalled();
+
+        const served = await runToolContract(smithsonianSearchObjects, {
+          query: 'quilt',
+          rows: 1000,
+        });
+        expect(served.isError).toBeFalsy();
+        expect(search.mock.calls[0]?.[0]).toMatchObject({ rows: 1000 });
+      });
+    });
+  });
+
+  describe('holding_museum_name (issue #64)', () => {
+    const HOLDER = 'Smithsonian Astrophysical Observatory';
+    const held = {
+      ...makeObjectSummary('dpo_3d_200012'),
+      unit_code: 'OCIO_DPO3D',
+      museum_name:
+        'Office of the Chief Information Officer - Digitization Program Office (3D digitization)',
+      holding_museum_name: HOLDER,
+    };
+    const plain = makeObjectSummary('nasm_TEST002');
+
+    it('carries the holder on both surfaces for the row that has one, and only there', async () => {
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search: vi.fn().mockResolvedValue({ rows: [held, plain], rowCount: 2 }),
+      } as unknown as svcModule.SmithsonianService);
+
+      const result = await runToolContract(smithsonianSearchObjects, {
+        query: '',
+        filters: { unit_code: 'OCIO_DPO3D' },
+      });
+
+      const objects = (result.structuredContent as { objects: Array<Record<string, unknown>> })
+        .objects;
+      expect(objects).toHaveLength(2);
+      expect(objects[0]).toMatchObject({ unit_code: 'OCIO_DPO3D', holding_museum_name: HOLDER });
+      expect(objects[1]).not.toHaveProperty('holding_museum_name');
+
+      const lines = textOf(result).split('\n');
+      const museumLine = lines.findIndex(
+        (l) => l.includes('**ID:** dpo_3d_200012') && l.includes('**Museum:**'),
+      );
+      expect(museumLine).toBeGreaterThanOrEqual(0);
+      expect(lines[museumLine + 1]).toBe(`**Held by:** ${HOLDER}`);
+      expect(lines.filter((l) => l.startsWith('**Held by:**'))).toHaveLength(1);
+    });
+
+    it('declares the field optional with its holder description', () => {
+      const schema = z.toJSONSchema(smithsonianSearchObjects.output) as unknown as {
+        properties: {
+          objects: {
+            items: {
+              properties: Record<string, { description?: string }>;
+              required?: string[];
+            };
+          };
+        };
+      };
+      const item = schema.properties.objects.items;
+      expect(item.properties.holding_museum_name?.description).toBe(
+        "The unit that holds the object, from the record's own data source, when it differs from the unit that indexes it (unit_code). Absent otherwise.",
+      );
+      expect(item.required).not.toContain('holding_museum_name');
     });
   });
 });

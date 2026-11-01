@@ -5,6 +5,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  enrichProvenance,
+  provenanceEnrichment,
+  provenanceTrailer,
+} from '@/mcp-server/tools/provenance.js';
 import { getSmithsonianService, toPlainText } from '@/services/smithsonian/smithsonian-service.js';
 
 const ImageResolutionSchema = z
@@ -18,7 +23,7 @@ const ImageResolutionSchema = z
 export const smithsonianGetMedia = tool('smithsonian_get_media', {
   title: 'Get Smithsonian Object Media',
   description:
-    'Return every CC0 (open-access) image for a Smithsonian object at multiple resolutions. The tool never returns an empty list — it names the reason instead: an object with nothing digitized, an object whose media is entirely non-image (scanned books, 3D models, sound recordings), and an object whose images are entirely non-CC0 each fail with their own reason. Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions. The cc0_only filter on smithsonian_search_objects surfaces objects that have downloadable CC0 images.',
+    'Return every CC0 (open-access) image for a Smithsonian object at multiple resolutions. The tool never returns an empty list — it names the reason instead: an object with nothing digitized, an object whose media is entirely non-image (3D models, scanned books, documents), and an object whose images are entirely non-CC0 each fail with their own reason. Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions. The cc0_only filter on smithsonian_search_objects surfaces objects that have downloadable CC0 images.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -63,6 +68,9 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
       .describe('CC0-licensed images for this object.'),
   }),
 
+  enrichment: provenanceEnrichment,
+  enrichmentTrailer: provenanceTrailer,
+
   errors: [
     {
       reason: 'not_found',
@@ -83,9 +91,9 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
     {
       reason: 'no_images',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The object has digitized media, but none of it is an image — the media is entirely non-image types such as scanned books, 3D models, or sound recordings.',
+      when: 'The object has digitized media, but none of it is an image — the media is entirely non-image types such as 3D models, scanned books, or documents.',
       recovery:
-        'Call smithsonian_get_object for this record and read media_summary and record_link — non-image media is reachable from the Smithsonian record page, not from this tool.',
+        'Call smithsonian_get_object for this record and read media_summary.non_image_media, which links each non-image item; this tool delivers images only.',
     },
     {
       reason: 'not_cc0',
@@ -111,7 +119,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
     const svc = getSmithsonianService();
     ctx.log.info('Fetching media for Smithsonian object', { id: input.id });
 
-    const raw = await svc.getContent(input.id, ctx);
+    const { record: raw, provenance } = await svc.getContent(input.id, ctx);
 
     const isCC0 = svc.isCC0(raw);
     const title = toPlainText(raw.title ?? '');
@@ -129,8 +137,8 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
 
     const allImages = svc.toImageItems(raw);
 
-    // The object has media, but none of it survived the image filter — scanned
-    // books, 3D models, video. Distinct from both neighbours: no_media means
+    // The object has media, but none of it survived the image filter — 3D
+    // models, scanned books, documents. Distinct from both neighbours: no_media means
     // nothing was digitized, not_cc0 means images exist but are restricted.
     // Returning images: [] here would be indistinguishable from either.
     if (allImages.length === 0) {
@@ -144,7 +152,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
         {
           ...(typeList && {
             recovery: {
-              hint: `This object's online media is ${typeList}, which smithsonian_get_media does not deliver. Call smithsonian_get_object { id: "${input.id}" } and read media_summary and record_link to reach it.`,
+              hint: `This object's online media is ${typeList}, which smithsonian_get_media does not deliver. Call smithsonian_get_object { id: "${input.id}" } and read media_summary.non_image_media for each item's link.`,
             },
           }),
           record_id: recordId,
@@ -173,6 +181,7 @@ export const smithsonianGetMedia = tool('smithsonian_get_media', {
       is_cc0: isCC0,
     });
 
+    enrichProvenance(ctx, [provenance]);
     return {
       record_id: recordId,
       title,
