@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-11-01 17:30:34
+Generated on: 2026-11-01 17:36:15
 
 ```text
 smithsonian-mcp-server/
@@ -27,6 +27,7 @@ smithsonian-mcp-server/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
+│   ├── 0.4.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md

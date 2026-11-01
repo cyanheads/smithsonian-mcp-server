@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-01
+
+Optional local Open Access mirror, a response cache, and a published guide skill
+
 ## [0.3.9](changelog/0.3.x/0.3.9.md) — 2026-10-18
 
 Precise searches and richer Smithsonian object metadata
