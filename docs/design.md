@@ -252,7 +252,7 @@ Each step is independently testable.
 **Errors:**
 - `not_found` (NotFound) — object not in catalog. Recovery: verify via `smithsonian_search_objects`.
 - `no_media` (NotFound) — object found but has no online media. Recovery: the physical object may not have been digitized.
-- `no_images` (NotFound) — object found with media, but all of it is non-image (scanned books, 3D models, sound recordings). Recovery: the hint names the media types present and points at `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item.
+- `no_images` (NotFound) — object found with media, but all of it is non-image (3D models, scanned books, documents). Recovery: the hint names the media types present and points at `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item.
 - `not_cc0` (Forbidden) — object found with images, but none of them is CC0. Recovery: use `smithsonian_search_objects` with `filters.cc0_only: true` to find CC0 objects.
 - `invalid_id` (ValidationError) — ID format is clearly malformed.
 

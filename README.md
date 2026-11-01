@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/smithsonian-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/smithsonian-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/smithsonian-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -82,7 +82,7 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 
 - Input: `record_id` from `smithsonian_search_objects` — do not construct IDs manually
 - Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, exhibition history, accession identifiers, credit line, rights statement
-- Media summary included — call `smithsonian_get_media` for full image URLs. `media_summary.non_image_media[]` lists every media item that is not an image (3D models, sound recordings, scanned books) as `{ type, url?, is_cc0 }`, in catalog order
+- Media summary included — call `smithsonian_get_media` for full image URLs. `media_summary.non_image_media[]` lists every media item that is not an image (3D models, scanned books, documents) as `{ type, url?, is_cc0 }`, in catalog order
 - `holding_museum_name` names the holding unit when it differs from `unit_code`, the code the record is indexed under (the 3D digitization scans); the text output renders it as `Held by`
 - All nonempty notes retain their catalog labels and source order. `description` selects recognized prose labels; administrative notes stay labeled.
 - Natural-history metadata includes all `scientific_names`, reported `taxonomy` ranks, and valid decimal collection `coordinates` with their own locality when present. The arrays are empty when no names or valid points are available; absent ranks are omitted. No accepted name, geocoding, or accuracy is inferred. Use `scientific_names` as exact `filters.scientific_name` values in search; this field is not enumerable via `smithsonian_list_terms`.
@@ -92,7 +92,7 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 ### `smithsonian_get_media` <sub>tool</sub>
 
 - Only CC0-licensed images are returned, never restricted content
-- Three distinct failure reasons when nothing is returnable: `no_media` (nothing digitized), `no_images` (media exists but is entirely non-image — scanned books, 3D models, sound recordings; the recovery hint names the types present and points to `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item), `not_cc0` (images exist but none are CC0, thrown as `Forbidden`)
+- Three distinct failure reasons when nothing is returnable: `no_media` (nothing digitized), `no_images` (media exists but is entirely non-image — 3D models, scanned books, documents; the recovery hint names the types present and points to `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item), `not_cc0` (images exist but none are CC0, thrown as `Forbidden`)
 - Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions
 - Use `smithsonian_search_objects` with `filters.cc0_only: true` to find objects with downloadable CC0 images before calling this tool
 
