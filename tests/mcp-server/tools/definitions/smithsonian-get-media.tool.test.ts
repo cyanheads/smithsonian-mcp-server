@@ -3,12 +3,21 @@
  * @module tests/mcp-server/tools/definitions/smithsonian-get-media.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createInMemoryStorage,
+  createMockContext,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianGetMedia } from '@/mcp-server/tools/definitions/smithsonian-get-media.tool.js';
+import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
-import type { ImageItem, RawEDAN } from '@/services/smithsonian/types.js';
+import type { ImageItem, RawEDAN, RawMediaItem } from '@/services/smithsonian/types.js';
+import { codeSpans, headings, images, labelValues, links } from '../markdown-read-back.js';
+import { textOf } from './tool-result.js';
 
 function makeCc0Raw(mediaCount = 1, isCC0 = true): RawEDAN {
   return {
@@ -93,11 +102,9 @@ describe('smithsonianGetMedia', () => {
       if (branch === 'success') {
         expect(result.isError).not.toBe(true);
         expect(result.structuredContent).toMatchObject({ title: expected });
-        expect(result.content).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({ text: expect.stringContaining(`# Media: ${expected}`) }),
-          ]),
-        );
+        // The heading reads back as the title under CommonMark, whatever it escapes; an empty
+        // title leaves the heading's own trailing space, which CommonMark trims.
+        expect(headings(textOf(result))[0]).toBe(expected ? `Media: ${expected}` : 'Media:');
       } else {
         expect(result.isError).toBe(true);
         expect(result.structuredContent).toMatchObject({
@@ -304,6 +311,7 @@ describe('smithsonianGetMedia', () => {
       record_id: 'nasm_TEST001',
       title: 'Test Object',
       is_cc0: true,
+      cc0_image_count: 1,
       images: [
         {
           media_id: 'NASM-TEST001',
@@ -331,12 +339,6 @@ describe('smithsonianGetMedia', () => {
   });
 
   describe('no_images recovery routes to media_summary.non_image_media (issue #62)', () => {
-    /** The error text on `content[]`, joined. */
-    const textOf = (result: { content?: unknown }) =>
-      ((result.content ?? []) as Array<{ type: string; text?: string }>)
-        .map((b) => (b.type === 'text' ? (b.text ?? '') : ''))
-        .join('\n');
-
     function stubService(media: NonNullable<RawEDAN['content']>['descriptiveNonRepeating']) {
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
         getContent: vi.fn().mockResolvedValue({
@@ -407,6 +409,7 @@ describe('smithsonianGetMedia', () => {
       record_id: 'nasm_TEST001',
       title: 'Test Object',
       is_cc0: true,
+      cc0_image_count: 1,
       images: [makeCc0Image()],
     };
     const blocks = smithsonianGetMedia.format!(output);
@@ -416,5 +419,399 @@ describe('smithsonianGetMedia', () => {
     expect(text).toContain('.jpg');
     expect(text).toContain('https://ids.si.edu/screen');
     expect(text).toContain('A test aircraft on display.');
+  });
+});
+
+/**
+ * Serve `raw` through the real image normalization and CC0 test: only the record read is
+ * stubbed, so the images the tool pages are the ones `normalizeToImage` builds.
+ */
+function serveRecord(raw: RawEDAN) {
+  const real = new svcModule.SmithsonianService(createInMemoryStorage());
+  const getContent = vi.fn().mockResolvedValue({ record: raw });
+  vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+    getContent,
+    isCC0: (record: RawEDAN) => real.isCC0(record),
+    toImageItems: (record: RawEDAN) => real.toImageItems(record),
+  } as unknown as svcModule.SmithsonianService);
+  return { real, getContent };
+}
+
+/** A CC0 record whose media is `media`, counted as given. */
+function mediaRecord(media: RawMediaItem[]): RawEDAN {
+  return {
+    title: "Dyer's record book",
+    content: {
+      descriptiveNonRepeating: {
+        record_ID: 'chndm_1945-55-16',
+        metadata_usage: { access: 'CC0' },
+        online_media: { mediaCount: media.length, media },
+      },
+    },
+  };
+}
+
+/** `count` CC0 images in catalog order, IMG-0 first, shaped like chndm_1945-55-16's. */
+function cc0Images(count: number): RawMediaItem[] {
+  return Array.from({ length: count }, (_, i) => ({
+    type: 'Images',
+    idsId: `IMG-${i}`,
+    content: `https://ids.si.edu/ids/deliveryService?id=IMG-${i}`,
+    usage: { access: 'CC0' },
+    altTextAccessibility: '',
+  }));
+}
+
+/** The fields these tests read off a successful `structuredContent`. */
+interface MediaPage {
+  cap?: number;
+  cc0_image_count?: number;
+  images?: ImageItem[];
+  notice?: string;
+  shown?: number;
+  truncated?: boolean;
+  truncationCeiling?: number;
+}
+
+const pageOf = (result: { structuredContent?: unknown }) => result.structuredContent as MediaPage;
+const idsOf = (result: { structuredContent?: unknown }) =>
+  pageOf(result).images?.map((img) => img.media_id);
+
+describe('paging the CC0 images with start and limit (issue #76)', () => {
+  const ID = 'chndm_1945-55-16';
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    loadClampSwitch();
+  });
+
+  it('limit 5 returns the first 5 of 229 and names start 5 in the truncation notice', async () => {
+    serveRecord(mediaRecord(cc0Images(229)));
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID, limit: 5 });
+
+    expect(result.isError).not.toBe(true);
+    expect(idsOf(result)).toEqual(['IMG-0', 'IMG-1', 'IMG-2', 'IMG-3', 'IMG-4']);
+    expect(result.structuredContent).toMatchObject({
+      cc0_image_count: 229,
+      truncated: true,
+      shown: 5,
+      cap: 5,
+      truncationCeiling: 229,
+    });
+    const notice =
+      '229 CC0 images; this page shows 5 from start 0. Retrieve the next page with start: 5, or omit limit to return every remaining image.';
+    expect(pageOf(result).notice).toBe(notice);
+    expect(textOf(result)).toContain('**Images:** 5 of 229 CC0 image(s)');
+    expect(textOf(result)).toContain(notice);
+  });
+
+  it('start 225 returns the last 4 images with no truncation', async () => {
+    serveRecord(mediaRecord(cc0Images(229)));
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID, start: 225 });
+
+    expect(idsOf(result)).toEqual(['IMG-225', 'IMG-226', 'IMG-227', 'IMG-228']);
+    expect(pageOf(result).cc0_image_count).toBe(229);
+    expect(result.structuredContent).not.toHaveProperty('truncated');
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(textOf(result)).toContain('**Images:** 4 of 229 CC0 image(s)');
+  });
+
+  it('a page that ends on the last image is not truncated', async () => {
+    serveRecord(mediaRecord(cc0Images(229)));
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID, start: 224, limit: 5 });
+
+    expect(idsOf(result)).toEqual(['IMG-224', 'IMG-225', 'IMG-226', 'IMG-227', 'IMG-228']);
+    expect(result.structuredContent).not.toHaveProperty('truncated');
+  });
+
+  it('an omitted limit returns every image, as calls without paging always have', async () => {
+    serveRecord(mediaRecord(cc0Images(229)));
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID });
+
+    expect(pageOf(result).images).toHaveLength(229);
+    expect(pageOf(result).cc0_image_count).toBe(229);
+    expect(result.structuredContent).not.toHaveProperty('truncated');
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(textOf(result)).toContain('**Images:** 229 of 229 CC0 image(s)');
+  });
+
+  it.each([229, 500])(
+    'start %d, at or past the last image, returns no images and the count, with no error or notice',
+    async (start) => {
+      serveRecord(mediaRecord(cc0Images(229)));
+
+      const result = await runToolContract(smithsonianGetMedia, { id: ID, start });
+
+      expect(result.isError).not.toBe(true);
+      expect(pageOf(result).images).toEqual([]);
+      expect(pageOf(result).cc0_image_count).toBe(229);
+      expect(result.structuredContent).not.toHaveProperty('truncated');
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(textOf(result)).toContain('**Images:** 0 of 229 CC0 image(s)');
+    },
+  );
+
+  it('serves a limit over the cap at 1,000, the clamp sentence leading the notice', async () => {
+    serveRecord(mediaRecord(cc0Images(1001)));
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID, limit: 1500 });
+
+    expect(pageOf(result).images).toHaveLength(1000);
+    expect(result.structuredContent).toMatchObject({
+      cc0_image_count: 1001,
+      truncated: true,
+      shown: 1000,
+      cap: 1000,
+      truncationCeiling: 1001,
+    });
+    expect(pageOf(result).notice).toBe(
+      'limit 1500 exceeds the cap of 1000; the page was served with limit 1000. 1001 CC0 images; this page shows 1000 from start 0. Retrieve the next page with start: 1000, or omit limit to return every remaining image.',
+    );
+  });
+
+  it('a clamped limit on a shorter list carries the clamp sentence alone', async () => {
+    serveRecord(mediaRecord(cc0Images(229)));
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID, limit: 1500 });
+
+    expect(pageOf(result).images).toHaveLength(229);
+    expect(pageOf(result).notice).toBe(
+      'limit 1500 exceeds the cap of 1000; the page was served with limit 1000.',
+    );
+    expect(result.structuredContent).not.toHaveProperty('truncated');
+  });
+
+  it('rejects a limit over the cap under SMITHSONIAN_CLAMP_LIMITS=false, before reading the record', async () => {
+    vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+    loadClampSwitch();
+    const { getContent } = serveRecord(mediaRecord(cc0Images(229)));
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID, limit: 1500 });
+
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+    });
+    expect(textOf(result)).toContain('limit');
+    expect(getContent).not.toHaveBeenCalled();
+  });
+
+  it.each([{ start: -1 }, { start: 1.5 }, { limit: 0 }, { limit: 2.5 }])(
+    'rejects %o as invalid_arguments, before reading the record',
+    async (paging) => {
+      const { getContent } = serveRecord(mediaRecord(cc0Images(3)));
+
+      const result = await runToolContract(smithsonianGetMedia, { id: ID, ...paging });
+
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+      });
+      expect(getContent).not.toHaveBeenCalled();
+    },
+  );
+
+  const NOTHING_TO_PAGE: Array<[reason: string, media: RawMediaItem[]]> = [
+    ['no_media', []],
+    [
+      'no_images',
+      [{ type: 'Scanned books', content: 'https://doi.org/10.5479/sil.893158', usage: {} }],
+    ],
+    ['not_cc0', [{ type: 'Images', idsId: 'R-1', usage: { access: 'Usage Conditions Apply' } }]],
+  ];
+
+  it.each(NOTHING_TO_PAGE)(
+    'fails %s from the whole record, whatever start is',
+    async (reason, media) => {
+      for (const start of [0, 3, 500]) {
+        serveRecord(mediaRecord(media));
+        const result = await runToolContract(smithsonianGetMedia, { id: ID, start, limit: 1 });
+        expect(result.structuredContent).toMatchObject({ error: { data: { reason } } });
+      }
+    },
+  );
+
+  /** CC0 images A, C, D among a restricted image, an image with no id, and a 3D package. */
+  const MIXED: RawMediaItem[] = [
+    { type: 'Images', idsId: 'A', usage: { access: 'CC0' } },
+    { type: 'Images', idsId: 'B', usage: { access: 'Usage Conditions Apply' } },
+    { type: 'Images', usage: { access: 'CC0' } },
+    { type: 'Images', idsId: 'C', usage: { access: 'CC0' } },
+    { type: '3d_voyager', content: 'https://3d-api.si.edu/voyager/x', usage: { access: 'CC0' } },
+    { idsId: 'D', usage: { access: 'CC0' } },
+  ];
+
+  it('pages the CC0 images only, in catalog order', async () => {
+    serveRecord(mediaRecord(MIXED));
+
+    const second = await runToolContract(smithsonianGetMedia, { id: ID, start: 1, limit: 1 });
+    expect(idsOf(second)).toEqual(['C']);
+    expect(pageOf(second)).toMatchObject({ cc0_image_count: 3, truncated: true });
+    expect(pageOf(second).notice).toContain('start: 2');
+
+    const last = await runToolContract(smithsonianGetMedia, { id: ID, start: 2, limit: 1 });
+    expect(idsOf(last)).toEqual(['D']);
+    expect(last.structuredContent).not.toHaveProperty('truncated');
+  });
+
+  it("reports the same cc0_image_count as smithsonian_get_object's media_summary", async () => {
+    const raw = mediaRecord(MIXED);
+    const { real } = serveRecord(raw);
+
+    const result = await runToolContract(smithsonianGetMedia, { id: ID, limit: 1 });
+
+    expect(pageOf(result).cc0_image_count).toBe(3);
+    expect(pageOf(result).cc0_image_count).toBe(
+      real.toFullObject(raw).media_summary.cc0_image_count,
+    );
+  });
+
+  /** The advertised input schema, as `tools/list` emits it. */
+  const advertised = () =>
+    z.toJSONSchema(smithsonianGetMedia.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+      required?: string[];
+    };
+
+  it('advertises start and an optional limit with no maximum while clamping is on', () => {
+    const schema = advertised();
+    expect(schema.properties.start).toMatchObject({ type: 'integer', minimum: 0, default: 0 });
+    expect(schema.properties.limit).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(schema.properties.limit).not.toHaveProperty('maximum');
+    expect(schema.required).toEqual(['id']);
+  });
+
+  it('advertises the limit cap as the schema maximum under SMITHSONIAN_CLAMP_LIMITS=false', () => {
+    vi.stubEnv('SMITHSONIAN_CLAMP_LIMITS', 'false');
+    loadClampSwitch();
+    expect(advertised().properties.limit).toMatchObject({ type: 'integer', maximum: 1000 });
+  });
+});
+
+describe('full-size JPEG on both surfaces (issue #71)', () => {
+  const NASM_ID = 'NASM-NASM2022-05013-000003';
+  const NASM_CONTENT = `https://ids.si.edu/ids/deliveryService?id=${NASM_ID}`;
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders a JPEG taken from content with no size suffix, and no empty Alt line (nasm_A19700102000)', async () => {
+    serveRecord(
+      mediaRecord([
+        {
+          type: 'Images',
+          idsId: NASM_ID,
+          content: NASM_CONTENT,
+          usage: { access: 'CC0' },
+          altTextAccessibility: '',
+          extDescrAccessibility: 'The Apollo 11 Command Module Columbia displayed in a gallery.',
+          resources: [
+            { label: 'Screen Image', url: `https://ids.si.edu/ids/download?id=${NASM_ID}_screen` },
+            {
+              label: 'Thumbnail Image',
+              url: `https://ids.si.edu/ids/download?id=${NASM_ID}_thumb`,
+            },
+          ],
+        },
+      ]),
+    );
+
+    const result = await runToolContract(smithsonianGetMedia, { id: 'nasm_A19700102000' });
+
+    const image = pageOf(result).images?.[0];
+    expect(image?.high_res_jpeg).toEqual({ url: NASM_CONTENT });
+    expect(image).not.toHaveProperty('alt_text');
+    const lines = textOf(result).split('\n');
+    expect(lines).toContain(`**JPEG:** [Full-size JPEG](<${NASM_CONTENT}>)`);
+    expect(lines.some((line) => line.startsWith('**Alt:**'))).toBe(false);
+  });
+
+  it('keeps the size suffix on a JPEG the catalog lists', async () => {
+    const id = 'NPG-NPG_94_15BoydenM_int';
+    serveRecord(
+      mediaRecord([
+        {
+          type: 'Images',
+          idsId: id,
+          content: `https://ids.si.edu/ids/deliveryService?id=${id}`,
+          usage: { access: 'CC0' },
+          resources: [
+            {
+              label: 'High-resolution JPEG',
+              url: `https://ids.si.edu/ids/download?id=${id}.jpg`,
+              width: 4000,
+              height: 2322,
+            },
+          ],
+        },
+      ]),
+    );
+
+    const result = await runToolContract(smithsonianGetMedia, { id: 'npg_NPG.94.15' });
+
+    expect(textOf(result).split('\n')).toContain(
+      `**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/download?id=${id}.jpg>) (4000×2322px)`,
+    );
+  });
+});
+
+describe('smithsonianGetMedia content[] encoding (issue #70)', () => {
+  const render = (images: ImageItem[], title = 'Pattern book') =>
+    smithsonianGetMedia.format!({
+      record_id: 'nmah_`1`',
+      title,
+      is_cc0: true,
+      cc0_image_count: images.length,
+      images,
+    })
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+
+  it('renders a description with a blank line as hard breaks that read back as the value', () => {
+    const description = 'Book of woven designs.\n\n72 pages of samples.';
+    const text = render([{ ...makeCc0Image(), description }]);
+    expect(text).toContain('**Description:** Book of woven designs.\\\n\\\n72 pages of samples.\n');
+    expect(labelValues(text, 'Description')).toEqual([description]);
+  });
+
+  it('reads the title, IDs, text, and every URL back under CommonMark', () => {
+    const image: ImageItem = {
+      media_id: 'NMAH-<1>_*a*',
+      is_cc0: true,
+      alt_text: 'Patterned *silk* <swatch>',
+      thumbnail_url: 'https://ids.si.edu/ids/deliveryService?id=NMAH-1&max=150',
+      screen_url: 'https://ids.si.edu/ids/deliveryService?id=NMAH-1&max=1200',
+      high_res_jpeg: {
+        url: 'https://ids.si.edu/ids/download?id=NMAH-1.jpg',
+        width: 4000,
+        height: 2322,
+      },
+      high_res_tiff: { url: 'https://ids.si.edu/ids/download?id=NMAH-1.tif' },
+    };
+    const title = 'Trees and Flowers in Washington, \nDC';
+    const text = render([image], title);
+
+    expect(text.split('\n')[0]).toBe('# Media: Trees and Flowers in Washington,&#32;&#10;DC');
+    expect(headings(text)).toEqual([`Media: ${title}`, `Image: ${image.media_id}`]);
+    expect(codeSpans(text)).toEqual(['nmah_`1`']);
+    expect(labelValues(text, 'Alt')).toEqual([image.alt_text]);
+    expect(images(text).map((img) => img.url)).toEqual([image.thumbnail_url]);
+    expect(links(text).map((link) => link.url)).toEqual([
+      image.screen_url,
+      image.high_res_jpeg?.url,
+      image.high_res_tiff?.url,
+    ]);
+    expect(labelValues(text, 'JPEG')).toEqual(['Full-size JPEG (4000×2322px)']);
+  });
+
+  it('renders its notice through the escaping trailer', () => {
+    expect(smithsonianGetMedia.enrichmentTrailer?.notice).toBe(noticeTrailer);
   });
 });

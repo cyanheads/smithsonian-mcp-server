@@ -124,12 +124,33 @@ function alive(pid: number): boolean {
   }
 }
 
-/** Resolves once the server has relayed the refresh child's stderr `line` at `info`. */
-function relayed(line: string): Promise<void> {
-  const message = `Mirror refresh: ${line}`;
+/** Resolves once `message` has been logged at `info`. */
+function logged(message: string): Promise<void> {
   if (infoLines.includes(message)) return Promise.resolve();
   return new Promise((resolve) => waiting.set(message, resolve));
 }
+
+/** Resolves once the server has relayed the refresh child's stderr `line` at `info`. */
+function relayed(line: string): Promise<void> {
+  return logged(`Mirror refresh: ${line}`);
+}
+
+/**
+ * Build a completed store at `path` holding one shard applied at `etag`. A null ETag is a shard
+ * awaiting its re-read, as opening a version-1 store under version 2 leaves every shard.
+ */
+async function seedStore(etag: string | null): Promise<void> {
+  const { oaMirrorStore } = await import('@/services/smithsonian/oa-mirror.js');
+  const seeded = oaMirrorStore(path);
+  (await seeded.raw())
+    .prepare('INSERT INTO shards(key, etag) VALUES (?, ?)')
+    .run('metadata/edan/aaa/00.txt', etag);
+  await seeded.writeState({ status: 'complete', completedAt: '2026-10-26T07:25:06.000Z' });
+  await seeded.close();
+  stores.splice(0);
+}
+
+const STARTING = `Starting job '${MIRROR_REFRESH_JOB}'...`;
 
 describe('startServerMirror', () => {
   it('schedules the refresh on HTTP; a run spawns the CLI under the server runtime with the mirror path', async () => {
@@ -173,6 +194,25 @@ describe('startServerMirror', () => {
       expect.objectContaining({ message: 'The mirror refresh child exited with code 3.' }),
       expect.anything(),
     );
+    expect(infoLines).not.toContain('Mirror refresh complete.');
+    expect(job.isRunning).toBe(false);
+
+    await mirror.stop();
+  });
+
+  it('skips a tick whose refresh child found another sync holding the store, logging no failure', async () => {
+    vi.stubEnv('FAKE_MIRROR_CLI_MODE', 'locked');
+    const mirror = await start();
+    const job = refreshJob();
+
+    await job.task.execute();
+
+    expect(readRecord().argv.slice(2)).toEqual(['refresh']);
+    expect(notice).toHaveBeenCalledWith(
+      'Mirror refresh skipped: another sync of the store is in progress.',
+      expect.anything(),
+    );
+    expect(error).not.toHaveBeenCalled();
     expect(infoLines).not.toContain('Mirror refresh complete.');
     expect(job.isRunning).toBe(false);
 
@@ -306,5 +346,131 @@ describe('ServerMirror.stop', () => {
     expect(schedulerService.listJobs()).toEqual([]);
     expect(() => handle.prepare('SELECT 1').get()).toThrow();
     expect(notice).not.toHaveBeenCalled();
+  });
+
+  it('spawns no refresh child for a run the scheduler starts once stop() has begun', async () => {
+    vi.stubEnv('FAKE_MIRROR_CLI_MODE', 'exit');
+    const mirror = await start();
+    const job = refreshJob();
+    let stopped: Promise<void> | undefined;
+    // The scheduler logs this just before it calls the job, so stop() begins between the two.
+    waiting.set(STARTING, () => {
+      stopped = mirror.stop();
+    });
+
+    await job.task.execute();
+    await stopped;
+
+    expect(stopped).toBeDefined();
+    expect(existsSync(recordPath)).toBe(false);
+    expect(schedulerService.listJobs()).toEqual([]);
+    expect(error).not.toHaveBeenCalled();
+  });
+});
+
+describe('a store with shards to re-read after a schema upgrade (issue #74)', () => {
+  it('starts the scheduled refresh at startup on HTTP, without waiting for a tick', async () => {
+    vi.stubEnv('FAKE_MIRROR_CLI_MODE', 'exit');
+    await seedStore(null);
+    const complete = logged('Mirror refresh complete.');
+
+    const mirror = await start();
+    await complete;
+
+    const child = readRecord();
+    expect(child.argv.slice(1)).toEqual([CLI, 'refresh']);
+    expect(child.mirrorPath).toBe(path);
+    expect(infoLines).toContain(STARTING);
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /SMITHSONIAN_MIRROR_PATH ".*oa\.db" has shards to re-read after a schema upgrade; refreshing it now/,
+      ),
+      expect.anything(),
+    );
+    expect(schedulerService.listJobs().map(({ schedule }) => schedule)).toEqual([CRON]);
+    expect(warning).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+
+    await mirror.stop();
+  });
+
+  it('runs that refresh as the job: a tick during it is skipped, and stop() ends it and awaits it', async () => {
+    vi.stubEnv('FAKE_MIRROR_CLI_MODE', 'wait');
+    await seedStore(null);
+    const ready = relayed('ready');
+    const mirror = await start();
+    await ready;
+    const job = refreshJob();
+    const { pid } = readRecord();
+    expect(job.isRunning).toBe(true);
+
+    await job.task.execute();
+
+    expect(warning).toHaveBeenCalledWith(
+      `Job '${MIRROR_REFRESH_JOB}' is already running. Skipping this execution.`,
+      expect.anything(),
+    );
+    expect(readRecord().pid).toBe(pid);
+
+    await mirror.stop();
+
+    expect(readRecord().signals).toEqual(['SIGTERM']);
+    expect(alive(pid)).toBe(false);
+    expect(notice).toHaveBeenCalledWith(
+      'Mirror refresh stopped for server shutdown.',
+      expect.anything(),
+    );
+    expect(infoLines).toContain(`Job '${MIRROR_REFRESH_JOB}' completed successfully.`);
+    expect(job.isRunning).toBe(false);
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('runs nothing at startup on a store with every shard current; only the cron starts a refresh', async () => {
+    vi.stubEnv('FAKE_MIRROR_CLI_MODE', 'exit');
+    await seedStore('0123456789abcdef0123456789abcdef');
+
+    const mirror = await start();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(refreshJob().isRunning).toBe(false);
+    expect(infoLines).not.toContain(STARTING);
+    expect(existsSync(recordPath)).toBe(false);
+    expect(notice).not.toHaveBeenCalled();
+
+    await mirror.stop();
+  });
+
+  it.each([
+    ['on stdio', { transport: 'stdio' }],
+    ['on HTTP with the refresh turned off', { refreshCron: undefined }],
+  ] as const)('logs one notice naming mirror:refresh %s, and runs nothing', async (_, options) => {
+    await seedStore(null);
+
+    const mirror = await start(options);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(notice).toHaveBeenCalledTimes(1);
+    expect(notice).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /SMITHSONIAN_MIRROR_PATH ".*oa\.db" has shards to re-read after a schema upgrade\. Until each is re-read, its records and every on_view search are answered from the live API\. This server schedules no refresh: run `mirror:refresh`\./,
+      ),
+      expect.anything(),
+    );
+    expect(schedulerService.listJobs()).toEqual([]);
+    expect(existsSync(recordPath)).toBe(false);
+
+    await mirror.stop();
+  });
+
+  it('logs no upgrade notice on stdio when every shard is current', async () => {
+    await seedStore('0123456789abcdef0123456789abcdef');
+
+    const mirror = await start({ transport: 'stdio' });
+
+    expect(notice).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
+
+    await mirror.stop();
   });
 });

@@ -20,7 +20,10 @@ import {
   SCAN_BUDGET,
   trimRecord,
 } from '@/services/smithsonian/oa-mirror.js';
-import { SmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import {
+  SmithsonianService,
+  startCallDeadline,
+} from '@/services/smithsonian/smithsonian-service.js';
 import type { RawEDAN } from '@/services/smithsonian/types.js';
 import { bulkLine, FakeBucket, openTestMirror, type TestMirror } from './oa-bucket-fake.js';
 
@@ -91,6 +94,7 @@ describe('stored doc', () => {
     expect(
       RECORDS.some((r) => r.content?.indexedStructured?.name?.some((n) => typeof n !== 'string')),
     ).toBe(true);
+    expect(RECORDS.some((r) => svc.toFullObject(r).current_exhibitions.length > 0)).toBe(true);
     expect(LINES.some((l) => l.type !== 'edanmdm')).toBe(true);
   });
 
@@ -100,6 +104,63 @@ describe('stored doc', () => {
       expect(readings(stored(line))).toStrictEqual(readings(line));
     },
   );
+
+  it('returns the indexed filter values of a wrapped-name record from the stored doc (issue #73)', () => {
+    const line = byUrl('edanmdm:slasro_79883');
+    const fromStored = svc.toFullObject(stored(line)).indexed;
+    expect(fromStored.name).toEqual(['Stewart, M. M.', 'Biuso, L. F.']);
+    expect(fromStored).toStrictEqual(svc.toFullObject(line).indexed);
+  });
+
+  it('returns the on-view flag and venue of nasm_A19820121000 from the stored doc (issue #74)', () => {
+    const line = byUrl('edanmdm:nasm_A19820121000');
+    const fromStored = svc.toFullObject(stored(line));
+    expect(fromStored).toMatchObject({
+      on_view: true,
+      current_exhibitions: [{ building: 'HAZY' }],
+    });
+    expect(fromStored.current_exhibitions).toStrictEqual(
+      svc.toFullObject(line).current_exhibitions,
+    );
+  });
+
+  it('stores each exhibition entry as its building, room, and exhibitionTitle only (issue #74)', () => {
+    const doc = trimRecord(
+      JSON.parse(
+        bulkLine('ex1', {
+          content: {
+            indexedStructured: {
+              onPhysicalExhibit: ['Yes'],
+              exhibition: [
+                {
+                  building: 'NPG',
+                  room: 'East Gallery 142',
+                  exhibitionTitle: 'Out of Many: Portraits from 1600 to 1900',
+                  exhibitionId: 'npg-oom',
+                  startDate: '2020-11-20',
+                  sponsors: [{ name: 'Sponsor' }],
+                },
+                { exhibitionId: 'nothing-kept' },
+                'HAZY',
+                { building: 'HAZY', endDate: '2027-01-01' },
+              ],
+            },
+          },
+        }),
+      ),
+    );
+    expect(doc.content?.indexedStructured).toStrictEqual({
+      onPhysicalExhibit: ['Yes'],
+      exhibition: [
+        {
+          building: 'NPG',
+          room: 'East Gallery 142',
+          exhibitionTitle: 'Out of Many: Portraits from 1600 to 1900',
+        },
+        { building: 'HAZY' },
+      ],
+    });
+  });
 
   it('keeps the indexed unit of an OCIO_DPO3D record whose own unit code differs', () => {
     const line = byUrl('edanmdm:dpo_3d_200122');
@@ -263,6 +324,32 @@ describe('stored doc', () => {
       },
     ],
     [
+      'on-view flags and exhibitions of every shape',
+      (line) => {
+        Object.assign(content(line).indexedStructured ?? {}, {
+          onPhysicalExhibit: ['No', 'Yes'],
+          exhibition: [
+            { building: 'NPG', room: 'East Gallery 142', exhibitionTitle: 'Out of Many' },
+            { room: 'Gallery 1', exhibitionId: 'x' },
+            { exhibitionTitle: 'Untitled' },
+            { building: '', room: null, exhibitionTitle: 7 },
+            {},
+            null,
+            'NASM',
+          ],
+        });
+      },
+    ],
+    [
+      'an off-view flag and no exhibitions',
+      (line) => {
+        Object.assign(content(line).indexedStructured ?? {}, {
+          onPhysicalExhibit: ['No'],
+          exhibition: [],
+        });
+      },
+    ],
+    [
       'no record_ID',
       (line) => {
         delete content(line).descriptiveNonRepeating?.record_ID;
@@ -346,6 +433,36 @@ describe('facetTerms', () => {
       ),
     );
     expect(values(doc)).toEqual(['unit_code=TST']);
+  });
+
+  it.each([
+    ['["Yes"]', ['Yes'], ['on_view=true', 'unit_code=TST']],
+    ['["No", "Yes"]', ['No', 'Yes'], ['on_view=true', 'unit_code=TST']],
+    ['["No"]', ['No'], ['unit_code=TST']],
+    ['[]', [], ['unit_code=TST']],
+    ['no flag', undefined, ['unit_code=TST']],
+  ])(
+    'sets on_view for onPhysicalExhibit %s only when it holds "Yes" (issue #74)',
+    (_, flag, expected) => {
+      const doc = trimRecord(
+        JSON.parse(
+          bulkLine('ov', {
+            content: {
+              indexedStructured: {
+                ...(flag && { onPhysicalExhibit: flag }),
+                exhibition: [{ building: 'NASM', room: 'Hall', exhibitionTitle: 'Flight' }],
+              },
+            },
+          }),
+        ),
+      );
+      expect(values(doc)).toEqual(expected);
+    },
+  );
+
+  it('indexes the fixture record flagged on view under on_view (issue #74)', () => {
+    const flagged = RECORDS.filter((r) => facetTerms(stored(r)).has('on_view\u0000true'));
+    expect(flagged.map((r) => r.url)).toEqual(['edanmdm:nasm_A19820121000']);
   });
 });
 
@@ -459,6 +576,86 @@ describe('read API', () => {
       expect(result.docs.map((d) => svc.toSummary(d))).toStrictEqual(
         result.docs.map((d) => svc.toSummary(byUrl(d.url ?? ''))),
       );
+    });
+
+    it('pages on_view alone and intersected, with the facet count as its total (issue #74)', async () => {
+      const onView = { urls: ['edanmdm:nasm_A19820121000'], total: 1 };
+      expect(await search([{ field: 'on_view' }])).toEqual(onView);
+      expect(await search([{ field: 'on_view' }, { field: 'unit_code', value: 'NASM' }])).toEqual(
+        onView,
+      );
+      expect(await search([{ field: 'on_view' }, { field: 'cc0' }])).toEqual(onView);
+      expect(
+        await search([{ field: 'on_view' }, { field: 'unit_code', value: 'NMNHFISHES' }]),
+      ).toEqual({ total: 0, urls: [] });
+      expect(await search([{ field: 'on_view' }], 1, 10)).toEqual({ total: 1, urls: [] });
+    });
+  });
+
+  describe('a shard awaiting its re-read after a schema change (issue #74)', () => {
+    /** Shard aaa holds the first five fixture records, nasm_A19820121000 among them. */
+    const STALE_KEY = 'metadata/edan/aaa/00.txt';
+    const IN_STALE = 'edanmdm:nasm_A19820121000';
+    const IN_CURRENT = 'edanmdm:hac_FJP.1987.074';
+
+    beforeEach(async () => {
+      await t.mirror.runSync({ mode: 'init' });
+    });
+
+    /** Clear one shard's ETag, as the version-2 migration clears every shard's. */
+    async function staleShard(): Promise<void> {
+      (await t.store.raw()).prepare('UPDATE shards SET etag = NULL WHERE key = ?').run(STALE_KEY);
+    }
+
+    it('serves every stored doc and reports no stale shard while every ETag is set', async () => {
+      expect(await t.reader.hasStaleShards()).toBe(false);
+      expect(await t.reader.getDoc(IN_STALE)).toStrictEqual(stored(byUrl(IN_STALE)));
+    });
+
+    it('withholds the docs of that shard only, and reports it', async () => {
+      await staleShard();
+
+      expect(await t.reader.hasStaleShards()).toBe(true);
+      expect(await t.reader.getDoc(IN_STALE)).toBeUndefined();
+      expect(await t.reader.getDoc('edanmdm:nmnhvz_5105499')).toBeUndefined();
+      expect(await t.reader.getDoc(IN_CURRENT)).toStrictEqual(stored(byUrl(IN_CURRENT)));
+      expect(await t.reader.ready()).toBe(true);
+    });
+
+    it('declines every on_view search and still pages the others, its records included', async () => {
+      await staleShard();
+
+      expect(await t.reader.searchFacets([{ field: 'on_view' }], 0, 10)).toEqual({
+        kind: 'stale',
+      });
+      expect(
+        await t.reader.searchFacets(
+          [{ field: 'unit_code', value: 'NASM' }, { field: 'on_view' }],
+          0,
+          10,
+        ),
+      ).toEqual({ kind: 'stale' });
+      expect(await search([{ field: 'unit_code', value: 'NASM' }])).toEqual({
+        total: 1,
+        urls: [IN_STALE],
+      });
+      expect(await search([{ field: 'online_only' }, { field: 'cc0' }])).toEqual({
+        total: 3,
+        urls: [IN_STALE, 'edanmdm:nmnhvz_14945304', IN_CURRENT],
+      });
+      expect((await search([], 0, 1)).total).toBe(8);
+    });
+
+    it('serves that shard again once a refresh re-reads it, downloading it alone', async () => {
+      await staleShard();
+      bucket.requests.length = 0;
+
+      await t.mirror.runSync({ mode: 'refresh' });
+
+      expect(bucket.downloads()).toEqual([STALE_KEY]);
+      expect(await t.reader.hasStaleShards()).toBe(false);
+      expect(await t.reader.getDoc(IN_STALE)).toStrictEqual(stored(byUrl(IN_STALE)));
+      expect(await search([{ field: 'on_view' }])).toEqual({ total: 1, urls: [IN_STALE] });
     });
   });
 });
@@ -582,6 +779,7 @@ describe('scan budget', () => {
       svc.search(
         { query: '', rows: 20, start: 0, filters },
         createMockContext({ tenantId: 'test-tenant' }),
+        startCallDeadline(),
       );
 
     beforeEach(() => {
@@ -660,8 +858,9 @@ describe('query plans', () => {
       bucket.put('metadata/edan/bbb/00.txt', [bulkLine('b1'), bulkLine('c1')]);
       bucket.objects.delete('metadata/edan/ccc/00.txt');
       await t.mirror.runSync({ mode: 'refresh' });
-      // Every read path.
+      // Every read path, the stale-shard probe and the on_view searches it gates included.
       await t.reader.getDoc('edanmdm:a1');
+      await t.reader.hasStaleShards();
       await t.reader.searchFacets([], 0, 2);
       await t.reader.searchFacets([{ field: 'unit_code', value: 'TST' }], 1, 2);
       await t.reader.searchFacets(
@@ -669,6 +868,12 @@ describe('query plans', () => {
           { field: 'unit_code', value: 'TST' },
           { field: 'topic', value: 'Testing' },
         ],
+        0,
+        2,
+      );
+      await t.reader.searchFacets([{ field: 'on_view' }], 0, 2);
+      await t.reader.searchFacets(
+        [{ field: 'unit_code', value: 'TST' }, { field: 'on_view' }],
         0,
         2,
       );
@@ -683,14 +888,30 @@ describe('query plans', () => {
           sql !== 'SELECT COUNT(*) AS n FROM objects',
       );
       expect(own.length).toBeGreaterThan(15);
-      const scans = own.flatMap((sql) => {
+      const planOf = (sql: string) => {
         const params = Array.from(sql.matchAll(/\?/g), () => null);
-        const plan = handle
+        return handle
           .prepare<{ detail: string }>(`EXPLAIN QUERY PLAN ${sql}`)
           .all(...params)
           .map((r) => r.detail);
+      };
+      const scans = own.flatMap((sql) => {
+        const plan = planOf(sql);
         return plan.some((d) => /\bSCAN\b/.test(d)) ? [{ sql, plan }] : [];
       });
+      // The probe answers from the shards(etag) index alone, and getDoc's join reaches the
+      // shard by its primary key from the one object row.
+      const probes = own.filter((sql) => /FROM shards WHERE etag IS NULL/.test(sql));
+      expect(probes).toHaveLength(1);
+      expect(planOf(probes[0] as string)).toEqual([
+        'SEARCH shards USING COVERING INDEX shards_etag (etag=?)',
+      ]);
+      const joins = own.filter((sql) => /FROM objects o JOIN shards s/.test(sql));
+      expect(joins).toHaveLength(1);
+      expect(planOf(joins[0] as string)).toEqual([
+        'SEARCH o USING INDEX sqlite_autoindex_objects_1 (url=?)',
+        'SEARCH s USING INTEGER PRIMARY KEY (rowid=?)',
+      ]);
       // The two walks are bounded by design: the shards table (one row per bucket shard,
       // ~13.6k) read once per sync, and the unfiltered page walk, held to SCAN_BUDGET rows.
       expect(scans).toEqual([

@@ -73,9 +73,20 @@ export interface RawFreetext {
  */
 export type RawIndexedName = string | { content?: string };
 
+/**
+ * An `indexedStructured.exhibition` entry: where the object is on display now. `building` is a
+ * building code (`NASM`, `HAZY`, `NMAI NY`, `Freer`), not a unit code.
+ */
+export interface RawExhibitionEntry {
+  building?: string;
+  exhibitionTitle?: string;
+  room?: string;
+}
+
 export interface RawIndexedStructured {
   culture?: string[];
   date?: string[];
+  exhibition?: RawExhibitionEntry[];
   geoLocation?: Array<{
     Other?: { type?: string; content?: string };
     points?: {
@@ -88,6 +99,8 @@ export interface RawIndexedStructured {
   name?: RawIndexedName[];
   object_type?: string[];
   online_media_type?: string[];
+  /** `["Yes"]` when the object is on physical display; most records carry no flag. */
+  onPhysicalExhibit?: string[];
   place?: string[];
   scientific_name?: string[];
   tax_class?: string[];
@@ -198,10 +211,18 @@ export interface ObjectSummary {
   unit_code: string;
 }
 
+/** The smithsonian_search_objects filters a record's indexed values feed, by filter name. */
+export type IndexedFilterValues = Record<
+  'name' | 'place' | 'object_type' | 'date' | 'topic',
+  string[]
+>;
+
 export interface FullObject {
   coordinates: Array<{ latitude: number; longitude: number; locality?: string }>;
   credit_line?: string;
   culture: string[];
+  /** One entry per `indexedStructured.exhibition` item that names anything. */
+  current_exhibitions: Array<{ building?: string; room?: string; title?: string }>;
   dates: Array<{ label: string; value: string }>;
   description?: string;
   dimensions: string[];
@@ -209,6 +230,12 @@ export interface FullObject {
   /** Same rule as {@link ObjectSummary.holding_museum_name}. */
   holding_museum_name?: string;
   identifiers: Array<{ label: string; value: string }>;
+  /**
+   * The record's `indexedStructured` values for five smithsonian_search_objects filters, each
+   * in upstream order and usable as that filter's value verbatim. Empty when the record
+   * indexes none.
+   */
+  indexed: IndexedFilterValues;
   is_cc0: boolean;
   makers: Array<{ role: string; name: string }>;
   materials: string[];
@@ -222,6 +249,11 @@ export interface FullObject {
   museum_name: string;
   notes: Array<{ label: string; content: string }>;
   object_rights?: string;
+  /**
+   * `indexedStructured.onPhysicalExhibit`: true for `"Yes"`, false for `"No"`, absent when the
+   * record carries no flag, which says nothing about display.
+   */
+  on_view?: boolean;
   place: Array<{ label: string; value: string }>;
   record_id: string;
   record_link?: string;
@@ -266,23 +298,30 @@ export interface ImageItem {
  * vocabulary holds it — a `contains` substring proven to list something else.
  *
  * Recovery hints on a zero-match search or browse read both halves: `indexed`
- * separates a value that can be resolved through smithsonian_list_terms from one
- * the index already enumerates, and `neighbors` is the only substring the hint
- * may name, because it was tested against the vocabulary rather than assumed.
+ * separates a value that can be resolved through smithsonian_list_terms (`false`)
+ * from one the index already enumerates (`true`), and `neighbors` is the only
+ * substring the hint may name, because it was tested against the vocabulary rather
+ * than assumed. `'unknown'` is a lookup that established neither — the vocabulary
+ * read failed, or was not attempted — so a hint names the lookup and claims no
+ * membership (issue #72). `describeTerm` itself never returns it: its callers map a
+ * lookup they could not complete to it.
  */
-export interface TermDescription {
-  /** True when the value is an exact, case-sensitive member of the vocabulary. */
-  indexed: boolean;
-  /**
-   * The tightest substring a `contains` query resolves to at least one term other
-   * than the value itself, and to few enough of them to be worth browsing. Absent
-   * when no tested substring does either, in which case a hint has no working term
-   * route to offer and must not name one.
-   */
-  neighbors?: {
-    /** The substring to pass as smithsonian_list_terms `contains`. */
-    contains: string;
-    /** How many vocabulary terms other than the value contain it. */
-    count: number;
-  };
-}
+export type TermDescription =
+  | {
+      /** The value is an exact, case-sensitive member of the vocabulary. */
+      indexed: true;
+      /**
+       * The tightest substring a `contains` query resolves to at least one term other
+       * than the value itself, and to few enough of them to be worth browsing. Absent
+       * when no tested substring does either, in which case a hint has no working term
+       * route to offer and must not name one.
+       */
+      neighbors?: {
+        /** The substring to pass as smithsonian_list_terms `contains`. */
+        contains: string;
+        /** How many vocabulary terms other than the value contain it. */
+        count: number;
+      };
+    }
+  | { indexed: false }
+  | { indexed: 'unknown' };

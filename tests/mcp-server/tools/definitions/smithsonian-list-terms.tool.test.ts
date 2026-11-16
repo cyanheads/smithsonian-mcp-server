@@ -13,7 +13,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
+import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
+import { codeSpans, items, quotes } from '../markdown-read-back.js';
+import { textOf } from './tool-result.js';
 
 function makeTermsResult(terms: string[] = [], total = terms.length) {
   return { terms, total };
@@ -56,7 +59,11 @@ describe('smithsonianListTerms', () => {
     const input = smithsonianListTerms.input.parse({ field: 'culture', start: 10, rows: 25 });
     await smithsonianListTerms.handler(input, ctx);
 
-    expect(listTermsFn).toHaveBeenCalledWith({ field: 'culture', start: 10, rows: 25 }, ctx);
+    expect(listTermsFn).toHaveBeenCalledWith(
+      { field: 'culture', start: 10, rows: 25 },
+      ctx,
+      expect.any(Number),
+    );
   });
 
   it('throws no_terms only when the vocabulary is empty (total 0), carrying the declared recovery hint (issues #14, #16)', async () => {
@@ -209,6 +216,7 @@ describe('smithsonianListTerms', () => {
     expect(listTermsFn).toHaveBeenCalledWith(
       { field: 'topic', start: 0, rows: 50, contains: 'quilt' },
       ctx,
+      expect.any(Number),
     );
     expect(result.field).toBe('topic');
     expect(result.terms).toEqual(['Quilts', 'Quilts--History']);
@@ -235,11 +243,6 @@ describe('smithsonianListTerms', () => {
       const listTerms = vi.spyOn(service, 'listTerms');
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
       return listTerms;
-    }
-
-    /** Every text block of a result, the trailer that carries the notice included. */
-    function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
-      return result.content.map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('\n');
     }
 
     /** The `rows` property as `tools/list` advertises it, serialized as on the wire. */
@@ -354,9 +357,9 @@ describe('smithsonianListTerms', () => {
     });
   });
 
-  it('escapes the caller-supplied contains substring inside the Markdown notice', async () => {
-    // The framework renders a notice as Markdown and escapes nothing, so a raw
-    // `*` in the echoed substring would turn the rest of the sentence italic.
+  it('echoes the contains substring raw in structuredContent and escaped in content[]', async () => {
+    // A raw `*` in the rendered notice would turn the rest of the sentence italic, so
+    // the notice trailer escapes it; the structured notice carries the caller's text.
     vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
       listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 0)),
     } as unknown as svcModule.SmithsonianService);
@@ -367,7 +370,8 @@ describe('smithsonianListTerms', () => {
     });
 
     const notice = (result.structuredContent as { notice?: string }).notice;
-    expect(notice).toContain('contains "zz\\*nope\\*".');
+    expect(notice).toContain('contains "zz*nope*".');
+    expect(textOf(result)).toContain('contains "zz\\*nope\\*".');
   });
 
   it('non-truncated result validates against the effective output schema (issue #13)', async () => {
@@ -399,6 +403,7 @@ describe('smithsonianListTerms', () => {
     expect(listTermsFn).toHaveBeenCalledWith(
       { field: 'culture', start: 0, rows: 50, contains: 'greek' },
       ctx,
+      expect.any(Number),
     );
     expect(result.terms).toEqual(['Greek, Attic']);
     expect(result.total).toBe(1);
@@ -498,6 +503,54 @@ describe('smithsonianListTerms', () => {
     });
   });
 
+  describe('content[] encoding (issue #70)', () => {
+    const render = (output: Parameters<NonNullable<typeof smithsonianListTerms.format>>[0]) =>
+      smithsonianListTerms.format!(output)
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('');
+
+    it('fences a term ending in a backtick with a double-backtick span that reads back as the term', () => {
+      const text = render({ field: 'topic', terms: ['Archaeology`', 'Quilts'], total: 2 });
+      expect(text.split('\n')).toContain('- `` Archaeology` ``');
+      expect(codeSpans(text)).toEqual(['topic', 'Archaeology`', 'Quilts']);
+    });
+
+    it('reads every term and museum name back to its structuredContent value', () => {
+      const output = {
+        field: 'unit_code',
+        terms: ['NASM', '``', ' padded '],
+        total: 3,
+        labels: { NASM: 'National <Air> and *Space* Museum', ' padded ': '[Archive] ' },
+      };
+      const text = render(output);
+      expect(items(text)).toEqual([
+        'NASM — National <Air> and *Space* Museum',
+        '``',
+        ' padded  — [Archive] ',
+      ]);
+    });
+
+    it('renders a term named like an Object.prototype member bare', () => {
+      const text = render({ field: 'topic', terms: ['constructor', 'toString'], total: 2 });
+      expect(items(text)).toEqual(['constructor', 'toString']);
+    });
+
+    it('reads the notice back to structuredContent.notice through the escaping trailer', async () => {
+      expect(smithsonianListTerms.enrichmentTrailer?.notice).toBe(noticeTrailer);
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        listTerms: vi.fn().mockResolvedValue(makeTermsResult([], 0)),
+      } as unknown as svcModule.SmithsonianService);
+
+      const result = await runToolContract(smithsonianListTerms, {
+        field: 'culture',
+        contains: '<b>zz*nope*</b> `x` ',
+      });
+
+      const notice = (result.structuredContent as { notice: string }).notice;
+      expect(quotes(textOf(result))).toEqual([notice]);
+    });
+  });
+
   describe('host-level 404 on the terms endpoint (issue #51)', () => {
     afterEach(() => {
       vi.unstubAllEnvs();
@@ -545,6 +598,104 @@ describe('smithsonianListTerms', () => {
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(err.data?.reason).toBe('upstream_unavailable');
       expect(err.data?.reason).not.toBe('no_terms');
+    });
+  });
+
+  describe('a 200 without response.terms (issue #72)', () => {
+    const MALFORMED = { status: 200, responseCode: 1, response: {} };
+
+    /**
+     * The real service over a stubbed fetch, `/terms/culture` answering each request with the
+     * next body of `bodies` (the last one repeats). Returns the request count.
+     */
+    function stubTerms(...bodies: unknown[]): () => number {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      let requests = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url: string) => {
+          if (new URL(url).pathname !== '/openaccess/api/v1.0/terms/culture') {
+            throw new Error('unmocked fetch');
+          }
+          const body = bodies[Math.min(requests++, bodies.length - 1)];
+          return {
+            ok: true,
+            status: 200,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          };
+        }),
+      );
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+      return () => requests;
+    }
+
+    /** One tool call with the backoff delays skipped. */
+    async function call(input: Record<string, unknown>) {
+      vi.useFakeTimers();
+      try {
+        const pending = runToolContract(smithsonianListTerms, input, {
+          context: createMockContext({ tenantId: 'test-tenant' }),
+        });
+        await vi.runAllTimersAsync();
+        return await pending;
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it('retries a one-off malformed reply within the call and stores the vocabulary it gets', async () => {
+      const requests = stubTerms(MALFORMED, {
+        status: 200,
+        responseCode: 1,
+        response: { terms: ['Aztecs', 'Maya'] },
+      });
+
+      const first = await call({ field: 'culture' });
+      expect(first.structuredContent).toMatchObject({ terms: ['Aztecs', 'Maya'], total: 2 });
+      expect(requests()).toBe(2);
+
+      await call({ field: 'culture' });
+      await call({ field: 'culture' });
+      expect(requests()).toBe(2);
+    });
+
+    it.each([{ field: 'culture' }, { field: 'culture', contains: 'Azt' }])(
+      'fails ServiceUnavailable after four attempts when every reply is malformed, storing nothing: %j',
+      async (input) => {
+        const requests = stubTerms(MALFORMED);
+
+        const result = await call(input);
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ServiceUnavailable,
+            data: { reason: 'upstream_unavailable' },
+          },
+        });
+        // A contains lookup does not turn the outage into a "no term contains" success.
+        expect(JSON.stringify(result)).not.toContain('No term in the');
+        expect(requests()).toBe(4);
+
+        await call(input);
+        expect(requests()).toBe(8);
+      },
+    );
+
+    it('still stores a real empty vocabulary and fails no_terms on it', async () => {
+      const requests = stubTerms({ status: 200, responseCode: 1, response: { terms: [] } });
+
+      const result = await call({ field: 'culture' });
+      expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'no_terms' } } });
+      await call({ field: 'culture' });
+      expect(requests()).toBe(1);
     });
   });
 });

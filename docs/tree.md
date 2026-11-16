@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-11-01 17:36:15
+Generated on: 2026-11-16 05:23:26
 
 ```text
 smithsonian-mcp-server/
@@ -158,6 +158,7 @@ smithsonian-mcp-server/
 │   │       │   ├── smithsonian-get-object.tool.ts
 │   │       │   ├── smithsonian-list-terms.tool.ts
 │   │       │   └── smithsonian-search-objects.tool.ts
+│   │       ├── markdown-encoders.ts
 │   │       ├── page-size.ts
 │   │       └── provenance.ts
 │   ├── mirror/
@@ -183,10 +184,13 @@ smithsonian-mcp-server/
 │   │       │   ├── smithsonian-search-objects.tool.test.ts
 │   │       │   ├── tool-contract.test.ts
 │   │       │   └── tool-result.ts
+│   │       ├── markdown-encoders.test.ts
+│   │       ├── markdown-read-back.ts
 │   │       └── page-size.test.ts
 │   ├── mirror/
 │   │   ├── fixtures/
 │   │   │   └── fake-mirror-cli.mjs
+│   │   ├── cli.test.ts
 │   │   └── server-mirror.test.ts
 │   ├── prompts/
 │   ├── resources/

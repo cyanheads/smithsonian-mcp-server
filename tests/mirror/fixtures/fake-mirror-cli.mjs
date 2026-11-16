@@ -8,6 +8,7 @@
  * |:--|:--|
  * | `exit` | writes a status line to stdout and exits 0 |
  * | `fail` | exits 3 |
+ * | `locked` | exits 75, the status the mirror CLI uses when another sync holds the store's lease |
  * | `wait` | runs until SIGTERM, then exits 0 |
  * | `ignore-term` | records SIGTERM, writes `term ignored` to stderr, and keeps running |
  *
@@ -43,6 +44,8 @@ if (mode === 'exit') {
   process.stdout.write('{"shards":0}\n');
 } else if (mode === 'fail') {
   process.exitCode = 3;
+} else if (mode === 'locked') {
+  process.exitCode = 75;
 } else {
   setTimeout(() => process.exit(2), 30_000);
 }

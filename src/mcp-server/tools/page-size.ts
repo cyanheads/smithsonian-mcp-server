@@ -10,14 +10,16 @@ import { clampLimitsActive } from '@/config/server-config.js';
 
 /**
  * The largest page each tool serves. Search, browse, and related pages match EDAN's own
- * `/search` maximum of 1,000 rows. `list_terms` slices a vocabulary EDAN returns whole, so its cap
- * is a response-size choice: 40,000 terms stays near 1 MB per output surface.
+ * `/search` maximum of 1,000 rows. `list_terms` and `get_media` slice a list EDAN returns whole
+ * (a field's vocabulary, one record's images), so their caps are response-size choices: 40,000
+ * terms stays near 1 MB per output surface, and 1,000 images near 600 KB.
  */
 export const PAGE_CAPS = {
   smithsonian_search_objects: 1000,
   smithsonian_browse_category: 1000,
   smithsonian_find_related: 1000,
   smithsonian_list_terms: 40_000,
+  smithsonian_get_media: 1000,
 } as const;
 
 export type PagedTool = keyof typeof PAGE_CAPS;
@@ -74,8 +76,12 @@ export interface ServedPageSize {
   value: number;
 }
 
-/** Created on first use: a counter made at import binds to the no-op meter OTel starts with. */
-let clampCounter: ReturnType<typeof createCounter> | undefined;
+/** Over-cap page sizes served at their cap, labelled by tool and input. */
+const clampCounter = createCounter(
+  'smithsonian.input.clamps',
+  'Over-cap page sizes served at their cap',
+  '{clamps}',
+);
 
 /**
  * Serve an over-cap page size at its cap, before any upstream request. Each clamp writes one log
@@ -92,11 +98,6 @@ export function servePageSize(
   const cap = PAGE_CAPS[tool];
   if (requested <= cap) return { value: requested };
   ctx.log.info(`Served ${field} at its cap`, { tool, input: field, requested, served: cap });
-  clampCounter ??= createCounter(
-    'smithsonian.input.clamps',
-    'Over-cap page sizes served at their cap',
-    '{clamps}',
-  );
   clampCounter.add(1, { [ATTR_MCP_TOOL_NAME]: tool, 'smithsonian.input.name': field });
   return {
     value: cap,

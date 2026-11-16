@@ -7,7 +7,6 @@
  */
 
 import { type Context, z } from '@cyanheads/mcp-ts-core';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { DATA_SOURCES, type DataSource, type Provenance } from '@/services/smithsonian/types.js';
 
 /** The enrichment fields each object-reading tool declares. */
@@ -63,8 +62,6 @@ export function mirrorOrderNotice(
 ): string | undefined {
   const mirrored = pages.find((page) => page?.source === 'oa_mirror');
   if (mirrored?.source !== 'oa_mirror') return undefined;
-  const date = mirrored.snapshot
-    ? ` (snapshot of ${escapeMarkdownInline(mirrored.snapshot.slice(0, 10))})`
-    : '';
+  const date = mirrored.snapshot ? ` (snapshot of ${mirrored.snapshot.slice(0, 10)})` : '';
   return `Rows served from the Smithsonian Open Access mirror${date} are in mirror order, not the live API's.`;
 }

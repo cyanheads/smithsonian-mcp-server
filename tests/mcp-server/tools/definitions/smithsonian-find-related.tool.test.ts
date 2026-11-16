@@ -14,9 +14,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
+import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, RawEDAN, RawIndexedName } from '@/services/smithsonian/types.js';
+import { codeSpans, headings, images, items, labelValues, quotes } from '../markdown-read-back.js';
+import { textOf } from './tool-result.js';
 
 function makeAnchorRaw(id = 'nasm_TEST001'): RawEDAN {
   return {
@@ -219,9 +222,9 @@ describe('smithsonianFindRelated', () => {
     expect(notice.length).toBeLessThan(600);
   });
 
-  it('escapes a failed signal label inside the Markdown notice', async () => {
-    // Signal labels are catalog text, and the framework renders a notice as Markdown
-    // without escaping it, so a raw `*` would italicize the rest of the sentence.
+  it('carries a failed signal label raw in structuredContent.notice', async () => {
+    // structuredContent carries catalog text as written; escaping it for Markdown belongs
+    // to the content[] render.
     const raw = makeAnchorRaw();
     raw.content!.indexedStructured!.culture = ['Plains *Indian*'];
     fanoutService(
@@ -236,7 +239,7 @@ describe('smithsonianFindRelated', () => {
     );
     const result = await runToolContract(smithsonianFindRelated, { id: 'nasm_TEST001' });
     const notice = (result.structuredContent as { notice: string }).notice;
-    expect(notice).toContain('culture: Plains \\*Indian\\* (unavailable)');
+    expect(notice).toContain('culture: Plains *Indian* (unavailable)');
   });
 
   it('describes anchor-only fetched windows without claiming the full signal is empty', async () => {
@@ -1081,6 +1084,49 @@ describe('smithsonianFindRelated', () => {
     },
   );
 
+  it('sends the period+type fan-out with the filters in smithsonian_search_objects order', async () => {
+    // The continuation replays the fan-out's own search, so it reuses that cached page
+    // only when both send the same filters in the same order.
+    const anchorRaw = makeAnchorRaw();
+    anchorRaw.content!.indexedStructured!.date = ['1960s'];
+    anchorRaw.content!.indexedStructured!.object_type = ['Aircraft'];
+    const searchFn = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      getContent: vi.fn().mockResolvedValue({ record: anchorRaw }),
+      toSummary: vi.fn().mockReturnValue({
+        record_id: 'nasm_TEST001',
+        title: 'Anchor',
+        unit_code: 'NASM',
+        museum_name: 'National Air and Space Museum',
+        is_cc0: true,
+        has_media: true,
+      }),
+      search: searchFn,
+    } as unknown as svcModule.SmithsonianService);
+
+    const result = await smithsonianFindRelated.handler(
+      smithsonianFindRelated.input.parse({ id: 'nasm_TEST001' }),
+      createMockContext({ errors: smithsonianFindRelated.errors }),
+    );
+    const fanOut = searchFn.mock.calls
+      .map((call) => (call[0] as { filters: FacetFilter[] }).filters)
+      .find((filters) => filters.some((f) => f.field === 'date'));
+    const continuation = result.signals.find((s) => s.signal.startsWith('period:'))!;
+
+    searchFn.mockClear();
+    await smithsonianSearchObjects.handler(
+      smithsonianSearchObjects.input.parse(continuation.search_continuation),
+      createMockContext({ errors: smithsonianSearchObjects.errors }),
+    );
+    const replayed = (searchFn.mock.calls[0]![0] as { filters: FacetFilter[] }).filters;
+
+    expect(fanOut).toEqual([
+      { field: 'object_type', value: 'Aircraft' },
+      { field: 'date', value: '1960s' },
+    ]);
+    expect(replayed).toEqual(fanOut);
+  });
+
   it('every signal continuation parses as smithsonian_search_objects input (issue #18)', async () => {
     // The disclosure is only useful if the sibling tool accepts it verbatim.
     const anchorRaw = makeAnchorRaw();
@@ -1600,11 +1646,6 @@ describe('smithsonianFindRelated', () => {
     });
   });
 
-  /** Every text block of a result, the trailer that carries the notice included. */
-  function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
-    return result.content.map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('\n');
-  }
-
   describe('page-size clamp (issue #63)', () => {
     /**
      * Only the culture fan-out matches: `total` objects served the way EDAN pages
@@ -1797,7 +1838,7 @@ describe('smithsonianFindRelated', () => {
       expect(JSON.parse(JSON.stringify(related[1]))).not.toHaveProperty('holding_museum_name');
 
       const lines = textOf(result).split('\n');
-      const museumLine = lines.findIndex((l) => l.startsWith('**ID:** dpo_3d_200012 |'));
+      const museumLine = lines.findIndex((l) => l.startsWith('**ID:** `dpo_3d_200012` |'));
       expect(lines[museumLine]).toContain('**Museum:** Office of the Chief Information Officer');
       expect(lines[museumLine + 1]).toBe(`**Held by:** ${HOLDER}`);
       expect(lines.filter((l) => l.startsWith('**Held by:**'))).toHaveLength(1);
@@ -1810,5 +1851,530 @@ describe('smithsonianFindRelated', () => {
         "The unit that holds the object, from the record's own data source, when it differs from the unit that indexes it (unit_code). Absent otherwise.",
       );
     });
+  });
+});
+
+describe('unit_code scope (issue #75)', () => {
+  const ANCHOR_ID = 'nasm_A19700102000';
+
+  /** An index row: its summary, the facet values it is indexed under, and its free text. */
+  type Doc = { row: ObjectSummary; facets: Partial<Record<string, string>>; text?: string };
+
+  function doc(record_id: string, unit_code: string, facets: Doc['facets'], text?: string): Doc {
+    return {
+      row: {
+        record_id,
+        title: record_id,
+        unit_code,
+        museum_name: unit_code,
+        is_cc0: true,
+        has_media: false,
+      },
+      facets,
+      ...(text && { text }),
+    };
+  }
+
+  /**
+   * The Command Module's neighborhood, shaped like the live index: the indexed name is shared
+   * by the Command Module Pilot's spoon and by books a namesake wrote, and the topic reaches
+   * library records alongside the museum's own spacecraft.
+   */
+  const CORPUS: Doc[] = [
+    doc(ANCHOR_ID, 'NASM', { name: 'Collins, Michael', topic: 'Outer space' }, 'Michael Collins'),
+    doc('nasm_A19850143000', 'NASM', { name: 'Collins, Michael' }, 'Michael Collins spoon'),
+    ...[1, 2, 3, 4].map((n) =>
+      doc(`siris_sil_${n}`, 'SIL', { name: 'Collins, Michael' }, 'Michael Collins design'),
+    ),
+    doc('siris_sil_poisons', 'SIL', { topic: 'Outer space' }),
+    doc('nasm_PIONEER4', 'NASM', { topic: 'Outer space' }),
+    doc('nasm_ECHO1', 'NASM', { topic: 'Outer space' }),
+    doc('nasm_LRV', 'NASM', { topic: 'Outer space' }),
+  ];
+
+  /**
+   * The index the service would answer from: every filter matches exactly and case-sensitively,
+   * and a free-text query matches a row's text.
+   */
+  async function corpusSearch(params: {
+    query: string;
+    rows: number;
+    start: number;
+    filters?: FacetFilter[];
+  }) {
+    const matches = CORPUS.filter(
+      (d) =>
+        (params.filters ?? []).every((f) =>
+          f.field === 'unit_code'
+            ? d.row.unit_code === f.value
+            : 'value' in f && d.facets[f.field] === f.value,
+        ) &&
+        (params.query === '' || params.query === '*' || d.text?.includes(params.query) === true),
+    );
+    return {
+      rows: matches.slice(params.start, params.start + params.rows).map((d) => d.row),
+      rowCount: matches.length,
+    };
+  }
+  const search = vi.fn(corpusSearch);
+
+  function anchor(indexed: boolean): RawEDAN {
+    return {
+      id: 'ld1-anchor',
+      title: 'Command Module, Apollo 11',
+      unitCode: 'NASM',
+      url: `edanmdm:${ANCHOR_ID}`,
+      content: {
+        descriptiveNonRepeating: { record_ID: ANCHOR_ID, unit_code: 'NASM' },
+        indexedStructured: {
+          topic: ['Outer space'],
+          ...(indexed && { name: ['Collins, Michael'] }),
+        },
+        freetext: { name: [{ label: 'Astronaut', content: 'Michael Collins' }] },
+      },
+    };
+  }
+
+  function serve(raw = anchor(true)) {
+    const service = new svcModule.SmithsonianService(createInMemoryStorage());
+    vi.spyOn(service, 'getContent').mockResolvedValue({ record: raw });
+    vi.spyOn(service, 'search').mockImplementation(search);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+  }
+
+  type Output = {
+    related: Array<{ record_id: string; unit_code: string; similarity_signals: string[] }>;
+    signals: Array<{
+      signal: string;
+      row_count: number;
+      search_continuation: { query: string; filters?: Record<string, string> };
+    }>;
+    notice?: string;
+  };
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    search.mockReset();
+    search.mockImplementation(corpusSearch);
+  });
+
+  it('keeps every related object, fan-out, and continuation inside the museum', async () => {
+    serve();
+    const result = await runToolContract(smithsonianFindRelated, {
+      id: ANCHOR_ID,
+      unit_code: 'NASM',
+      limit: 50,
+    });
+    expect(result.isError).not.toBe(true);
+    const out = result.structuredContent as Output;
+
+    expect(out.related.length).toBeGreaterThan(0);
+    expect(out.related.every((r) => r.unit_code === 'NASM')).toBe(true);
+    expect(out.related.map((r) => r.record_id)).not.toContain(ANCHOR_ID);
+    expect(out.related.find((r) => r.record_id === 'nasm_A19850143000')).toMatchObject({
+      similarity_signals: ['name: Collins, Michael'],
+    });
+    // The anchor matches its own signals inside its own museum and is counted, not listed.
+    expect(out.signals.map((s) => [s.signal, s.row_count])).toEqual([
+      ['name: Collins, Michael', 2],
+      ['topic: Outer space', 4],
+    ]);
+    for (const s of out.signals) expect(s.search_continuation.filters?.unit_code).toBe('NASM');
+    // Signal labels are unchanged by the scope.
+    for (const call of search.mock.calls) {
+      expect(call[0].filters?.[0]).toEqual({ field: 'unit_code', value: 'NASM' });
+    }
+  });
+
+  it('reproduces each scoped signal through smithsonian_search_objects with the same search', async () => {
+    serve();
+    const related = await runToolContract(smithsonianFindRelated, {
+      id: ANCHOR_ID,
+      unit_code: 'NASM',
+    });
+    const fanOuts = search.mock.calls.map(([p]) => ({ query: p.query, filters: p.filters }));
+
+    for (const s of (related.structuredContent as Output).signals) {
+      search.mockClear();
+      const continued = await runToolContract(smithsonianSearchObjects, s.search_continuation);
+      expect(continued.structuredContent).toMatchObject({ total_count: s.row_count });
+      // The same query and filters, in the same order, so the service routes and orders the
+      // continuation as it did the fan-out.
+      const [params] = search.mock.calls[0]!;
+      expect(fanOuts).toContainEqual({ query: params.query, filters: params.filters });
+    }
+  });
+
+  it('scopes a free-text named-party signal with filters.unit_code beside its query', async () => {
+    serve(anchor(false));
+    const result = await runToolContract(smithsonianFindRelated, {
+      id: ANCHOR_ID,
+      unit_code: 'NASM',
+    });
+    const out = result.structuredContent as Output;
+
+    const party = out.signals.find((s) => s.signal === 'astronaut: Michael Collins');
+    expect(party).toMatchObject({
+      row_count: 2,
+      search_continuation: { query: 'Michael Collins', filters: { unit_code: 'NASM' } },
+    });
+    expect(search).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: 'Michael Collins',
+        filters: [{ field: 'unit_code', value: 'NASM' }],
+      }),
+      expect.anything(),
+      expect.any(Number),
+    );
+    expect(textOf(result)).toContain(
+      '`smithsonian_search_objects { query: "Michael Collins", filters: { unit_code: "NASM" } }`',
+    );
+  });
+
+  it.each(['NZP', 'nasm'])(
+    'succeeds with no related objects and a notice naming unit_code %s',
+    async (unitCode) => {
+      serve();
+      const result = await runToolContract(smithsonianFindRelated, {
+        id: ANCHOR_ID,
+        unit_code: unitCode,
+      });
+      expect(result.isError).not.toBe(true);
+      const out = result.structuredContent as Output;
+      expect(out.related).toEqual([]);
+      expect(out.signals.map((s) => s.row_count)).toEqual([0, 0]);
+      expect(out.notice).toBe(
+        `No object other than the anchor matches a signal within unit_code "${unitCode}". unit_code matches the indexed code exactly and case-sensitively (smithsonian_list_terms { field: "unit_code" } lists them), so check it, or omit unit_code to search every museum.`,
+      );
+      expect(textOf(result)).toContain(`within unit_code "${unitCode}"`);
+    },
+  );
+
+  it.each([
+    // Every window held the signal's whole match set, and that set was the anchor alone.
+    [1, 'within unit_code "NASM"', 'fetched windows'],
+    // A one-row window held only the anchor while the signal has another match past it: the
+    // fetched windows were not the whole scope, so naming the scope would overclaim.
+    [2, 'fetched windows', 'within unit_code'],
+  ])(
+    'with only the anchor in each scoped window and %i matches per signal, the notice says %s',
+    async (rowCount, says, never) => {
+      serve();
+      search.mockImplementation(async () => ({ rows: [CORPUS[0]!.row], rowCount }));
+
+      const result = await runToolContract(smithsonianFindRelated, {
+        id: ANCHOR_ID,
+        unit_code: 'NASM',
+        limit: 1,
+      });
+      const out = result.structuredContent as Output;
+      expect(out.related).toEqual([]);
+      expect(out.notice).toContain(says);
+      expect(out.notice).not.toContain(never);
+    },
+  );
+
+  it('reads an empty unit_code as omitted, byte for byte', async () => {
+    serve();
+    const omitted = await runToolContract(smithsonianFindRelated, { id: ANCHOR_ID });
+    const omittedCalls = search.mock.calls.map(([p]) => p);
+    search.mockClear();
+    const empty = await runToolContract(smithsonianFindRelated, { id: ANCHOR_ID, unit_code: '' });
+
+    expect(empty.structuredContent).toEqual(omitted.structuredContent);
+    expect(empty.content).toEqual(omitted.content);
+    expect(search.mock.calls.map(([p]) => p)).toEqual(omittedCalls);
+    for (const [p] of search.mock.calls) {
+      expect(p.filters?.some((f) => f.field === 'unit_code')).toBe(false);
+    }
+    for (const s of (omitted.structuredContent as Output).signals) {
+      expect(s.search_continuation.filters).not.toHaveProperty('unit_code');
+    }
+  });
+
+  it('renders unit_code in every continuation line of content[]', async () => {
+    serve();
+    const result = await runToolContract(smithsonianFindRelated, {
+      id: ANCHOR_ID,
+      unit_code: 'NASM',
+    });
+    const lines = textOf(result)
+      .split('\n')
+      .filter((line) => line.includes('smithsonian_search_objects {'));
+    expect(lines).toEqual([
+      '  `smithsonian_search_objects { query: "", filters: { unit_code: "NASM", name: "Collins, Michael" } }`',
+      '  `smithsonian_search_objects { query: "", filters: { unit_code: "NASM", topic: "Outer space" } }`',
+    ]);
+  });
+
+  it('sizes the continuation code span past a backtick in the unit_code, so it reads back whole', () => {
+    const text = smithsonianFindRelated.format!({
+      anchor: { record_id: ANCHOR_ID, title: 'Command Module', unit_code: 'NASM' },
+      related: [],
+      search_signals_used: ['topic: Outer space'],
+      signals: [
+        {
+          signal: 'topic: Outer space',
+          row_count: 0,
+          search_continuation: { query: '', filters: { unit_code: 'NA`SM', topic: 'Outer space' } },
+        },
+      ],
+    })
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+    expect(text).toContain(
+      '  ``smithsonian_search_objects { query: "", filters: { unit_code: "NA`SM", topic: "Outer space" } }``',
+    );
+  });
+
+  it('describes unit_code as optional, exact, and case-sensitive', () => {
+    const field = smithsonianFindRelated.input.shape.unit_code;
+    expect(field.isOptional()).toBe(true);
+    expect(field.description).toMatch(/case-sensitive/);
+    expect(field.description).toContain('smithsonian_list_terms');
+    expect(smithsonianFindRelated.input.safeParse({ id: ANCHOR_ID, unit_code: '' }).success).toBe(
+      true,
+    );
+  });
+});
+
+describe('one deadline across the call (issue #68)', () => {
+  const ANCHOR_ID = 'nasm_TEST001';
+  type Answer = (signal: AbortSignal) => Promise<Response>;
+
+  const ANCHOR_BODY = { status: 200, responseCode: 1, response: makeAnchorRaw(ANCHOR_ID) };
+  const RELATED_PAGE = {
+    status: 200,
+    responseCode: 1,
+    response: {
+      rows: [
+        {
+          id: 'ld1-related',
+          title: 'Related Aircraft',
+          unitCode: 'NMAH',
+          url: 'edanmdm:nmah_RELATED001',
+          content: { descriptiveNonRepeating: { record_ID: 'nmah_RELATED001', unit_code: 'NMAH' } },
+        },
+      ],
+      rowCount: 1,
+    },
+  };
+
+  /** An upstream that answers a request still open at `at` (epoch ms), and rejects one whose signal aborts first. */
+  function answerAt(at: number, body: unknown): Answer {
+    return (signal) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(
+          () => resolve(new Response(JSON.stringify(body), { status: 200 })),
+          Math.max(0, at - Date.now()),
+        );
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      });
+  }
+
+  /** An upstream that never answers: only the request signal aborting ends it. */
+  const hung: Answer = (signal) =>
+    new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+
+  /**
+   * Run the real service over a fetch stub: `/content` answers by `content`, and each `/search`
+   * by the answer `search` picks for its `q`. Returns the signals of the `/search` requests.
+   */
+  function serve(content: Answer, search: (q: string) => Answer): AbortSignal[] {
+    const searches: AbortSignal[] = [];
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init: RequestInit) => {
+        const url = new URL(input);
+        const signal = init.signal as AbortSignal;
+        if (url.pathname.includes('/content/')) return content(signal);
+        if (!url.pathname.endsWith('/search')) throw new Error('unmocked fetch');
+        searches.push(signal);
+        return search(url.searchParams.get('q') ?? '')(signal);
+      }),
+    );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+      new svcModule.SmithsonianService(createInMemoryStorage()),
+    );
+    return searches;
+  }
+
+  /** A pending call's outcome, readable without awaiting it. */
+  function track(pending: Promise<unknown>) {
+    const state: { settled: boolean; outcome?: unknown } = { settled: false };
+    pending.then(
+      (value) => Object.assign(state, { settled: true, outcome: value }),
+      (error: unknown) => Object.assign(state, { settled: true, outcome: error }),
+    );
+    return state;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('fails Timeout at 50 s when the anchor answers at 40 s and no signal answers', async () => {
+    // The anchor's first two attempts each hit the 15 s per-attempt timeout; the third answers.
+    const searches = serve(answerAt(Date.now() + 40_000, ANCHOR_BODY), () => hung);
+
+    const result = track(runToolContract(smithsonianFindRelated, { id: ANCHOR_ID }));
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(result.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(result.settled).toBe(true);
+    expect(result.outcome).toMatchObject({
+      isError: true,
+      structuredContent: { error: { code: JsonRpcErrorCode.Timeout } },
+    });
+    expect(searches).toHaveLength(4);
+    expect(searches.every((signal) => signal.aborted)).toBe(true);
+  });
+
+  it('returns the signal that answers at 45 s and names every other signal (timeout)', async () => {
+    const entry = Date.now();
+    serve(answerAt(entry + 40_000, ANCHOR_BODY), (q) =>
+      q.includes('culture:"American"') ? answerAt(entry + 45_000, RELATED_PAGE) : hung,
+    );
+
+    const result = track(runToolContract(smithsonianFindRelated, { id: ANCHOR_ID }));
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    expect(result.settled).toBe(true);
+    const { isError, structuredContent } = result.outcome as {
+      isError?: boolean;
+      structuredContent: { related: Array<{ record_id: string }>; notice: string };
+    };
+    expect(isError).not.toBe(true);
+    expect(structuredContent.related.map((r) => r.record_id)).toEqual(['nmah_RELATED001']);
+    for (const signal of [
+      'manufacturer: Lockheed',
+      'topic: Aviation',
+      'period: 1960s, type: Aircraft',
+    ]) {
+      expect(structuredContent.notice).toContain(`${signal} (timeout)`);
+    }
+    expect(structuredContent.notice).not.toContain('culture: American (');
+  });
+
+  it('passes the deadline it sets at entry to the anchor read and every signal and chunk read', async () => {
+    const service = new svcModule.SmithsonianService(createInMemoryStorage());
+    const getContent = vi
+      .spyOn(service, 'getContent')
+      .mockResolvedValue({ record: makeAnchorRaw(ANCHOR_ID) });
+    const search = vi.spyOn(service, 'search').mockResolvedValue({ rows: [], rowCount: 5000 });
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+    const entry = Date.now();
+
+    await runToolContract(smithsonianFindRelated, { id: ANCHOR_ID, limit: 1000, start: 500 });
+
+    expect(search.mock.calls.some(([params]) => params.start === 1000)).toBe(true);
+    const deadlines = [getContent.mock.calls[0]?.[2], ...search.mock.calls.map((call) => call[2])];
+    expect(new Set(deadlines)).toEqual(new Set([entry + 50_000]));
+  });
+});
+
+describe('smithsonianFindRelated content[] encoding (issue #70)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reads the anchor, every row, and every signal back under CommonMark', () => {
+    const call = (filters: string) =>
+      `smithsonian_search_objects { query: "", filters: { ${filters} } }`;
+    const output = {
+      anchor: { record_id: 'nmah_680562', title: 'M*A*S*H Signpost ', unit_code: 'NMAH' },
+      related: [
+        {
+          record_id: 'nmah_`1`',
+          title: 'Berberin <Frau>\nDC',
+          unit_code: 'NMAH',
+          museum_name: 'American <History>',
+          holding_museum_name: 'Held *here*',
+          thumbnail_url: 'https://ids.si.edu/ids/deliveryService?id=NMAH-1&max=150',
+          is_cc0: true,
+          similarity_signals: ['topic: Korean War, 1950-1953', 'culture: <b>x</b>'],
+        },
+      ],
+      search_signals_used: ['topic: Korean War, 1950-1953', 'culture: <b>x</b>'],
+      signals: [
+        {
+          signal: 'topic: Korean War, 1950-1953',
+          row_count: 12,
+          search_continuation: { query: '', filters: { topic: 'Korean War, 1950-1953' } },
+        },
+        {
+          signal: 'culture: <b>x</b>',
+          row_count: 3,
+          search_continuation: { query: '', filters: { culture: '<b>x</b>' } },
+        },
+      ],
+    };
+    const text = smithsonianFindRelated.format!(output)
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+
+    expect(text.split('\n')[0]).toBe('# Related: M\\*A\\*S\\*H Signpost&#32;');
+    expect(headings(text)).toEqual([
+      `Related: ${output.anchor.title}`,
+      'Berberin <Frau>\nDC',
+      'Signals',
+    ]);
+    expect(codeSpans(text)).toEqual([
+      'nmah_680562',
+      'nmah_`1`',
+      call('topic: "Korean War, 1950-1953"'),
+      call('culture: "<b>x</b>"'),
+    ]);
+    expect(labelValues(text, 'Museum')).toEqual(['American <History> (NMAH)']);
+    expect(labelValues(text, 'Held by')).toEqual(['Held *here*']);
+    expect(images(text).map((image) => image.url)).toEqual([output.related[0]?.thumbnail_url]);
+    // A signal carries `, ` itself, so each reads back as one item, never split by a join.
+    expect(items(text)).toEqual([
+      'topic: Korean War, 1950-1953',
+      'culture: <b>x</b>',
+      'topic: Korean War, 1950-1953',
+      'culture: <b>x</b>',
+      `topic: Korean War, 1950-1953 — 12 upstream matches\n${call('topic: "Korean War, 1950-1953"')}`,
+      `culture: <b>x</b> — 3 upstream matches\n${call('culture: "<b>x</b>"')}`,
+    ]);
+  });
+
+  it('reads a raw failed-signal label in the notice back to structuredContent.notice', async () => {
+    const raw = makeAnchorRaw();
+    raw.content!.indexedStructured!.culture = ['Plains *Indian* <b>'];
+    const service = new svcModule.SmithsonianService(createInMemoryStorage());
+    vi.spyOn(service, 'getContent').mockResolvedValue({ record: raw });
+    vi.spyOn(service, 'search').mockImplementation(async ({ filters }) =>
+      filters[0]?.field === 'culture'
+        ? Promise.reject(new Error('down'))
+        : { rows: makeRelatedRows(), rowCount: 2 },
+    );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+
+    const result = await runToolContract(smithsonianFindRelated, { id: 'nasm_TEST001' });
+
+    const notice = (result.structuredContent as { notice: string }).notice;
+    expect(notice).toContain('Plains *Indian* <b> (unavailable)');
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(quotes(text)).toEqual([notice]);
+    expect(smithsonianFindRelated.enrichmentTrailer?.notice).toBe(noticeTrailer);
   });
 });

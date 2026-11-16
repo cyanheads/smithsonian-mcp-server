@@ -5,7 +5,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
+import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import {
   enrichPageNotice,
   PAGE_CAPS,
@@ -13,7 +14,11 @@ import {
   pageSizeMeta,
   servePageSize,
 } from '@/mcp-server/tools/page-size.js';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import {
+  API_KEY_REJECTED_ERROR,
+  getSmithsonianService,
+  startCallDeadline,
+} from '@/services/smithsonian/smithsonian-service.js';
 
 export const smithsonianListTerms = tool('smithsonian_list_terms', {
   title: 'List Valid Filter Terms',
@@ -101,6 +106,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
         'Guidance naming the input that retrieves the terms this page omitted, or how to broaden a contains filter that matched nothing. Opens with the page size served when rows exceeded its cap.',
       ),
   },
+  enrichmentTrailer: { notice: noticeTrailer },
 
   errors: [
     {
@@ -110,9 +116,11 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       recovery:
         'Try a different field name. Valid fields: unit_code, culture, place, date, online_media_type, topic.',
     },
+    API_KEY_REJECTED_ERROR,
   ],
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     const svc = getSmithsonianService();
     const pageSize = servePageSize('smithsonian_list_terms', 'rows', input.rows, ctx);
 
@@ -130,6 +138,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
         ...(input.contains !== undefined && { contains: input.contains }),
       },
       ctx,
+      deadline,
     );
 
     // no_terms means the field itself has no indexed vocabulary — only meaningful
@@ -145,11 +154,11 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
 
     // Enrichment `notice` is last-wins, so every sentence for this call — the clamp,
     // the filtered-empty confirmation, the paging guidance — composes into one string.
-    // `contains` is caller text inside rendered Markdown, so it is escaped.
+    // `contains` stays raw here; the notice trailer escapes the whole notice for content[].
     const notices = pageSize.notice ? [pageSize.notice] : [];
     if (input.contains && total === 0) {
       notices.push(
-        `No term in the "${input.field}" vocabulary contains "${escapeMarkdownInline(input.contains)}". Broaden or re-spell the substring, or omit contains to browse the full vocabulary.`,
+        `No term in the "${input.field}" vocabulary contains "${input.contains}". Broaden or re-spell the substring, or omit contains to browse the full vocabulary.`,
       );
     }
 
@@ -176,15 +185,17 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
 
   format: (result) => {
     const labels = result.labels ?? {};
+    const code = (value: string) => markdown().inlineCode(value).build();
     const lines: string[] = [
-      `**Field:** \`${result.field}\` — ${result.total.toLocaleString()} distinct terms, showing ${result.terms.length}\n`,
+      `**Field:** ${code(result.field)} — ${result.total.toLocaleString()} distinct terms, showing ${result.terms.length}\n`,
     ];
     // Rendered over the union of the page and the label keys so every labelled
     // code reaches the markdown surface. `labels` is keyed by the codes on this
-    // page, so for a real response the union is the page itself.
+    // page, so for a real response the union is the page itself. Looked up by own
+    // key: a term such as "constructor" would otherwise read Object.prototype.
     for (const term of new Set([...result.terms, ...Object.keys(labels)])) {
-      const name = labels[term];
-      lines.push(name ? `- \`${term}\` — ${name}` : `- \`${term}\``);
+      const name = Object.hasOwn(labels, term) ? labels[term] : undefined;
+      lines.push(name ? `- ${code(term)} — ${escapeMarkdownInline(name)}` : `- ${code(term)}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

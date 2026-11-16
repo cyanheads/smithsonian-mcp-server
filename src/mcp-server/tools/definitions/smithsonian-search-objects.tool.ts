@@ -5,7 +5,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown, markdownImage } from '@cyanheads/mcp-ts-core/utils';
+import { headingText, noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import {
   enrichPageNotice,
   PAGE_CAPS,
@@ -20,7 +21,11 @@ import {
   provenanceTrailer,
 } from '@/mcp-server/tools/provenance.js';
 import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import {
+  API_KEY_REJECTED_ERROR,
+  getSmithsonianService,
+  startCallDeadline,
+} from '@/services/smithsonian/smithsonian-service.js';
 import type { TermDescription } from '@/services/smithsonian/types.js';
 
 /**
@@ -60,6 +65,10 @@ function distinctValues(values: Array<string | undefined>, cap = 12): string[] {
  * (issue #48), so a value can reach the dropped-clause branch having found a
  * fragment — which is why that branch says no NARROW set was found rather than
  * that no fragment resolved at all.
+ *
+ * A value whose membership is unknown (the vocabulary read failed) takes the
+ * resolve-it clause too: "matched nothing" is true either way, and the clause makes
+ * no claim about the vocabulary (issue #72).
  */
 function composeFilterHint(
   routableFilters: Array<{ field: string; value: string } & TermDescription>,
@@ -67,14 +76,16 @@ function composeFilterHint(
   unitCodes: string[],
 ): string {
   const parts: string[] = [];
-  for (const { field, value, indexed, neighbors } of routableFilters) {
-    if (!indexed) {
+  for (const filter of routableFilters) {
+    const { field, value } = filter;
+    if (filter.indexed !== true) {
       parts.push(
         `Your ${field} filter "${value}" matched nothing — resolve it to an exact term with ` +
           `smithsonian_list_terms { field: "${field}", contains: "${value}" }.`,
       );
       continue;
     }
+    const { neighbors } = filter;
     const indexedEmpty = `Your ${field} filter "${value}" is an exact term in the "${field}" vocabulary, so resolving it again returns the same value — it either has no retrievable objects at all or does not overlap your query and other filters.`;
     parts.push(
       neighbors
@@ -139,7 +150,7 @@ const ObjectSummarySchema = z
     thumbnail_url: z
       .string()
       .optional()
-      .describe('Thumbnail image URL (~120px) if the object has online media.'),
+      .describe('Thumbnail image URL (~150px) if the object has online media.'),
     is_cc0: z
       .boolean()
       .describe(
@@ -156,7 +167,7 @@ const ObjectSummarySchema = z
 export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
   title: 'Search Smithsonian Objects',
   description:
-    'Recommended first step for open-ended or topic discovery: free-text search across 14.5 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, and online/CC0 availability. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, date term, object type, or topic — use smithsonian_browse_category instead.',
+    'Recommended first step for open-ended or topic discovery: free-text search across 14.5 million Smithsonian objects, with optional exact filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, scientific name, media type, online/CC0 availability, and objects on display now. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The record_id in each result is the identifier for smithsonian_get_object, smithsonian_find_related, and smithsonian_get_media. To browse one exact category — a single museum, culture, date term, object type, or topic — use smithsonian_browse_category instead.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -177,7 +188,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .string()
           .optional()
           .describe(
-            'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search_objects results. Matched exactly and case-sensitively, and casing variants are indexed as SEPARATE categories — "button" and "Button" each hold their own records, and neither casing is reliably the larger — so probe a harvested value\'s other casings rather than assuming one covers the concept.',
+            'Object type term from Smithsonian\'s controlled vocabulary — commonly plural (e.g. "Paintings", "Photographs", "Aircraft"). Singular everyday forms like "Painting" usually return nothing. This field is not enumerable via smithsonian_list_terms; harvest valid values from the object_type field in smithsonian_search_objects results or from smithsonian_get_object indexed.object_type. Matched exactly and case-sensitively, and casing variants are indexed as SEPARATE categories — "button" and "Button" each hold their own records, and neither casing is reliably the larger — so probe a harvested value\'s other casings rather than assuming one covers the concept.',
           ),
         date: z
           .string()
@@ -201,13 +212,13 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .string()
           .optional()
           .describe(
-            'Subject term from the controlled vocabulary (e.g. "Quilts", "Aviation"). Matches the topics[] values smithsonian_get_object returns, and is a hard constraint — topic "Quilts" matches 1,134 objects where the same word as free text matches 2,677. The full set is enumerable via smithsonian_list_terms (field "topic").',
+            'Subject term from the controlled vocabulary (e.g. "Quilts", "Aviation"). Matches the indexed.topic values smithsonian_get_object returns; its topics[] also carries free-text subject strings ("Quilts--History") that match nothing here. A hard constraint — topic "Quilts" matches 1,134 objects where the same word as free text matches 2,677. The full set is enumerable via smithsonian_list_terms (field "topic").',
           ),
         name: z
           .string()
           .optional()
           .describe(
-            'Indexed named party — maker, collector, donor, issuing authority, or any other role the catalog records. Written surname-first (e.g. "Warhol, Andy"). This field is not enumerable via smithsonian_list_terms. A smithsonian_find_related name signal carries the indexed form verbatim and is the reliable source; smithsonian_get_object\'s makers[] is the catalog\'s free-text form of the same parties and is often written differently ("Major J. A. L. Möller (Jacob A.L. Möller/Monty Möller), Non-Indian, 1883-1957" for the indexed "Möller, Major J. A. L."), so treat it as a starting guess.',
+            'Indexed named party — maker, collector, donor, issuing authority, or any other role the catalog records. Written surname-first (e.g. "Warhol, Andy"). This field is not enumerable via smithsonian_list_terms. Take the exact value from smithsonian_get_object indexed.name, which lists every party a record is indexed under; its makers[] is the free-text form of the same parties and is often written differently ("Neil A. Armstrong" for the indexed "Armstrong, Neil A."), and a differently written name matches nothing here.',
           ),
         online_only: z
           .boolean()
@@ -232,6 +243,12 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
           .optional()
           .describe(
             'When true, restrict to records that have CC0-licensed media attached (the Lucene term media_usage:CC0). This selects on media presence, not license status — the roughly 9.2M records it excludes are CC0 too, they simply have nothing digitized. Read has_media on each result to decide whether smithsonian_get_media will return anything.',
+          ),
+        on_view_only: z
+          .boolean()
+          .optional()
+          .describe(
+            'When true, restrict to objects the catalog flags as on physical display now (onPhysicalExhibit "Yes", about 13,000 records from 13 museums); smithsonian_get_object current_exhibitions names where. Most records carry no flag at all, so an unflagged object may still be on view, and there is no off-view filter. false or omitted adds nothing.',
           ),
       })
       .strict()
@@ -288,7 +305,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       ),
     ...provenanceEnrichment,
   },
-  enrichmentTrailer: provenanceTrailer,
+  enrichmentTrailer: { ...provenanceTrailer, notice: noticeTrailer },
 
   errors: [
     {
@@ -302,11 +319,14 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'A filtered search matched nothing — most often a filter value outside the Smithsonian controlled vocabulary (e.g. a singular "Painting" instead of "Paintings").',
       recovery:
-        "Call smithsonian_list_terms with the relevant field (unit_code, culture, place, date, topic) and a contains substring to resolve a filter value to an exact vocabulary term, then retry. Note object_type and name are not enumerable — harvest object_type from search results, and take name from a smithsonian_find_related name signal, which carries the indexed form (smithsonian_get_object's makers[] is the free-text form and is often written differently). A harvested object_type is case-sensitive and its casing variants are separate categories, so retry the other casings before concluding the concept is empty.",
+        'Call smithsonian_list_terms with the relevant field (unit_code, culture, place, date, topic) and a contains substring to resolve a filter value to an exact vocabulary term, then retry. Note object_type and name are not enumerable — harvest object_type from search results, and take name, object_type, place, date, and topic values verbatim from smithsonian_get_object indexed on a record that carries them (its makers, place, dates, and topics fields are free-text forms and are often written differently). A harvested object_type is case-sensitive and its casing variants are separate categories, so retry the other casings before concluding the concept is empty.',
     },
+    API_KEY_REJECTED_ERROR,
   ],
 
   async handler(input, ctx) {
+    // One deadline for the search and, on a filtered zero match, its recovery lookups (issue #68).
+    const deadline = startCallDeadline();
     const svc = getSmithsonianService();
 
     // Exact facet constraints, in the order the live query ANDs them. The service matches
@@ -326,6 +346,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
     }
     if (f?.online_only) filters.push({ field: 'online_only' });
     if (f?.cc0_only) filters.push({ field: 'cc0' });
+    if (f?.on_view_only) filters.push({ field: 'on_view' });
 
     // EDAN rejects an entirely empty q with a raw 400 (issue #39). Filters alone
     // already assemble a non-empty q, so only a query-less, filter-less call needs
@@ -346,7 +367,7 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       rows: objects,
       rowCount,
       provenance,
-    } = await svc.search({ query, rows, start: input.start, filters }, ctx);
+    } = await svc.search({ query, rows, start: input.start, filters }, ctx, deadline);
 
     // Guard on the TRUE match count, not the page-local length. A deep `start`
     // past the end of a real result set returns an empty page with rowCount > 0 —
@@ -362,11 +383,13 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
         // harvest can't resolve them — route each to smithsonian_list_terms with a
         // `contains` substring instead (each filter's name is also its list_terms
         // field). object_type/unit_code ARE in summaries, so those are harvested from
-        // one unfiltered re-query and named in the hint. Harvesting is best-effort and
-        // failure-path only: any error or an empty re-query keeps the static contract
-        // hint, so it never turns a clean invalid_filter into a crash. `name` is
-        // neither enumerable upstream nor carried in summaries, so it takes the static
-        // hint, which names where its exact values do come from.
+        // one unfiltered re-query and named in the hint. Both lookups are best-effort and
+        // failure-path only, and run at once on what the call's deadline leaves: one that
+        // fails, or is cut short or skipped by the deadline, claims no membership and
+        // harvests nothing, so it never turns a clean invalid_filter into a crash or a
+        // Timeout. Caller cancellation is the exception, rethrown rather than reported as
+        // a zero match. `name` is neither enumerable upstream nor carried in summaries, so
+        // it takes the static hint, which names where its exact values do come from.
         const routable: Array<{ field: string; value: string }> = [];
         if (f?.culture) routable.push({ field: 'culture', value: f.culture });
         if (f?.place) routable.push({ field: 'place', value: f.place });
@@ -378,36 +401,41 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
         // Where each routable value sits in its vocabulary, which decides between
         // "resolve it" and "it resolves to itself" (issue #33), plus the substring
         // that lists neighbors when one exists (issue #46). Resolved here because
-        // composeFilterHint is synchronous. Best-effort and failure-path only: a
-        // throwing lookup reads as not indexed, keeping the resolve-it hint that
-        // predates the check.
-        const routableFilters = await Promise.all(
+        // composeFilterHint is synchronous. A throwing lookup leaves membership unknown,
+        // which keeps the resolve-it hint that predates the check (issue #72).
+        const describing = Promise.all(
           routable.map(async (r) => ({
             ...r,
             ...(await svc
-              .describeTerm(r.field, r.value, ctx)
-              .catch((): TermDescription => ({ indexed: false }))),
+              .describeTerm(r.field, r.value, ctx, deadline)
+              .catch((): TermDescription => {
+                ctx.signal?.throwIfAborted();
+                return { indexed: 'unknown' };
+              })),
           })),
         );
 
         // Harvest only when object_type/unit_code is the culprit — those are the only
         // filters whose exact values an unfiltered re-query can surface — and only for
         // a non-blank query: without one the re-query has nothing to sample against,
-        // and EDAN answers its empty q with a 400 (issue #67).
-        let objectTypes: string[] = [];
-        let unitCodes: string[] = [];
-        if ((f?.object_type || f?.unit_code) && input.query.trim()) {
-          try {
-            const { rows: sample } = await svc.search(
-              { query: input.query, rows: 100, start: 0, filters: [] },
-              ctx,
-            );
-            objectTypes = distinctValues(sample.map((o) => o.object_type));
-            unitCodes = distinctValues(sample.map((o) => o.unit_code));
-          } catch {
-            // Harvesting is best-effort — fall back to the static contract hint.
-          }
-        }
+        // and EDAN answers its empty q with a 400 (issue #67). A failed harvest falls
+        // back to the static contract hint.
+        const harvesting =
+          (f?.object_type || f?.unit_code) && input.query.trim()
+            ? svc
+                .search({ query: input.query, rows: 100, start: 0, filters: [] }, ctx, deadline)
+                .then(
+                  ({ rows: sample }) => sample,
+                  () => {
+                    ctx.signal?.throwIfAborted();
+                    return [];
+                  },
+                )
+            : [];
+
+        const [routableFilters, sample] = await Promise.all([describing, harvesting]);
+        const objectTypes = distinctValues(sample.map((o) => o.object_type));
+        const unitCodes = distinctValues(sample.map((o) => o.unit_code));
 
         const hint = [
           composeFilterHint(routableFilters, objectTypes, unitCodes),
@@ -463,17 +491,21 @@ export const smithsonianSearchObjects = tool('smithsonian_search_objects', {
       `**${result.total_count.toLocaleString()} total results** — showing ${result.objects.length}\n`,
     ];
     for (const obj of result.objects) {
-      lines.push(`### ${obj.title}`);
-      lines.push(`**ID:** ${obj.record_id} | **Museum:** ${obj.museum_name} (${obj.unit_code})`);
+      lines.push(`### ${headingText(obj.title)}`);
+      lines.push(
+        `**ID:** ${markdown().inlineCode(obj.record_id).build()} | **Museum:** ${escapeMarkdownInline(obj.museum_name)} (${escapeMarkdownInline(obj.unit_code)})`,
+      );
       if (obj.holding_museum_name) {
         lines.push(`**Held by:** ${escapeMarkdownInline(obj.holding_museum_name)}`);
       }
-      if (obj.object_type) lines.push(`**Type:** ${obj.object_type}`);
-      if (obj.date) lines.push(`**Date:** ${obj.date}`);
+      if (obj.object_type) lines.push(`**Type:** ${escapeMarkdownInline(obj.object_type)}`);
+      if (obj.date) lines.push(`**Date:** ${escapeMarkdownInline(obj.date)}`);
       lines.push(
         `**CC0:** ${obj.is_cc0 ? 'Yes' : 'No'} | **Has media:** ${obj.has_media ? 'Yes' : 'No'}`,
       );
-      if (obj.thumbnail_url) lines.push(`**Thumbnail:** ${obj.thumbnail_url}`);
+      if (obj.thumbnail_url) {
+        lines.push(`**Thumbnail:** ${markdownImage('Thumbnail', obj.thumbnail_url)}`);
+      }
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

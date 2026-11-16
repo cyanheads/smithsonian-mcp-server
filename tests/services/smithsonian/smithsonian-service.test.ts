@@ -17,18 +17,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianFindRelated } from '@/mcp-server/tools/definitions/smithsonian-find-related.tool.js';
 import { smithsonianGetMedia } from '@/mcp-server/tools/definitions/smithsonian-get-media.tool.js';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
+import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
 import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
 import {
+  type CallDeadline,
   hasActiveLuceneSyntax,
   initSmithsonianService,
   luceneField,
+  luceneFilter,
   SmithsonianService,
+  startCallDeadline,
   toPlainText,
 } from '@/services/smithsonian/smithsonian-service.js';
 import type {
   RawContentResponse,
   RawEDAN,
+  RawMediaItem,
   RawSearchResponse,
 } from '@/services/smithsonian/types.js';
 import { FakeBucket, openTestMirror, type TestMirror } from './oa-bucket-fake.js';
@@ -289,7 +294,11 @@ describe('SmithsonianService', () => {
       mockFetch(makeSearchResponse());
       const svc = makeService();
       const ctx = makeTenantContext();
-      const result = await svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx);
+      const result = await svc.search(
+        { query: 'aircraft', rows: 10, start: 0 },
+        ctx,
+        startCallDeadline(),
+      );
       expect(result.rowCount).toBe(42);
       expect(result.rows).toHaveLength(1);
       expect(result.rows[0]?.record_id).toBe('nasm_TEST001');
@@ -311,7 +320,7 @@ describe('SmithsonianService', () => {
       vi.stubGlobal('fetch', fetchMock);
       const svc = makeService();
       const ctx = makeTenantContext();
-      await svc.search({ query: 'test', rows: 5, start: 0 }, ctx);
+      await svc.search({ query: 'test', rows: 5, start: 0 }, ctx, startCallDeadline());
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
       const calledInit = (fetchMock.mock.calls[0] as [string, RequestInit])[1];
       // Key must not appear in the URL query string
@@ -337,7 +346,11 @@ describe('SmithsonianService', () => {
           .fn()
           .mockResolvedValue({ ok: true, status: 200, json: async () => makeSearchResponse() });
         vi.stubGlobal('fetch', fetchMock);
-        await makeService().search({ query, filters, rows: 1, start: 0 }, makeTenantContext());
+        await makeService().search(
+          { query, filters, rows: 1, start: 0 },
+          makeTenantContext(),
+          startCallDeadline(),
+        );
         expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(expected);
       },
     );
@@ -354,7 +367,11 @@ describe('SmithsonianService', () => {
         .fn()
         .mockResolvedValue({ ok: true, status: 200, json: async () => makeSearchResponse() });
       vi.stubGlobal('fetch', fetchMock);
-      await makeService().search({ query, filters: NASM, rows: 1, start: 0 }, makeTenantContext());
+      await makeService().search(
+        { query, filters: NASM, rows: 1, start: 0 },
+        makeTenantContext(),
+        startCallDeadline(),
+      );
       expect(new URL(fetchMock.mock.calls[0]![0]).searchParams.get('q')).toBe(
         `${query} AND unit_code:"NASM"`,
       );
@@ -373,6 +390,7 @@ describe('SmithsonianService', () => {
       await svc.search(
         { query: 'test', rows: 5, start: 0, filters: [...NASM, { field: 'cc0' }] },
         ctx,
+        startCallDeadline(),
       );
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
       // Filters must appear in q, not as separate fq params
@@ -387,16 +405,18 @@ describe('SmithsonianService', () => {
       mockFetch({ error: { code: 'API_KEY_MISSING', message: 'No api_key was supplied.' } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      await expect(svc.search({ query: 'test', rows: 5, start: 0 }, ctx)).rejects.toThrow(
-        /API key missing/i,
-      );
+      await expect(
+        svc.search({ query: 'test', rows: 5, start: 0 }, ctx, startCallDeadline()),
+      ).rejects.toThrow(/API key missing/i);
     });
 
     it('API_KEY_MISSING error-in-200 uses InternalError code — not retryable', async () => {
       mockFetch({ error: { code: 'API_KEY_MISSING', message: 'No api_key was supplied.' } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      const err = await svc.search({ query: 'test', rows: 5, start: 0 }, ctx).catch((e) => e);
+      const err = await svc
+        .search({ query: 'test', rows: 5, start: 0 }, ctx, startCallDeadline())
+        .catch((e) => e);
       // InternalError (-32603) is NOT in withRetry's retryable set — config errors surface immediately.
       expect(err.code).toBe(JsonRpcErrorCode.InternalError);
     });
@@ -410,7 +430,9 @@ describe('SmithsonianService', () => {
       });
       const svc = makeService();
       const ctx = makeTenantContext();
-      const promise = svc.search({ query: 'test', rows: 5, start: 0 }, ctx).catch((e) => e);
+      const promise = svc
+        .search({ query: 'test', rows: 5, start: 0 }, ctx, startCallDeadline())
+        .catch((e) => e);
       // Advance time past all backoff intervals (2s + 4s + 8s = 14s)
       await vi.runAllTimersAsync();
       const err = await promise;
@@ -426,7 +448,9 @@ describe('SmithsonianService', () => {
       mockFetch429();
       const svc = makeService();
       const ctx = makeTenantContext();
-      const promise = svc.search({ query: 'test', rows: 5, start: 0 }, ctx).catch((e) => e);
+      const promise = svc
+        .search({ query: 'test', rows: 5, start: 0 }, ctx, startCallDeadline())
+        .catch((e) => e);
       await vi.runAllTimersAsync();
       const err = await promise;
       vi.useRealTimers();
@@ -445,7 +469,11 @@ describe('SmithsonianService', () => {
       mockFetch(sparseResponse);
       const svc = makeService();
       const ctx = makeTenantContext();
-      const result = await svc.search({ query: 'sparse', rows: 5, start: 0 }, ctx);
+      const result = await svc.search(
+        { query: 'sparse', rows: 5, start: 0 },
+        ctx,
+        startCallDeadline(),
+      );
       // record_id falls back to the raw id when record_ID and url are absent
       expect(result.rows[0]?.record_id).toBe('ld1-sparse');
       expect(result.rows[0]?.is_cc0).toBe(false);
@@ -460,7 +488,7 @@ describe('SmithsonianService', () => {
       mockFetch(makeContentResponse('nasm_TEST001'));
       const svc = makeService();
       const ctx = makeTenantContext();
-      const { record: raw } = await svc.getContent('nasm_TEST001', ctx);
+      const { record: raw } = await svc.getContent('nasm_TEST001', ctx, startCallDeadline());
       expect(raw.title).toBe('Test Object');
       expect(raw.content?.descriptiveNonRepeating?.record_ID).toBe('nasm_TEST001');
     });
@@ -475,35 +503,38 @@ describe('SmithsonianService', () => {
       vi.stubGlobal('fetch', fetchMock);
       const svc = makeService();
       const ctx = makeTenantContext();
-      await svc.getContent('nasm_TEST001', ctx);
+      await svc.getContent('nasm_TEST001', ctx, startCallDeadline());
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
       expect(calledUrl).toContain('edanmdm%3Anasm_TEST001');
     });
 
-    it('throws notFound with reason "not_found" when response is absent', async () => {
+    it('fails a 200 without a record as an upstream fault, not a missing object (issue #72)', async () => {
+      // EDAN answers a missing object with HTTP 404 (below); a 200 carrying no record is
+      // a malformed reply, so the caller is not told the ID is wrong.
       mockFetch({ status: 200, responseCode: 1, response: null });
       const svc = makeService();
       const ctx = makeTenantContext();
-      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
-      expect(err.code).toBe(JsonRpcErrorCode.NotFound);
-      expect(err.message).toMatch(/No Smithsonian object/i);
-      // The declared not_found contract must be carried in data (issue #10).
-      expect(err.data?.reason).toBe('not_found');
-      expect(err.data?.recordId).toBe('nasm_MISSING');
-      // The service carries no recovery; the framework fills the executing tool's
-      // declared hint from the reason.
-      expect(err.data?.recovery).toBeUndefined();
+      const err = (await outcomeOf(() =>
+        svc.getContent('nasm_MISSING', ctx, startCallDeadline()),
+      )) as {
+        code: number;
+        data?: Record<string, unknown>;
+      };
+      expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(err.data?.reason).toBe('upstream_unavailable');
+      expect(err.data?.recordId).toBeUndefined();
     });
 
-    it("carries the calling tool's declared recovery hint when response is absent (issue #25)", async () => {
-      // Resolved from the real tool contract, not a copied string — so a contract
-      // reword can't silently drift away from what reaches the wire.
+    it("never hands a 200 without a record the tool's not_found hint (issue #72)", async () => {
       mockFetch({ status: 200, responseCode: 1, response: null });
       initSmithsonianService({} as AppConfig, createInMemoryStorage());
-      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_MISSING' });
+      const result = (await outcomeOf(() =>
+        runToolContract(smithsonianGetObject, { id: 'nasm_MISSING' }),
+      )) as Awaited<ReturnType<typeof runToolContract>>;
       expect(result.structuredContent).toMatchObject({
-        error: { data: { reason: 'not_found', recovery: { hint: NOT_FOUND_RECOVERY } } },
+        error: { code: JsonRpcErrorCode.ServiceUnavailable },
       });
+      expect(JSON.stringify(result.structuredContent)).not.toContain(NOT_FOUND_RECOVERY);
     });
 
     it('HTTP 404 from content endpoint surfaces as notFound — not retried', async () => {
@@ -520,15 +551,16 @@ describe('SmithsonianService', () => {
       );
       const svc = makeService();
       const ctx = makeTenantContext();
-      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
+      const err = await svc.getContent('nasm_MISSING', ctx, startCallDeadline()).catch((e) => e);
       expect(err.code).toBe(JsonRpcErrorCode.NotFound);
       expect(err.message).toMatch(/nasm_MISSING/i);
       // Live-exercised path (real HTTP 404 → real notFound factory): reason must be present.
       expect(err.data?.reason).toBe('not_found');
     });
 
-    it('carries the declared recovery hint on the HTTP 404 rewrap path too (issue #25)', async () => {
-      // The 404 catch/rewrap is a second, independent throw site — both must resolve.
+    it('carries the declared recovery hint on the HTTP 404 rewrap path (issue #25)', async () => {
+      // Resolved from the real tool contract, not a copied string — so a contract
+      // reword can't silently drift away from what reaches the wire.
       vi.stubGlobal(
         'fetch',
         vi.fn().mockResolvedValue({
@@ -557,6 +589,7 @@ describe('SmithsonianService', () => {
           id: 'ld1-direct',
           title: 'Direct Response Object',
           unitCode: 'SAAM',
+          url: 'edanmdm:saam_DIRECT001',
           content: {
             descriptiveNonRepeating: {
               record_ID: 'saam_DIRECT001',
@@ -568,7 +601,7 @@ describe('SmithsonianService', () => {
       mockFetch(contentShape);
       const svc = makeService();
       const ctx = makeTenantContext();
-      const { record: raw } = await svc.getContent('saam_DIRECT001', ctx);
+      const { record: raw } = await svc.getContent('saam_DIRECT001', ctx, startCallDeadline());
       // Asserts the envelope was unwrapped at `response`, not `response.rows[0]`
       expect(raw.title).toBe('Direct Response Object');
       expect(raw.content?.descriptiveNonRepeating?.record_ID).toBe('saam_DIRECT001');
@@ -1057,7 +1090,11 @@ describe('SmithsonianService', () => {
       });
       const svc = makeService();
       const ctx = makeTenantContext();
-      const result = await svc.listTerms({ field: 'unit_code', start: 2, rows: 3 }, ctx);
+      const result = await svc.listTerms(
+        { field: 'unit_code', start: 2, rows: 3 },
+        ctx,
+        startCallDeadline(),
+      );
       // total is the full vocabulary size; terms is only the requested page
       expect(result.total).toBe(8);
       expect(result.terms).toEqual(['ACAH', 'ACM', 'CHNDM']);
@@ -1073,7 +1110,7 @@ describe('SmithsonianService', () => {
       vi.stubGlobal('fetch', fetchMock);
       const svc = makeService();
       const ctx = makeTenantContext();
-      await svc.listTerms({ field: 'unit_code', start: 5, rows: 10 }, ctx);
+      await svc.listTerms({ field: 'unit_code', start: 5, rows: 10 }, ctx, startCallDeadline());
       const calledUrl = (fetchMock.mock.calls[0] as [string])[0];
       // Upstream ignores rows/start; the URL must not carry them (avoids implying
       // server-side pagination that does not exist).
@@ -1086,19 +1123,28 @@ describe('SmithsonianService', () => {
       mockFetch({ status: 200, responseCode: 1, response: { terms: ['AAA', 'AAG'] } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      const result = await svc.listTerms({ field: 'unit_code', start: 50, rows: 10 }, ctx);
+      const result = await svc.listTerms(
+        { field: 'unit_code', start: 50, rows: 10 },
+        ctx,
+        startCallDeadline(),
+      );
       expect(result.total).toBe(2);
       expect(result.terms).toEqual([]);
     });
 
-    it('handles an absent terms array without throwing', async () => {
-      // e.g. an unsupported field returning { response: { message } } and no terms.
+    it('fails a 200 without a terms array as an upstream fault, not an empty vocabulary (issue #72)', async () => {
+      // EDAN answers an unknown field with HTTP 400, so a 200 carrying only a message is
+      // malformed — read as zero terms it would claim the field has no vocabulary.
       mockFetch({ status: 200, responseCode: 1, response: { message: 'no terms' } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      const result = await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
-      expect(result.total).toBe(0);
-      expect(result.terms).toEqual([]);
+      const err = await outcomeOf(() =>
+        svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline()),
+      );
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'upstream_unavailable' },
+      });
     });
 
     it('filters the vocabulary by a case-insensitive contains substring (issue #21)', async () => {
@@ -1118,6 +1164,7 @@ describe('SmithsonianService', () => {
       const result = await svc.listTerms(
         { field: 'culture', start: 0, rows: 50, contains: 'greek' },
         ctx,
+        startCallDeadline(),
       );
       // total is the post-filter match count, not the full vocabulary size.
       expect(result.total).toBe(3);
@@ -1132,6 +1179,7 @@ describe('SmithsonianService', () => {
       const result = await svc.listTerms(
         { field: 'culture', start: 1, rows: 2, contains: 'greek' },
         ctx,
+        startCallDeadline(),
       );
       // 4 terms match "greek"; start/rows slice the FILTERED set, not the raw vocab.
       expect(result.total).toBe(4);
@@ -1146,6 +1194,7 @@ describe('SmithsonianService', () => {
       const result = await svc.listTerms(
         { field: 'culture', start: 0, rows: 50, contains: 'greek' },
         ctx,
+        startCallDeadline(),
       );
       // An empty result confirms absence — no term in the vocabulary contains "greek".
       expect(result.total).toBe(0);
@@ -1157,7 +1206,11 @@ describe('SmithsonianService', () => {
       mockFetch({ status: 200, responseCode: 1, response: { terms: fullVocab } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      const result = await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      const result = await svc.listTerms(
+        { field: 'unit_code', start: 0, rows: 50 },
+        ctx,
+        startCallDeadline(),
+      );
       expect(result.total).toBe(4);
       expect(result.terms).toEqual(fullVocab);
     });
@@ -1172,6 +1225,7 @@ describe('SmithsonianService', () => {
       const result = await makeService().listTerms(
         { field: 'unit_code', start: 0, rows: 50 },
         makeTenantContext(),
+        startCallDeadline(),
       );
       expect(result.labels?.AAA).toBe('Archives of American Art');
       expect(result.labels?.NASM).toBe('National Air and Space Museum');
@@ -1185,6 +1239,7 @@ describe('SmithsonianService', () => {
       const result = await makeService().listTerms(
         { field: 'unit_code', start: 0, rows: 50 },
         makeTenantContext(),
+        startCallDeadline(),
       );
       expect(result.terms).toContain('FSA');
       expect(result.terms).toContain('NASMAC');
@@ -1197,6 +1252,7 @@ describe('SmithsonianService', () => {
       const result = await makeService().listTerms(
         { field: 'unit_code', start: 4, rows: 1 },
         makeTenantContext(),
+        startCallDeadline(),
       );
       expect(result.terms).toEqual(['NASM']);
       expect(Object.keys(result.labels ?? {})).toEqual(['NASM']);
@@ -1209,6 +1265,7 @@ describe('SmithsonianService', () => {
       const result = await makeService().listTerms(
         { field: 'unit_code', start: 0, rows: 50, contains: 'National Air and Space' },
         makeTenantContext(),
+        startCallDeadline(),
       );
       expect(result.terms).toEqual(['NASM']);
       expect(result.total).toBe(1);
@@ -1223,12 +1280,14 @@ describe('SmithsonianService', () => {
       const byName = await svc.listTerms(
         { field: 'unit_code', start: 0, rows: 50, contains: 'cooper hewitt' },
         ctx,
+        startCallDeadline(),
       );
       expect(byName.terms).toEqual(['CHNDM', 'CHSDM']);
       // A code substring that appears in no name still matches the code itself.
       const byCode = await svc.listTerms(
         { field: 'unit_code', start: 0, rows: 50, contains: 'NASM' },
         ctx,
+        startCallDeadline(),
       );
       expect(byCode.terms).toEqual(['NASM', 'NASMAC']);
     });
@@ -1244,6 +1303,7 @@ describe('SmithsonianService', () => {
       const result = await makeService().listTerms(
         { field: 'culture', start: 0, rows: 50, contains: 'museum' },
         makeTenantContext(),
+        startCallDeadline(),
       );
       expect(result.labels).toBeUndefined();
       expect(result.terms).toEqual([]);
@@ -1259,8 +1319,12 @@ describe('SmithsonianService', () => {
       mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      expect((await svc.describeTerm('unit_code', 'AAA', ctx)).indexed).toBe(true);
-      expect((await svc.describeTerm('unit_code', 'AA', ctx)).indexed).toBe(false);
+      expect((await svc.describeTerm('unit_code', 'AAA', ctx, startCallDeadline())).indexed).toBe(
+        true,
+      );
+      expect((await svc.describeTerm('unit_code', 'AA', ctx, startCallDeadline())).indexed).toBe(
+        false,
+      );
     });
 
     it('matches case-sensitively, as EDAN itself resolves a term', async () => {
@@ -1269,8 +1333,12 @@ describe('SmithsonianService', () => {
       mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
       const svc = makeService();
       const ctx = makeTenantContext();
-      expect((await svc.describeTerm('unit_code', 'NMAfA', ctx)).indexed).toBe(true);
-      expect((await svc.describeTerm('unit_code', 'NMAFA', ctx)).indexed).toBe(false);
+      expect((await svc.describeTerm('unit_code', 'NMAfA', ctx, startCallDeadline())).indexed).toBe(
+        true,
+      );
+      expect((await svc.describeTerm('unit_code', 'NMAFA', ctx, startCallDeadline())).indexed).toBe(
+        false,
+      );
     });
 
     it('reports no neighbors for a value outside the vocabulary', async () => {
@@ -1278,7 +1346,12 @@ describe('SmithsonianService', () => {
       // as the substring — so there is nothing to prove and nothing to return.
       mockFetch({ status: 200, responseCode: 1, response: { terms: VOCAB } });
       expect(
-        await makeService().describeTerm('unit_code', 'NOTACODE', makeTenantContext()),
+        await makeService().describeTerm(
+          'unit_code',
+          'NOTACODE',
+          makeTenantContext(),
+          startCallDeadline(),
+        ),
       ).toEqual({ indexed: false });
     });
 
@@ -1291,7 +1364,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: ['Guiana', 'Guiana, French', 'French Guiana', 'Aztecs'] },
         });
-        expect(await makeService().describeTerm('culture', 'Guiana', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'culture',
+            'Guiana',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Guiana', count: 2 },
         });
@@ -1306,7 +1386,12 @@ describe('SmithsonianService', () => {
           response: { terms: ['Quilts--History', 'Quilts', 'Quilting', 'Aviation'] },
         });
         expect(
-          await makeService().describeTerm('topic', 'Quilts--History', makeTenantContext()),
+          await makeService().describeTerm(
+            'topic',
+            'Quilts--History',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
         ).toEqual({ indexed: true, neighbors: { contains: 'Quilts', count: 1 } });
       });
 
@@ -1317,7 +1402,14 @@ describe('SmithsonianService', () => {
         'stops where the head shared with a %s qualifier ends',
         async (_sep, value, terms, contains) => {
           mockFetch({ status: 200, responseCode: 1, response: { terms } });
-          expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
+          expect(
+            await makeService().describeTerm(
+              'topic',
+              value,
+              makeTenantContext(),
+              startCallDeadline(),
+            ),
+          ).toEqual({
             indexed: true,
             neighbors: { contains, count: 1 },
           });
@@ -1346,7 +1438,14 @@ describe('SmithsonianService', () => {
             ],
           },
         });
-        expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'topic',
+            value,
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Bell UH-1', count: 2 },
         });
@@ -1360,7 +1459,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: ['Guiana', 'Guianese', 'French Guianese'] },
         });
-        expect(await makeService().describeTerm('culture', 'Guiana', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'culture',
+            'Guiana',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Guian', count: 2 },
         });
@@ -1376,7 +1482,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: [value, 'Indians of North American', 'Check cashing services'] },
         });
-        expect(await makeService().describeTerm('topic', value, makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'topic',
+            value,
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'of North American', count: 1 },
         });
@@ -1390,7 +1503,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: ['"Yank"', 'Yankee', 'American Yankee (Airplane)'] },
         });
-        expect(await makeService().describeTerm('topic', '"Yank"', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'topic',
+            '"Yank"',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Yank', count: 2 },
         });
@@ -1414,7 +1534,14 @@ describe('SmithsonianService', () => {
             ],
           },
         });
-        expect(await makeService().describeTerm('culture', value, makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'culture',
+            value,
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Yombe', count: 1 },
         });
@@ -1435,7 +1562,14 @@ describe('SmithsonianService', () => {
             terms: [value, 'New York. Harbor', 'New York (N.Y.)', 'New York City', 'New Yorkers'],
           },
         });
-        expect(await makeService().describeTerm('place', value, makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'place',
+            value,
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'New York.', count: 1 },
         });
@@ -1453,7 +1587,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: [value, 'Osia\u0304bad (India)', 'Osiander', 'Osiadly'] },
         });
-        expect(await makeService().describeTerm('place', value, makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'place',
+            value,
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Osia\u0304', count: 1 },
         });
@@ -1470,7 +1611,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: [value, 'Yombe (Congo)', 'Yombe language', 'Yombean'] },
         });
-        expect(await makeService().describeTerm('culture', value, makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'culture',
+            value,
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Yombe', count: 3 },
         });
@@ -1492,7 +1640,9 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: [beyondCap, 'Wwtarget alternative'] },
         });
-        expect(await makeService().describeTerm('topic', beyondCap, ctx)).toEqual({
+        expect(
+          await makeService().describeTerm('topic', beyondCap, ctx, startCallDeadline()),
+        ).toEqual({
           indexed: true,
         });
 
@@ -1501,7 +1651,9 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: [withinCap, 'Wwtarget alternative'] },
         });
-        expect(await makeService().describeTerm('topic', withinCap, ctx)).toEqual({
+        expect(
+          await makeService().describeTerm('topic', withinCap, ctx, startCallDeadline()),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Wwtarget', count: 1 },
         });
@@ -1515,7 +1667,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: ['Zymurgy', 'Quilts', 'Aviation'] },
         });
-        expect(await makeService().describeTerm('topic', 'Zymurgy', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'topic',
+            'Zymurgy',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
         });
       });
@@ -1539,7 +1698,14 @@ describe('SmithsonianService', () => {
         // is honest, but as a next move it is worse than no clause at all, so the
         // hint falls through to the branch that offers no term route.
         mockFetch({ status: 200, responseCode: 1, response: { terms: mzabVocabulary(801) } });
-        expect(await makeService().describeTerm('culture', 'Mzab', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'culture',
+            'Mzab',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
         });
       });
@@ -1548,7 +1714,14 @@ describe('SmithsonianService', () => {
         // One term fewer than the case above, and the clause survives — the ceiling
         // is 800 inclusive, and this pins it against a silent loosening.
         mockFetch({ status: 200, responseCode: 1, response: { terms: mzabVocabulary(800) } });
-        expect(await makeService().describeTerm('culture', 'Mzab', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'culture',
+            'Mzab',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'M', count: 800 },
         });
@@ -1565,7 +1738,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: mzabVocabulary(900, 19_099) },
         });
-        expect(await makeService().describeTerm('place', 'Mzab', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'place',
+            'Mzab',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
         });
       });
@@ -1578,7 +1758,14 @@ describe('SmithsonianService', () => {
           responseCode: 1,
           response: { terms: ['Quilts', "quilts of Gee's Bend", 'Hopi quilts', 'Aviation'] },
         });
-        expect(await makeService().describeTerm('topic', 'Quilts', makeTenantContext())).toEqual({
+        expect(
+          await makeService().describeTerm(
+            'topic',
+            'Quilts',
+            makeTenantContext(),
+            startCallDeadline(),
+          ),
+        ).toEqual({
           indexed: true,
           neighbors: { contains: 'Quilts', count: 2 },
         });
@@ -1608,8 +1795,16 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = makeTenantContext();
 
-      const first = await svc.listTerms({ field: 'unit_code', start: 0, rows: 2 }, ctx);
-      const second = await svc.listTerms({ field: 'unit_code', start: 1, rows: 2 }, ctx);
+      const first = await svc.listTerms(
+        { field: 'unit_code', start: 0, rows: 2 },
+        ctx,
+        startCallDeadline(),
+      );
+      const second = await svc.listTerms(
+        { field: 'unit_code', start: 1, rows: 2 },
+        ctx,
+        startCallDeadline(),
+      );
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(first.terms).toEqual(['AAA', 'AAG']);
@@ -1622,9 +1817,9 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = makeTenantContext();
 
-      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
-      await svc.listTerms({ field: 'culture', start: 0, rows: 50 }, ctx);
-      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
+      await svc.listTerms({ field: 'culture', start: 0, rows: 50 }, ctx, startCallDeadline());
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
       const fetchedUrls = fetchMock.mock.calls.map((call) => (call as [string])[0]);
@@ -1640,14 +1835,16 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = makeTenantContext();
 
-      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
       // 'AAA' resolves through a cut inside the code — 'AAG' shares its first two
       // characters — which is a scan of the cached array, not a second download.
-      expect(await svc.describeTerm('unit_code', 'AAA', ctx)).toEqual({
+      expect(await svc.describeTerm('unit_code', 'AAA', ctx, startCallDeadline())).toEqual({
         indexed: true,
         neighbors: { contains: 'AA', count: 1 },
       });
-      expect(await svc.describeTerm('unit_code', 'NOTACODE', ctx)).toEqual({ indexed: false });
+      expect(await svc.describeTerm('unit_code', 'NOTACODE', ctx, startCallDeadline())).toEqual({
+        indexed: false,
+      });
 
       expect(fetchMock).toHaveBeenCalledTimes(1);
     });
@@ -1659,10 +1856,12 @@ describe('SmithsonianService', () => {
       await svc.listTerms(
         { field: 'unit_code', start: 0, rows: 50 },
         createMockContext({ tenantId: 'tenant-a' }),
+        startCallDeadline(),
       );
       await svc.listTerms(
         { field: 'unit_code', start: 0, rows: 50 },
         createMockContext({ tenantId: 'tenant-b' }),
+        startCallDeadline(),
       );
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -1675,14 +1874,14 @@ describe('SmithsonianService', () => {
 
       vi.useFakeTimers();
       try {
-        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
         // Inside the default 3600 s TTL the entry is still served from storage.
         vi.setSystemTime(Date.now() + 3_599_000);
-        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
         expect(fetchMock).toHaveBeenCalledTimes(1);
 
         vi.setSystemTime(Date.now() + 2_000);
-        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+        await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
         expect(fetchMock).toHaveBeenCalledTimes(2);
       } finally {
         vi.useRealTimers();
@@ -1701,8 +1900,8 @@ describe('SmithsonianService', () => {
       const svc = new FreshService(createInMemoryStorage());
       const ctx = makeTenantContext();
 
-      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
-      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx);
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
+      await svc.listTerms({ field: 'unit_code', start: 0, rows: 50 }, ctx, startCallDeadline());
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
@@ -1743,7 +1942,11 @@ describe('SmithsonianService', () => {
         response: { rows: [makeMarkupRecord()], rowCount: 1 },
       });
       const svc = makeService();
-      const result = await svc.search({ query: 'sun', rows: 10, start: 0 }, makeTenantContext());
+      const result = await svc.search(
+        { query: 'sun', rows: 10, start: 0 },
+        makeTenantContext(),
+        startCallDeadline(),
+      );
 
       expect(result.rows[0]?.title).toBe("A nonpotential model for the Sun's open magnetic flux");
       expect(result.rows[0]?.title).not.toContain('&#39;');
@@ -1807,7 +2010,7 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = makeTenantContext();
       const err = (await runWithFakeTimers(() =>
-        svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx),
+        svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx, startCallDeadline()),
       )) as { code: number; message: string; data?: Record<string, unknown> };
 
       // /search exists whenever the service is up, so a 404 there is an outage —
@@ -1825,7 +2028,7 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = makeTenantContext();
       const err = (await runWithFakeTimers(() =>
-        svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx),
+        svc.search({ query: 'aircraft', rows: 10, start: 0 }, ctx, startCallDeadline()),
       )) as { data?: Record<string, unknown> };
 
       // ServiceUnavailable is in withRetry's transient set: 1 initial attempt +
@@ -1840,7 +2043,7 @@ describe('SmithsonianService', () => {
       const svc = makeService();
       const ctx = makeTenantContext();
       const err = (await runWithFakeTimers(() =>
-        svc.listTerms({ field: 'culture', start: 0, rows: 50 }, ctx),
+        svc.listTerms({ field: 'culture', start: 0, rows: 50 }, ctx, startCallDeadline()),
       )) as { code: number; data?: Record<string, unknown> };
 
       expect(err.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
@@ -1852,7 +2055,9 @@ describe('SmithsonianService', () => {
       mockRouterFetch();
       const svc = makeService();
       const ctx = makeTenantContext();
-      const err = (await runWithFakeTimers(() => svc.describeTerm('culture', 'Aztecs', ctx))) as {
+      const err = (await runWithFakeTimers(() =>
+        svc.describeTerm('culture', 'Aztecs', ctx, startCallDeadline()),
+      )) as {
         code: number;
       };
 
@@ -1863,13 +2068,106 @@ describe('SmithsonianService', () => {
       const fetchMock = mockRouterFetch();
       const svc = makeService();
       const ctx = makeTenantContext();
-      const err = await svc.getContent('nasm_MISSING', ctx).catch((e) => e);
+      const err = await svc.getContent('nasm_MISSING', ctx, startCallDeadline()).catch((e) => e);
 
       // /content/{id} addresses one record, so its 404 is a genuine miss the
       // caller can act on. NotFound is non-transient — a single attempt.
       expect(err.code).toBe(JsonRpcErrorCode.NotFound);
       expect(err.data?.reason).toBe('not_found');
       expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('HTTP 403 from the api.data.gov edge', () => {
+    /** The error envelope a tool call returns, as a structuredContent client reads it. */
+    type ErrorEnvelope = { code: number; message: string; data: Record<string, unknown> };
+
+    /** Stub every request with one HTTP 403 response, fresh per call. */
+    function mock403(body: string, contentType: string) {
+      const fetchMock = vi.fn().mockImplementation(
+        async () =>
+          new Response(body, {
+            status: 403,
+            statusText: 'Forbidden',
+            headers: { 'Content-Type': contentType },
+          }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    /**
+     * The edge's answer to a request whose key it refuses, in the shape it sends live: HTTP 403
+     * with a JSON body naming an `API_KEY_*` code. The captured body stays on the server, so
+     * that code reaches the caller only through what the service makes of it.
+     */
+    function mockKeyRejection(code: string) {
+      return mock403(
+        JSON.stringify({
+          error: { code, message: 'An invalid api_key was supplied. Get one at https://example' },
+        }),
+        'application/json',
+      );
+    }
+
+    async function getObjectError(): Promise<{ envelope: ErrorEnvelope; text: string }> {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_TEST001' });
+      expect(result.isError).toBe(true);
+      return {
+        envelope: (result.structuredContent as { error: ErrorEnvelope }).error,
+        text: result.content.map((block) => ('text' in block ? block.text : '')).join('\n'),
+      };
+    }
+
+    it('surfaces a 403 whose body names no key code as the status-mapped Forbidden, the body kept off the wire', async () => {
+      const fetchMock = mock403('<html><body>Request blocked by proxy</body></html>', 'text/html');
+
+      const { envelope, text } = await getObjectError();
+
+      expect(envelope.code).toBe(JsonRpcErrorCode.Forbidden);
+      expect(envelope.data.status).toBe(403);
+      expect(envelope.data.reason).toBeUndefined();
+      expect(envelope.data).not.toHaveProperty('body');
+      expect(envelope.data).not.toHaveProperty('responseBody');
+      expect(`${envelope.message}\n${text}`).not.toContain('Request blocked');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['API_KEY_INVALID', 'API_KEY_MISSING'])(
+      'names a %s rejection and the variable to fix, the body still kept off the wire',
+      async (code) => {
+        const fetchMock = mockKeyRejection(code);
+
+        const { envelope, text } = await getObjectError();
+
+        expect(envelope.code).toBe(JsonRpcErrorCode.Forbidden);
+        expect(envelope.message).toContain(code);
+        expect(envelope.data).toMatchObject({
+          status: 403,
+          reason: 'api_key_rejected',
+          errorCode: code,
+          recovery: { hint: expect.stringContaining('SMITHSONIAN_API_KEY') },
+        });
+        expect(envelope.data).not.toHaveProperty('body');
+        expect(envelope.data).not.toHaveProperty('responseBody');
+        expect(text).toContain('SMITHSONIAN_API_KEY');
+        expect(`${envelope.message}\n${text}`).not.toContain('example');
+        // A rejected key fails every attempt alike, so the call is not retried.
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('names a key rejection on a collection endpoint too (search)', async () => {
+      mockKeyRejection('API_KEY_INVALID');
+      const err = await makeService()
+        .search({ query: 'aircraft', rows: 10, start: 0 }, makeTenantContext(), startCallDeadline())
+        .catch((e: unknown) => e);
+
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.Forbidden,
+        data: { reason: 'api_key_rejected', errorCode: 'API_KEY_INVALID' },
+      });
     });
   });
 });
@@ -1971,7 +2269,9 @@ describe('response cache wiring (issue #65)', () => {
 
   /** One call to `endpoint` — the same request URL every time. */
   function callOn(svc: SmithsonianService, endpoint: Endpoint, ctx = makeTenantContext()) {
-    return endpoint === 'search' ? svc.search(SEARCH, ctx) : svc.getContent(RECORD, ctx);
+    return endpoint === 'search'
+      ? svc.search(SEARCH, ctx, startCallDeadline())
+      : svc.getContent(RECORD, ctx, startCallDeadline());
   }
 
   /** The 200 each endpoint answers on success. */
@@ -1996,15 +2296,6 @@ describe('response cache wiring (issue #65)', () => {
   });
 
   describe('behavior the cache keeps', () => {
-    it('search() reads a 200 without a response body as an empty page', async () => {
-      stubUpstream({ search: () => upstream({ status: 200, responseCode: 1 }) });
-
-      await expect(makeService().search(SEARCH, makeTenantContext())).resolves.toEqual({
-        rows: [],
-        rowCount: 0,
-      });
-    });
-
     it.each(['search', 'content'] as const)(
       'a caller cancelled mid-request rejects with RequestCancelled (%s)',
       async (endpoint) => {
@@ -2029,8 +2320,8 @@ describe('response cache wiring (issue #65)', () => {
     const up = stubUpstream({ search: () => success('search') });
     const svc = makeService();
 
-    const first = await svc.search(SEARCH, makeTenantContext());
-    const second = await svc.search(SEARCH, makeTenantContext());
+    const first = await svc.search(SEARCH, makeTenantContext(), startCallDeadline());
+    const second = await svc.search(SEARCH, makeTenantContext(), startCallDeadline());
 
     expect(up.count('search')).toBe(1);
     expect(second).toEqual(first);
@@ -2042,8 +2333,12 @@ describe('response cache wiring (issue #65)', () => {
     const up = stubUpstream({ content: () => success('content') });
     const svc = makeService();
 
-    const bare = await svc.getContent(RECORD, makeTenantContext());
-    const prefixed = await svc.getContent(`edanmdm:${RECORD}`, makeTenantContext());
+    const bare = await svc.getContent(RECORD, makeTenantContext(), startCallDeadline());
+    const prefixed = await svc.getContent(
+      `edanmdm:${RECORD}`,
+      makeTenantContext(),
+      startCallDeadline(),
+    );
 
     expect(up.count('content')).toBe(1);
     expect(prefixed).toEqual(bare);
@@ -2054,8 +2349,8 @@ describe('response cache wiring (issue #65)', () => {
     const up = stubUpstream({ search: () => success('search') });
     const svc = makeService();
 
-    await svc.search(SEARCH, makeTenantContext());
-    await svc.search({ ...SEARCH, start: 10 }, makeTenantContext());
+    await svc.search(SEARCH, makeTenantContext(), startCallDeadline());
+    await svc.search({ ...SEARCH, start: 10 }, makeTenantContext(), startCallDeadline());
 
     expect(up.count('search')).toBe(2);
     expect(new URL(up.fetchMock.mock.calls[1]![0]).searchParams.get('start')).toBe('10');
@@ -2093,7 +2388,7 @@ describe('response cache wiring (issue #65)', () => {
       'a 200 without a record',
       'content',
       () => upstream({ status: 200, responseCode: 1, response: null }),
-      JsonRpcErrorCode.NotFound,
+      JsonRpcErrorCode.ServiceUnavailable,
     ],
     ['a timeout', 'search', hung, JsonRpcErrorCode.Timeout],
     ['a timeout', 'content', hung, JsonRpcErrorCode.Timeout],
@@ -2117,17 +2412,20 @@ describe('response cache wiring (issue #65)', () => {
     },
   );
 
-  it('returns a 200 without a search response body unstored — the next call fetches', async () => {
+  it('fails a 200 without a search response body unstored — the next call fetches (issue #72)', async () => {
     let body: unknown = { status: 200, responseCode: 1 };
     const up = stubUpstream({ search: () => upstream(body) });
     const svc = makeService();
 
-    expect(await svc.search(SEARCH, makeTenantContext())).toEqual({ rows: [], rowCount: 0 });
+    expect(
+      await codeOf(outcomeOf(() => svc.search(SEARCH, makeTenantContext(), startCallDeadline()))),
+    ).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    const failedRequests = up.count('search');
     body = makeSearchResponse();
-    await svc.search(SEARCH, makeTenantContext());
-    const third = await svc.search(SEARCH, makeTenantContext());
+    await svc.search(SEARCH, makeTenantContext(), startCallDeadline());
+    const third = await svc.search(SEARCH, makeTenantContext(), startCallDeadline());
 
-    expect(up.count('search')).toBe(2);
+    expect(up.count('search')).toBe(failedRequests + 1);
     expect(third.rowCount).toBe(42);
   });
 
@@ -2410,6 +2708,272 @@ describe('response cache wiring (issue #65)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A 200 without the expected payload (issue #72)
+// ---------------------------------------------------------------------------
+
+describe('a 200 without the expected payload (issue #72)', () => {
+  type Read = 'search' | 'content' | 'terms';
+  const SEARCH = { query: 'aircraft', rows: 10, start: 0 };
+  const RECORD = 'nasm_TEST001';
+
+  /** The read a request addresses: `…/search`, `…/content/{id}`, or `…/terms/{field}`. */
+  function readOf(input: string): Read | undefined {
+    const segments = new URL(input).pathname.split('/');
+    if (segments.at(-1) === 'search') return 'search';
+    if (segments.at(-2) === 'content') return 'content';
+    if (segments.at(-2) === 'terms') return 'terms';
+    return undefined;
+  }
+
+  /**
+   * Answer each read with a fresh 200 carrying `bodies[read]()`, or with that answer as it is
+   * when the function returns a whole `upstream(…)` response. A request to any other path rejects.
+   */
+  function stubReads(bodies: Partial<Record<Read, () => unknown>>) {
+    const fetchMock = vi.fn(async (input: string) => {
+      const read = readOf(input);
+      const body = read ? bodies[read] : undefined;
+      if (!body) throw new Error('unmocked fetch');
+      const answer = body();
+      return typeof (answer as { json?: unknown } | null)?.json === 'function'
+        ? (answer as Upstream)
+        : upstream(answer);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return {
+      count: (read: Read) =>
+        fetchMock.mock.calls.filter(([input]) => readOf(input) === read).length,
+    };
+  }
+
+  /** One call through `read`, on the same request URL every time. */
+  function callOn(svc: SmithsonianService, read: Read, ctx = makeTenantContext()) {
+    switch (read) {
+      case 'search':
+        return svc.search(SEARCH, ctx, startCallDeadline());
+      case 'content':
+        return svc.getContent(RECORD, ctx, startCallDeadline());
+      case 'terms':
+        return svc.listTerms({ field: 'culture', start: 0, rows: 50 }, ctx, startCallDeadline());
+    }
+  }
+
+  /** The 200 each read answers on success. */
+  const VALID: Record<Read, unknown> = {
+    search: makeSearchResponse(),
+    content: makeContentResponse(RECORD),
+    terms: { status: 200, responseCode: 1, response: { terms: ['Aztecs', 'Maya'] } },
+  };
+
+  beforeEach(() => {
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['search', 'no response', { status: 200, responseCode: 1 }],
+    ['search', 'an empty response', { status: 200, responseCode: 1, response: {} }],
+    ['search', 'rows without a rowCount', { status: 200, response: { rows: [] } }],
+    ['search', 'a rowCount without rows', { status: 200, response: { rowCount: 0 } }],
+    ['search', 'a string rowCount', { status: 200, response: { rows: [], rowCount: '0' } }],
+    ['content', 'no response', { status: 200, responseCode: 1 }],
+    ['content', 'a null record', { status: 200, responseCode: 1, response: null }],
+    ['content', 'an empty record', { status: 200, responseCode: 1, response: {} }],
+    ['content', 'a record without a string url', { status: 200, response: { id: 'x', url: 7 } }],
+    ['terms', 'an empty response', { status: 200, responseCode: 1, response: {} }],
+    ['terms', 'terms that are not an array', { status: 200, response: { terms: 'Aztecs' } }],
+  ] as const)(
+    '%s: %s fails ServiceUnavailable after four attempts, stores nothing, and the next call fetches',
+    async (read, _label, malformed) => {
+      let body: unknown = malformed;
+      const up = stubReads({ [read]: () => body });
+      const svc = makeService();
+
+      expect(await outcomeOf(() => callOn(svc, read))).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'upstream_unavailable', retryAttempts: 4 },
+      });
+      expect(up.count(read)).toBe(4);
+
+      body = VALID[read];
+      await callOn(svc, read);
+      await callOn(svc, read);
+      expect(up.count(read)).toBe(5);
+    },
+  );
+
+  it.each(['search', 'content', 'terms'] as const)(
+    '%s: a one-off malformed reply is retried within the call, and the answer it gets is stored',
+    async (read) => {
+      let replies = 0;
+      const up = stubReads({
+        [read]: () =>
+          replies++ === 0 ? { status: 200, responseCode: 1, response: {} } : VALID[read],
+      });
+      const svc = makeService();
+
+      const answer = await outcomeOf(() => callOn(svc, read));
+      expect(answer).toMatchObject(
+        read === 'search'
+          ? { rowCount: 42 }
+          : read === 'content'
+            ? { record: { title: 'Test Object' } }
+            : { terms: ['Aztecs', 'Maya'], total: 2 },
+      );
+      expect(up.count(read)).toBe(2);
+
+      await callOn(svc, read);
+      expect(up.count(read)).toBe(2);
+    },
+  );
+
+  it('terms: an empty array is a real vocabulary, stored like any other', async () => {
+    const up = stubReads({
+      terms: () => ({ status: 200, responseCode: 1, response: { terms: [] } }),
+    });
+    const svc = makeService();
+
+    expect(await callOn(svc, 'terms')).toEqual({ terms: [], total: 0 });
+    await callOn(svc, 'terms');
+    expect(up.count('terms')).toBe(1);
+  });
+
+  it('search: a real zero-match page is an answer, stored like any other', async () => {
+    const up = stubReads({
+      search: () => ({ status: 200, responseCode: 1, response: { rows: [], rowCount: 0 } }),
+    });
+    const svc = makeService();
+
+    expect(await callOn(svc, 'search')).toEqual({ rows: [], rowCount: 0 });
+    await callOn(svc, 'search');
+    expect(up.count('search')).toBe(1);
+  });
+
+  it('terms with SMITHSONIAN_TERMS_CACHE_TTL_SECONDS=0: a malformed reply fails the same way', async () => {
+    vi.stubEnv('SMITHSONIAN_TERMS_CACHE_TTL_SECONDS', '0');
+    vi.resetModules();
+    const { SmithsonianService: FreshService } = await import(
+      '@/services/smithsonian/smithsonian-service.js'
+    );
+    const up = stubReads({ terms: () => ({ status: 200, responseCode: 1, response: {} }) });
+    const svc = new FreshService(createInMemoryStorage());
+
+    expect(
+      await outcomeOf(() =>
+        svc.listTerms(
+          { field: 'culture', start: 0, rows: 50 },
+          makeTenantContext(),
+          startCallDeadline(),
+        ),
+      ),
+    ).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: { reason: 'upstream_unavailable' },
+    });
+    expect(up.count('terms')).toBe(4);
+  });
+
+  it.each(['search', 'content', 'terms'] as const)(
+    '%s: an error-in-200 body keeps its own classification ahead of the payload check',
+    async (read) => {
+      // The key body carries no response at all, so a check run first would relabel it a
+      // retryable outage; it stays the non-retryable configuration failure.
+      const up = stubReads({
+        [read]: () => ({ error: { code: 'API_KEY_MISSING', message: 'No api_key was supplied.' } }),
+      });
+
+      expect(await outcomeOf(() => callOn(makeService(), read))).toMatchObject({
+        code: JsonRpcErrorCode.InternalError,
+        data: { errorCode: 'API_KEY_MISSING' },
+      });
+      expect(up.count(read)).toBe(1);
+    },
+  );
+
+  describe('through the tools', () => {
+    beforeEach(() => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+    });
+
+    it.each([
+      [
+        'search_objects',
+        'search',
+        () => runToolContract(smithsonianSearchObjects, { query: 'aircraft' }),
+      ],
+      ['get_object', 'content', () => runToolContract(smithsonianGetObject, { id: RECORD })],
+    ] as const)(
+      '%s fails ServiceUnavailable on a malformed 200, and the next call fetches again',
+      async (_tool, read, call) => {
+        let body: unknown = { status: 200, responseCode: 1, response: {} };
+        const up = stubReads({ [read]: () => body });
+
+        const failed = (await outcomeOf(call)) as Awaited<ReturnType<typeof call>>;
+        expect(failed.isError).toBe(true);
+        expect(failed.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.ServiceUnavailable,
+            data: { reason: 'upstream_unavailable' },
+          },
+        });
+
+        body = VALID[read];
+        const recovered = await call();
+        expect(recovered.isError).not.toBe(true);
+        expect(up.count(read)).toBe(5);
+      },
+    );
+
+    it('search_objects still fails no_results on a real zero-match page', async () => {
+      stubReads({
+        search: () => ({ status: 200, responseCode: 1, response: { rows: [], rowCount: 0 } }),
+      });
+
+      const result = await runToolContract(smithsonianSearchObjects, { query: 'zzqqxx' });
+      expect(result.structuredContent).toMatchObject({ error: { data: { reason: 'no_results' } } });
+    });
+
+    it.each([
+      ['malformed', () => ({ status: 200, responseCode: 1, response: {} })],
+      ['HTTP 503', () => upstream({ status: 503 }, 503)],
+    ])(
+      'search_objects keeps its resolve-it clause when the vocabulary read fails (%s)',
+      async (_label, terms) => {
+        stubReads({
+          search: () => ({ status: 200, responseCode: 1, response: { rows: [], rowCount: 0 } }),
+          terms,
+        });
+
+        const result = (await outcomeOf(() =>
+          runToolContract(smithsonianSearchObjects, {
+            query: 'basket',
+            filters: { culture: 'Aztecs' },
+          }),
+        )) as Awaited<ReturnType<typeof runToolContract>>;
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            data: {
+              reason: 'invalid_filter',
+              recovery: {
+                hint: expect.stringContaining(
+                  'culture filter "Aztecs" matched nothing — resolve it to an exact term with smithsonian_list_terms { field: "culture", contains: "Aztecs" }',
+                ),
+              },
+            },
+          },
+        });
+      },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Open Access mirror routing (issue #66)
 // ---------------------------------------------------------------------------
 
@@ -2451,8 +3015,12 @@ describe('Open Access mirror routing (issue #66)', () => {
   /** A read the mirror can answer: a record it holds, or a filter-only search. */
   function mirrorable(svc: SmithsonianService, read: Read) {
     return read === 'getContent'
-      ? svc.getContent(MIRRORED, makeTenantContext())
-      : svc.search({ query: '', rows: 10, start: 0, filters: ONLINE_CC0 }, makeTenantContext());
+      ? svc.getContent(MIRRORED, makeTenantContext(), startCallDeadline())
+      : svc.search(
+          { query: '', rows: 10, start: 0, filters: ONLINE_CC0 },
+          makeTenantContext(),
+          startCallDeadline(),
+        );
   }
 
   /** Both live routes, each answering the same success every time. */
@@ -2485,7 +3053,7 @@ describe('Open Access mirror routing (issue #66)', () => {
     async (id) => {
       const up = stubUpstream({});
 
-      const read = await withMirror(t).getContent(id, makeTenantContext());
+      const read = await withMirror(t).getContent(id, makeTenantContext(), startCallDeadline());
 
       expect(up.fetchMock).not.toHaveBeenCalled();
       expect(read.provenance).toStrictEqual(FROM_MIRROR);
@@ -2497,7 +3065,11 @@ describe('Open Access mirror routing (issue #66)', () => {
   it('getContent sends a record the mirror lacks to the live API, marked edan_api', async () => {
     const up = stubUpstream({ content: () => upstream(makeContentResponse(LIVE_ONLY)) });
 
-    const read = await withMirror(t).getContent(LIVE_ONLY, makeTenantContext());
+    const read = await withMirror(t).getContent(
+      LIVE_ONLY,
+      makeTenantContext(),
+      startCallDeadline(),
+    );
 
     expect(up.count('content')).toBe(1);
     expect(read.provenance).toStrictEqual(FROM_LIVE);
@@ -2510,7 +3082,7 @@ describe('Open Access mirror routing (issue #66)', () => {
     });
 
     await expect(
-      withMirror(t).getContent('nasm_MISSING', makeTenantContext()),
+      withMirror(t).getContent('nasm_MISSING', makeTenantContext(), startCallDeadline()),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound, data: { reason: 'not_found' } });
     expect(up.count('content')).toBe(1);
   });
@@ -2560,6 +3132,7 @@ describe('Open Access mirror routing (issue #66)', () => {
       const page = await withMirror(t).search(
         { query, rows: 2, start: 0, filters: ONLINE_CC0 },
         makeTenantContext(),
+        startCallDeadline(),
       );
 
       expect(up.fetchMock).not.toHaveBeenCalled();
@@ -2580,6 +3153,7 @@ describe('Open Access mirror routing (issue #66)', () => {
       const page = await withMirror(t).search(
         { query: '', rows: 10, start, filters },
         makeTenantContext(),
+        startCallDeadline(),
       );
 
       expect(up.fetchMock).not.toHaveBeenCalled();
@@ -2596,6 +3170,7 @@ describe('Open Access mirror routing (issue #66)', () => {
     const page = await withMirror(t).search(
       { query: 'missile', rows: 10, start: 0, filters: [{ field: 'unit_code', value: 'NASM' }] },
       makeTenantContext(),
+      startCallDeadline(),
     );
 
     expect(up.count('search')).toBe(1);
@@ -2610,8 +3185,8 @@ describe('Open Access mirror routing (issue #66)', () => {
     const up = stubUpstream({ content: () => upstream(makeContentResponse(LIVE_ONLY)) });
     const svc = withMirror(t);
 
-    const first = await svc.getContent(LIVE_ONLY, makeTenantContext());
-    const second = await svc.getContent(LIVE_ONLY, makeTenantContext());
+    const first = await svc.getContent(LIVE_ONLY, makeTenantContext(), startCallDeadline());
+    const second = await svc.getContent(LIVE_ONLY, makeTenantContext(), startCallDeadline());
 
     expect(up.count('content')).toBe(1);
     expect(second).toEqual(first);
@@ -2625,10 +3200,11 @@ describe('Open Access mirror routing (issue #66)', () => {
     });
     const svc = makeService();
 
-    const read = await svc.getContent(LIVE_ONLY, makeTenantContext());
+    const read = await svc.getContent(LIVE_ONLY, makeTenantContext(), startCallDeadline());
     const page = await svc.search(
       { query: '', rows: 10, start: 0, filters: ONLINE_CC0 },
       makeTenantContext(),
+      startCallDeadline(),
     );
 
     expect(up.count('content')).toBe(1);
@@ -2637,6 +3213,221 @@ describe('Open Access mirror routing (issue #66)', () => {
     expect('provenance' in page).toBe(false);
     expect(read.record.title).toBe('Test Object');
     expect(page.rowCount).toBe(42);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toFullObject indexed — the values the search filters match (issue #73)
+// ---------------------------------------------------------------------------
+
+describe('toFullObject indexed (issue #73)', () => {
+  const svc = new SmithsonianService(createInMemoryStorage());
+
+  it('returns the indexed name, place, object_type, date, and topic of nasm_A19700102000', () => {
+    // Its free-text block names "Neil A. Armstrong"; the name filter matches only the
+    // indexed "Armstrong, Neil A.".
+    const full = svc.toFullObject({
+      title: 'Command Module Columbia, Apollo 11',
+      unitCode: 'NASM',
+      content: {
+        descriptiveNonRepeating: { record_ID: 'nasm_A19700102000', unit_code: 'NASM' },
+        freetext: { name: [{ label: 'Astronaut', content: 'Neil A. Armstrong' }] },
+        indexedStructured: {
+          name: [
+            'Collins, Michael',
+            'Armstrong, Neil A.',
+            'Aldrin, Buzz',
+            'North American Rockwell',
+          ],
+          place: ['United States of America'],
+          object_type: ['Spacecraft'],
+          topic: ['Outer space', 'Spaceflight'],
+        },
+      },
+    });
+
+    expect(full.indexed).toStrictEqual({
+      name: ['Collins, Michael', 'Armstrong, Neil A.', 'Aldrin, Buzz', 'North American Rockwell'],
+      place: ['United States of America'],
+      object_type: ['Spacecraft'],
+      date: [],
+      topic: ['Outer space', 'Spaceflight'],
+    });
+    expect(full.makers).toEqual([{ role: 'Astronaut', name: 'Neil A. Armstrong' }]);
+  });
+
+  it('reads a wrapped name from its content and drops non-string and empty entries, keeping order', () => {
+    const full = svc.toFullObject({
+      content: {
+        indexedStructured: {
+          name: [
+            { type: 'author', content: 'Stewart, M. M.' } as never,
+            'Plain, Name',
+            { type: 'author' } as never,
+            { content: '' },
+            { content: 7 } as never,
+            null as never,
+            '',
+            { VIAF: '123', content: 'Biuso, L. F.' } as never,
+          ],
+          place: ['Loudoun', '', 4 as never, 'Virginia'],
+          object_type: [null as never, 'Quilts'],
+          date: ['1860s'],
+          topic: ['Quilts', { content: 'Textiles' } as never],
+        },
+      },
+    });
+
+    expect(full.indexed).toStrictEqual({
+      name: ['Stewart, M. M.', 'Plain, Name', 'Biuso, L. F.'],
+      place: ['Loudoun', 'Virginia'],
+      object_type: ['Quilts'],
+      date: ['1860s'],
+      topic: ['Quilts'],
+    });
+  });
+
+  it('returns five empty arrays for a record with no indexed block', () => {
+    const empty = { name: [], place: [], object_type: [], date: [], topic: [] };
+    expect(svc.toFullObject({}).indexed).toStrictEqual(empty);
+    expect(
+      svc.toFullObject({ content: { indexedStructured: { culture: ['Amish'] } } }).indexed,
+    ).toStrictEqual(empty);
+  });
+
+  it('leaves topics merging the indexed and free-text terms as before', () => {
+    const full = svc.toFullObject({
+      content: {
+        indexedStructured: { topic: ['Quilts'] },
+        freetext: { topic: [{ label: 'Topic', content: 'Quilts--History' }] },
+      },
+    });
+    expect(full.topics).toEqual(['Quilts', 'Quilts--History']);
+    expect(full.indexed.topic).toEqual(['Quilts']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toFullObject on_view and current_exhibitions — current display (issue #74)
+// ---------------------------------------------------------------------------
+
+describe('toFullObject on_view and current_exhibitions (issue #74)', () => {
+  const svc = new SmithsonianService(createInMemoryStorage());
+  const display = (indexedStructured: Record<string, unknown>) => {
+    const full = svc.toFullObject({ content: { indexedStructured } } as RawEDAN);
+    return {
+      on_view: full.on_view,
+      hasOnView: 'on_view' in full,
+      current_exhibitions: full.current_exhibitions,
+    };
+  };
+
+  it.each([
+    ['["Yes"]', ['Yes'], true],
+    ['["No"]', ['No'], false],
+    ['["No", "Yes"]', ['No', 'Yes'], true],
+  ])('reads onPhysicalExhibit %s as on_view %s', (_, flag, expected) => {
+    expect(display({ onPhysicalExhibit: flag })).toMatchObject({
+      on_view: expected,
+      hasOnView: true,
+    });
+  });
+
+  it.each([
+    ['absent', {}],
+    ['empty', { onPhysicalExhibit: [] }],
+    ['neither Yes nor No', { onPhysicalExhibit: ['yes', 'Maybe', ''] }],
+  ])('omits on_view when the flag is %s, which says nothing about display', (_, indexed) => {
+    expect(display(indexed)).toStrictEqual({
+      on_view: undefined,
+      hasOnView: false,
+      current_exhibitions: [],
+    });
+  });
+
+  it('names each venue of nasm_A19700102000 and npg_NPG.2020.41 as the catalog writes it', () => {
+    // Both shapes as /content returns them (2026-11-15).
+    expect(
+      display({ onPhysicalExhibit: ['Yes'], exhibition: [{ building: 'NASM' }] }),
+    ).toStrictEqual({
+      on_view: true,
+      hasOnView: true,
+      current_exhibitions: [{ building: 'NASM' }],
+    });
+    expect(
+      display({
+        onPhysicalExhibit: ['Yes'],
+        exhibition: [
+          {
+            room: 'East Gallery 142',
+            building: 'NPG',
+            exhibitionTitle: 'Out of Many: Portraits from 1600 to 1900',
+          },
+        ],
+      }).current_exhibitions,
+    ).toStrictEqual([
+      {
+        building: 'NPG',
+        room: 'East Gallery 142',
+        title: 'Out of Many: Portraits from 1600 to 1900',
+      },
+    ]);
+  });
+
+  it('keeps the string parts of each entry in order and drops an entry that names nothing', () => {
+    expect(
+      display({
+        exhibition: [
+          { exhibitionTitle: 'Entertainment Nation', building: 'NMAH', exhibitionId: 'x' },
+          { building: '', room: '', exhibitionTitle: '' },
+          { building: 7, room: null, exhibitionTitle: ['T'] },
+          {},
+          null,
+          'NASM',
+          { room: 'Gallery 1' },
+          { exhibitionTitle: 'Untitled' },
+        ],
+      }),
+    ).toStrictEqual({
+      on_view: undefined,
+      hasOnView: false,
+      current_exhibitions: [
+        { building: 'NMAH', title: 'Entertainment Nation' },
+        { room: 'Gallery 1' },
+        { title: 'Untitled' },
+      ],
+    });
+  });
+
+  it('leaves exhibitions to the free-text history, apart from the indexed venues', () => {
+    const full = svc.toFullObject({
+      content: {
+        freetext: { exhibitionHistory: [{ label: 'Hall 2', content: 'Milestones of Flight' }] },
+        indexedStructured: { onPhysicalExhibit: ['Yes'], exhibition: [{ building: 'NASM' }] },
+      },
+    });
+    expect(full.exhibitions).toEqual([{ name: 'Milestones of Flight', building: 'Hall 2' }]);
+    expect(full.current_exhibitions).toEqual([{ building: 'NASM' }]);
+    expect(
+      svc.toFullObject({
+        content: { indexedStructured: { exhibition: [{ building: 'NASM' }] } },
+      }).exhibitions,
+    ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// luceneFilter — the live API's term for each facet filter (issues #42, #74)
+// ---------------------------------------------------------------------------
+
+describe('luceneFilter', () => {
+  it.each([
+    [{ field: 'on_view' }, 'onPhysicalExhibit:"Yes"'],
+    [{ field: 'online_only' }, 'online_media_type:*'],
+    [{ field: 'cc0' }, 'media_usage:CC0'],
+    [{ field: 'unit_code', value: 'NASM' }, 'unit_code:"NASM"'],
+  ] as Array<[FacetFilter, string]>)('maps %j to %s', (filter, term) => {
+    expect(luceneFilter(filter)).toBe(term);
   });
 });
 
@@ -2765,6 +3556,422 @@ describe('toPlainText', () => {
 
   it('handles the empty string', () => {
     expect(toPlainText('')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toPlainText — only the nine markup elements are tags (issue #70)
+// ---------------------------------------------------------------------------
+
+/** The Citation note of slasro_149914, verbatim: a SICI DOI puts `<` and `>` inside `href`. */
+const SICI_NOTE =
+  'Nelson, C. H., Meyer, Audrey W., Thor, Devin, and Larsen, Matthew C. 1986. "<a href="https://pubs.geoscienceworld.org/gsa/geology/article-abstract/14/3/238/204021/crater-lake-oregon-a-restricted-basin-with-base-of,https://pubs.geoscienceworld.org/gsa/geology/article/14/3/238/204021/crater-lake-oregon-a-restricted-basin-with-base-of">Crater Lake, Oregon: A restricted basin with base-of-slope aprons of nonchannelized turbidites</a>." <em>Geology</em>, 14, (3) 238–241. <a href="https://doi.org/10.1130/0091-7613(1986)14<238:CLOARB>2.0.CO;2">https://doi.org/10.1130/0091-7613(1986)14<238:CLOARB>2.0.CO;2</a>.';
+
+describe('toPlainText markup elements (issue #70)', () => {
+  it.each([
+    // hac_1980.013, saam_1929.8.174.17, nmah_1017980
+    ['<I>Aquarium or terrarium, Roman columns</I>', 'Aquarium or terrarium, Roman columns'],
+    [
+      'blown <b>[see 1929.8.147.1, 1929.8.147.2]</b>, and',
+      'blown [see 1929.8.147.1, 1929.8.147.2], and',
+    ],
+    ['<i>My Life in the Bush of Ghosts</i>', 'My Life in the Bush of Ghosts'],
+    [`<SPAN class="note" style='x'>a</SPAN> <EM>b</EM> x<SUB>2</SUB> y<Sup>3</Sup>`, 'a b x2 y3'],
+  ])('strips a markup element in any case, with attributes: %s', (input, expected) => {
+    expect(toPlainText(input)).toBe(expected);
+  });
+
+  it('separates the lines a <p> or <br> held apart (nmah_1293705)', () => {
+    expect(
+      toPlainText(
+        '<p>Vernon Dalhart. side 1: The Wreck of the Number 9 (Silvertone 5005).<br>78 rpm.</p>',
+      ),
+    ).toBe('Vernon Dalhart. side 1: The Wreck of the Number 9 (Silvertone 5005). 78 rpm.');
+  });
+
+  it('strips an element whose name ends at / or whitespace', () => {
+    expect(toPlainText('one<br/>two<br />three <i\n>four</i >')).toBe('one two three four');
+  });
+
+  it.each([
+    // siris_sil_43136 title; siris_sil_605969 and siris_sil_113485 notes
+    'Tables of functions with formulae and curves <Funktionentafeln mit Formeln und Kurven> by Dr. Eugene Jahnke ... and Fritz Emde ..',
+    'Issues for <winter 1988-> carry also whole numbering.',
+    'Vols. for <winter 1998- > published in Germantown, MD.',
+    'Appendix. Steam tables. <Specially calculated by Prof. H.L. Callendar, F.R.S., from his own equations, to suit the methods of notation adopted in his book>: p. [735]-744.',
+    '©1981-<c1985>',
+    'Berberin <Frau>',
+  ])('keeps catalog text in angle brackets byte-identical: %s', (text) => {
+    expect(toPlainText(text)).toBe(text);
+  });
+
+  it.each(['<U+309A>', 'see <p. 23> and <p.24>', '<image> <bold> <abbr> <ii> <spans> <sublime>'])(
+    'reads a name as ending at whitespace, / or >, so a longer run is text: %s',
+    (text) => {
+      expect(toPlainText(text)).toBe(text);
+    },
+  );
+
+  it('leaves every element outside the nine as written', () => {
+    const text = '<div>Line</div><li>item</li><img src="x.jpg"><font color="red">red</font>';
+    expect(toPlainText(text)).toBe(text);
+  });
+
+  it('keeps a SICI DOI anchor whole: a quoted attribute value may hold < and > (slasro_149914)', () => {
+    expect(toPlainText(SICI_NOTE)).toBe(
+      'Nelson, C. H., Meyer, Audrey W., Thor, Devin, and Larsen, Matthew C. 1986. "Crater Lake, Oregon: A restricted basin with base-of-slope aprons of nonchannelized turbidites." Geology, 14, (3) 238–241. https://doi.org/10.1130/0091-7613(1986)14<238:CLOARB>2.0.CO;2.',
+    );
+  });
+
+  it(`reads either quote style around a value holding '>'`, () => {
+    expect(toPlainText(`<a title="a > b" href='x>y'>link</a> text`)).toBe('link text');
+  });
+
+  it('leaves an opener with no closing > as text, an unterminated quote included', () => {
+    expect(toPlainText('see <a href="x" for details')).toBe('see <a href="x" for details');
+    expect(toPlainText('quoted <a title="never closed>')).toBe('quoted <a title="never closed>');
+  });
+
+  it('strips in one pass, never to a fixed point', () => {
+    expect(toPlainText('<a<a<a>>>')).toBe('<a<a>>');
+  });
+
+  it('keeps the bracketed runs on the projected title and notes', () => {
+    const svc = makeService();
+    const record = (title: string, notes: Array<{ label: string; content: string }>): RawEDAN => ({
+      title,
+      unitCode: 'SIL',
+      content: { descriptiveNonRepeating: { record_ID: 'siris_sil_TEST' }, freetext: { notes } },
+    });
+    const title =
+      'Tables of functions with formulae and curves <Funktionentafeln mit Formeln und Kurven> by Dr. Eugene Jahnke ... and Fritz Emde ..';
+    expect(svc.toFullObject(record(title, [])).title).toBe(title);
+    expect(svc.toSummary(record(title, [])).title).toBe(title);
+
+    const notes = [
+      { label: 'Notes', content: 'Issues for <winter 1988-> carry also whole numbering.' },
+      {
+        label: 'Notes',
+        content:
+          'Appendix. Steam tables. <Specially calculated by Prof. H.L. Callendar, F.R.S., from his own equations, to suit the methods of notation adopted in his book>: p. [735]-744.',
+      },
+      { label: 'Citation', content: SICI_NOTE },
+    ];
+    const projected = svc.toFullObject(record('Crater Lake', notes)).notes;
+    expect(projected.slice(0, 2)).toEqual(notes.slice(0, 2));
+    expect(projected[2]?.content).toMatch(
+      / 238–241\. https:\/\/doi\.org\/10\.1130\/0091-7613\(1986\)14<238:CLOARB>2\.0\.CO;2\.$/,
+    );
+    expect(projected[2]?.content).not.toContain('">');
+  });
+});
+
+/**
+ * Least CPU time per call of `run`, in microseconds, over three measurements. Each measurement
+ * repeats `run` until this thread has spent 10 ms, so a 5k input is timed over a batch; keeping
+ * the least drops garbage-collection pauses, which only ever add time.
+ */
+function cpuPerCall(run: () => void): number {
+  let least = Number.POSITIVE_INFINITY;
+  for (let measurement = 0; measurement < 3; measurement++) {
+    const start = process.threadCpuUsage();
+    let runs = 0;
+    let spent = 0;
+    do {
+      run();
+      runs++;
+      const elapsed = process.threadCpuUsage(start);
+      spent = elapsed.user + elapsed.system;
+    } while (spent < 10_000);
+    least = Math.min(least, spent / runs);
+  }
+  return least;
+}
+
+describe('toPlainText scan time (issue #70)', () => {
+  /**
+   * Each shape doubles from its base size through a 64× span. A single unclosed candidate starts
+   * at 625 characters: Bun's regex engine drops to a slower mode on one match attempt past about
+   * 80k characters, which reads as super-linear on linear work, so that span ends at 40k.
+   */
+  const SHAPES: Array<[shape: string, make: (size: number) => string, base: number]> = [
+    ['unclosed <a runs (20,000 at 80k)', (n) => '<a x'.repeat(Math.ceil(n / 4)), 5_000],
+    ['unclosed openers with a double quote', (n) => '<a "'.repeat(Math.ceil(n / 4)), 5_000],
+    ['unclosed openers with both quotes', (n) => `<a '"`.repeat(Math.ceil(n / 5)), 5_000],
+    ['nested openers', (n) => '<a'.repeat(Math.ceil(n / 4)) + '>'.repeat(Math.ceil(n / 4)), 5_000],
+    ['one long line ending in a break', (n) => `${'<a §1 x'.repeat(Math.ceil(n / 7))}\ny`, 5_000],
+    ['breaks throughout', (n) => '<a  \r\n'.repeat(Math.ceil(n / 6)), 5_000],
+    ['a single unclosed candidate', (n) => `<a ${'x'.repeat(n)}`, 625],
+  ];
+
+  it.each(SHAPES)(
+    'stays linear on %s',
+    (_shape, make, base) => {
+      const sizes = Array.from({ length: 7 }, (_, i) => base * 2 ** i);
+      // Bounded before the next doubling, so a super-linear scan fails in seconds at a small
+      // size instead of hanging the suite on the largest one.
+      for (const size of sizes) {
+        const input = make(size);
+        expect(cpuPerCall(() => toPlainText(input))).toBeLessThan(size * 0.25);
+      }
+      // Full-span growth from pairs timed back to back, the least of three: a baseline timed
+      // once can land on a faster core than the size it is compared with.
+      const smallest = make(base);
+      const largest = make(sizes.at(-1) as number);
+      let growth = Number.POSITIVE_INFINITY;
+      for (let pair = 0; pair < 3; pair++) {
+        const small = cpuPerCall(() => toPlainText(smallest));
+        growth = Math.min(growth, cpuPerCall(() => toPlainText(largest)) / small);
+      }
+      expect(growth).toBeLessThan(256);
+    },
+    0,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Full-size JPEG and accessibility text on image items (issue #71)
+// ---------------------------------------------------------------------------
+
+describe('image items: full-size JPEG and accessibility text (issue #71)', () => {
+  /** The one image a single-item record normalizes to. */
+  const imageOf = (item: RawMediaItem) => {
+    const images = makeService().toImageItems(
+      makeMediaRecord({ online_media: { mediaCount: 1, media: [item] } }),
+    );
+    expect(images).toHaveLength(1);
+    return images[0];
+  };
+
+  const NASM_ID = 'NASM-NASM2022-05013-000003';
+  const NASM_CONTENT = `https://ids.si.edu/ids/deliveryService?id=${NASM_ID}`;
+
+  it('takes high_res_jpeg from content, with no dimensions, when no JPEG resource exists (nasm_A19700102000)', () => {
+    expect(
+      imageOf({
+        type: 'Images',
+        idsId: NASM_ID,
+        content: NASM_CONTENT,
+        thumbnail: NASM_CONTENT,
+        usage: { access: 'CC0' },
+        resources: [
+          { label: 'Screen Image', url: `https://ids.si.edu/ids/download?id=${NASM_ID}_screen` },
+          { label: 'Thumbnail Image', url: `https://ids.si.edu/ids/download?id=${NASM_ID}_thumb` },
+        ],
+      }),
+    ).toEqual({
+      media_id: NASM_ID,
+      is_cc0: true,
+      thumbnail_url: `https://ids.si.edu/ids/download?id=${NASM_ID}_thumb`,
+      screen_url: `https://ids.si.edu/ids/download?id=${NASM_ID}_screen`,
+      high_res_jpeg: { url: NASM_CONTENT },
+    });
+  });
+
+  it('gives an item with no resources content as both screen_url and high_res_jpeg (nmnhvz_4403742)', () => {
+    const content = 'https://collections.nmnh.si.edu/media/?irn=17080708';
+    const image = imageOf({
+      type: 'Images',
+      idsId: content,
+      content,
+      thumbnail: `${content}&thumb=yes`,
+      usage: { access: 'CC0' },
+    });
+    expect(image?.screen_url).toBe(content);
+    expect(image?.high_res_jpeg).toEqual({ url: content });
+  });
+
+  it('adds high_res_jpeg from content to a TIFF-only image and keeps its TIFF (npg_NPG.94.15)', () => {
+    const id = 'NPG-NPG_94_15_det_ext';
+    const image = imageOf({
+      type: 'Images',
+      idsId: id,
+      content: `https://ids.si.edu/ids/deliveryService?id=${id}`,
+      usage: { access: 'CC0' },
+      resources: [
+        {
+          label: 'High-resolution TIFF',
+          url: `https://ids.si.edu/ids/download?id=${id}.tif`,
+          width: 3220,
+          height: 3776,
+        },
+        { label: 'Screen Image', url: `https://ids.si.edu/ids/download?id=${id}_screen` },
+      ],
+    });
+    expect(image?.high_res_jpeg).toEqual({
+      url: `https://ids.si.edu/ids/deliveryService?id=${id}`,
+    });
+    expect(image?.high_res_tiff).toEqual({
+      url: `https://ids.si.edu/ids/download?id=${id}.tif`,
+      width: 3220,
+      height: 3776,
+    });
+  });
+
+  it('keeps a listed JPEG resource, dimensions included, over content', () => {
+    const id = 'NPG-NPG_94_15BoydenM_int';
+    const image = imageOf({
+      type: 'Images',
+      idsId: id,
+      content: `https://ids.si.edu/ids/deliveryService?id=${id}`,
+      usage: { access: 'CC0' },
+      resources: [
+        {
+          label: 'High-resolution JPEG',
+          url: `https://ids.si.edu/ids/download?id=${id}.jpg`,
+          width: 4000,
+          height: 2322,
+        },
+      ],
+    });
+    expect(image?.high_res_jpeg).toEqual({
+      url: `https://ids.si.edu/ids/download?id=${id}.jpg`,
+      width: 4000,
+      height: 2322,
+    });
+  });
+
+  it('has no high_res_jpeg when the item has neither content nor a JPEG resource', () => {
+    const image = imageOf({
+      type: 'Images',
+      idsId: 'NASM-NO-CONTENT',
+      usage: { access: 'CC0' },
+      resources: [{ label: 'Screen Image', url: 'https://ids.si.edu/ids/download?id=X_screen' }],
+    });
+    expect(image).not.toHaveProperty('high_res_jpeg');
+    expect(image?.screen_url).toBe('https://ids.si.edu/ids/download?id=X_screen');
+  });
+
+  it.each([
+    ['an empty string', ''],
+    ['null', null],
+  ])(
+    'omits alt_text and description when upstream gives %s, as when it gives nothing',
+    (_label, empty) => {
+      const image = imageOf({
+        type: 'Images',
+        idsId: 'CHNDM-EMPTY',
+        usage: { access: 'CC0' },
+        // chndm_1945-55-16 carries altTextAccessibility: "" on all 229 of its images.
+        altTextAccessibility: empty as string,
+        extDescrAccessibility: empty as string,
+      });
+      expect(image).not.toHaveProperty('alt_text');
+      expect(image).not.toHaveProperty('description');
+    },
+  );
+
+  it('keeps accessibility text that is present', () => {
+    const image = imageOf({
+      type: 'Images',
+      idsId: 'NPG-ALT',
+      usage: { access: 'CC0' },
+      altTextAccessibility: 'Artist: Unidentified Artist, Sitter: Seth Boyden',
+      extDescrAccessibility: 'The Apollo 11 Command Module Columbia displayed in a gallery.',
+    });
+    expect(image?.alt_text).toBe('Artist: Unidentified Artist, Sitter: Seth Boyden');
+    expect(image?.description).toBe(
+      'The Apollo 11 Command Module Columbia displayed in a gallery.',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Summary and object thumbnail_url: the first media item's thumbnail resource
+// ---------------------------------------------------------------------------
+
+describe('thumbnail_url of a summary and an object', () => {
+  const ID = 'NASM-NASM2022-05013-000003';
+  const FULL_SIZE = `https://ids.si.edu/ids/deliveryService?id=${ID}`;
+  const THUMB = `https://ids.si.edu/ids/download?id=${ID}_thumb`;
+
+  /**
+   * nasm_A19700102000's first media item as a live `/search` row carries it (2026-11-15):
+   * `thumbnail` repeats the full-size `content` URL, and the thumbnail is a resource.
+   */
+  const IDS_ITEM: RawMediaItem = {
+    type: 'Images',
+    idsId: ID,
+    content: FULL_SIZE,
+    thumbnail: FULL_SIZE,
+    usage: { access: 'CC0' },
+    resources: [
+      { label: 'Thumbnail Image', url: THUMB },
+      { label: 'Screen Image', url: `https://ids.si.edu/ids/download?id=${ID}_screen` },
+    ],
+  };
+  const row = (media: RawMediaItem[]): RawEDAN => ({
+    title: 'Command Module Columbia, Apollo 11',
+    unitCode: 'NASM',
+    url: 'edanmdm:nasm_A19700102000',
+    content: {
+      descriptiveNonRepeating: {
+        record_ID: 'nasm_A19700102000',
+        unit_code: 'NASM',
+        online_media: { mediaCount: media.length, media },
+      },
+    },
+  });
+
+  beforeEach(() => {
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('takes a search row’s thumbnail from its thumbnail resource, not the full-size URL', async () => {
+    mockFetch({ status: 200, responseCode: 1, response: { rows: [row([IDS_ITEM])], rowCount: 1 } });
+
+    const page = await makeService().search(
+      { query: 'apollo', rows: 1, start: 0 },
+      makeTenantContext(),
+      startCallDeadline(),
+    );
+
+    expect(page.rows[0]?.thumbnail_url).toBe(THUMB);
+  });
+
+  it('gives the object the same thumbnail get_media gives its first image', () => {
+    const svc = makeService();
+    const raw = row([IDS_ITEM]);
+
+    expect(svc.toFullObject(raw).media_summary.thumbnail_url).toBe(THUMB);
+    expect(svc.toImageItems(raw)[0]?.thumbnail_url).toBe(THUMB);
+  });
+
+  it('falls back to the item’s thumbnail when no resource is labelled one', () => {
+    const svc = makeService();
+    const raw = row([
+      {
+        ...IDS_ITEM,
+        thumbnail: `${FULL_SIZE}&max=150`,
+        resources: [
+          { label: 'Screen Image', url: `https://ids.si.edu/ids/download?id=${ID}_screen` },
+        ],
+      },
+    ]);
+
+    expect(svc.toSummary(raw).thumbnail_url).toBe(`${FULL_SIZE}&max=150`);
+    expect(svc.toFullObject(raw).media_summary.thumbnail_url).toBe(`${FULL_SIZE}&max=150`);
+  });
+
+  it('reads the first media item only, and has none without media', () => {
+    const svc = makeService();
+    const second: RawMediaItem = {
+      ...IDS_ITEM,
+      thumbnail: 'https://x/second',
+      resources: [{ label: 'Thumbnail Image', url: 'https://x/second_thumb' }],
+    };
+    const noThumb: RawMediaItem = {
+      type: '3d_voyager',
+      content: 'https://3d-api.si.edu/voyager/x',
+    };
+
+    expect(svc.toSummary(row([noThumb, second]))).not.toHaveProperty('thumbnail_url');
+    expect(svc.toSummary(row([]))).not.toHaveProperty('thumbnail_url');
   });
 });
 
@@ -3094,5 +4301,277 @@ describe('media_summary.non_image_media (issue #62)', () => {
       },
     });
     expect(svc.toFullObject(imagesOnly).media_summary.non_image_media).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// One deadline per tool call (issue #68)
+// ---------------------------------------------------------------------------
+
+describe('one deadline per tool call (issue #68)', () => {
+  type Read = 'search' | 'content' | 'terms';
+  type Answer = (signal: AbortSignal) => Response | Promise<Response>;
+  const SEARCH = { query: 'aircraft', rows: 10, start: 0 };
+  const RECORD = 'nasm_TEST001';
+
+  /** A deadline `ms` from now, as a tool handler holds it partway through its call. */
+  function deadlineIn(ms: number): CallDeadline {
+    return (Date.now() + ms) as CallDeadline;
+  }
+
+  /** The 200 each read answers on success. */
+  function answer(read: Read): Response {
+    const body =
+      read === 'search'
+        ? makeSearchResponse()
+        : read === 'content'
+          ? makeContentResponse(RECORD)
+          : { status: 200, responseCode: 1, response: { terms: ['Aztecs'] } };
+    return new Response(JSON.stringify(body), { status: 200 });
+  }
+
+  /** A request the upstream never answers: only its signal aborting ends it. */
+  function hung(signal: AbortSignal): Promise<Response> {
+    return new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }
+
+  /** A request answered `ms` after it arrives, or rejected when its signal aborts first. */
+  function answerAfter(ms: number, read: Read): Answer {
+    return (signal) =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => resolve(answer(read)), ms);
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timer);
+            reject(signal.reason);
+          },
+          { once: true },
+        );
+      });
+  }
+
+  /** The read a request addresses, from its path. */
+  function readOf(input: string): Read | undefined {
+    const segments = new URL(input).pathname.split('/');
+    if (segments.at(-1) === 'search') return 'search';
+    if (segments.at(-2) === 'content') return 'content';
+    if (segments.at(-2) === 'terms') return 'terms';
+    return undefined;
+  }
+
+  /**
+   * Stub fetch with one answer per read; any other request rejects. Each answer receives the
+   * request's signal. Returns the requests each read received, as their signals.
+   */
+  function route(answers: Partial<Record<Read, Answer>>) {
+    const sent: Record<Read, AbortSignal[]> = { search: [], content: [], terms: [] };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init: RequestInit) => {
+        const read = readOf(input);
+        const respond = read ? answers[read] : undefined;
+        if (!read || !respond) throw new Error('unmocked fetch');
+        const signal = init.signal as AbortSignal;
+        sent[read].push(signal);
+        return respond(signal);
+      }),
+    );
+    return sent;
+  }
+
+  /** One read on `svc` under `deadline`. */
+  function readOn(svc: SmithsonianService, read: Read, deadline: CallDeadline) {
+    const ctx = makeTenantContext();
+    return read === 'search'
+      ? svc.search(SEARCH, ctx, deadline)
+      : read === 'content'
+        ? svc.getContent(RECORD, ctx, deadline)
+        : svc.listTerms({ field: 'culture', start: 0, rows: 10 }, ctx, deadline);
+  }
+
+  /** A service whose config reads `variable` as 0 — the config memo is module-level. */
+  async function serviceWithout(variable: string): Promise<SmithsonianService> {
+    vi.stubEnv(variable, '0');
+    vi.resetModules();
+    const { SmithsonianService: FreshService } = await import(
+      '@/services/smithsonian/smithsonian-service.js'
+    );
+    return new FreshService(createInMemoryStorage());
+  }
+
+  /** A pending call's outcome, readable without awaiting it. */
+  function track(pending: Promise<unknown>) {
+    const state: { settled: boolean; outcome?: unknown } = { settled: false };
+    pending.then(
+      (value) => Object.assign(state, { settled: true, outcome: value }),
+      (error: unknown) => Object.assign(state, { settled: true, outcome: error }),
+    );
+    return state;
+  }
+
+  /** The error code and reason a call failed with. */
+  function failure(outcome: unknown): { code?: number; reason?: string } {
+    const error = outcome as { code?: number; data?: { reason?: string } };
+    return { code: error.code, reason: error.data?.reason };
+  }
+
+  const EXPIRED = { code: JsonRpcErrorCode.Timeout, reason: 'retry_deadline_exceeded' };
+
+  beforeEach(() => {
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    ['search', undefined],
+    ['content', undefined],
+    ['terms', undefined],
+    ['search', 'SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS'],
+  ] as const)(
+    'a %s read started with no time left sends no request and throws Timeout (cache off: %s)',
+    async (read, uncached) => {
+      const sent = route({ [read]: () => answer(read) });
+      const svc = uncached ? await serviceWithout(uncached) : makeService();
+
+      const outcome = await readOn(svc, read, deadlineIn(0)).catch((error: unknown) => error);
+
+      expect(sent[read]).toHaveLength(0);
+      expect(failure(outcome)).toEqual(EXPIRED);
+    },
+  );
+
+  it.each([
+    ['search', 'SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS'],
+    ['content', 'SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS'],
+    ['terms', 'SMITHSONIAN_TERMS_CACHE_TTL_SECONDS'],
+  ] as const)(
+    'with %s caching off, a hung read ends at the call deadline, not 50 s after it starts',
+    async (read, variable) => {
+      const svc = await serviceWithout(variable);
+      const sent = route({ [read]: hung });
+      vi.useFakeTimers();
+
+      const call = track(readOn(svc, read, deadlineIn(10_000)));
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(call.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(call.settled).toBe(true);
+      expect(failure(call.outcome)).toEqual(EXPIRED);
+      expect(sent[read].every((signal) => signal.aborted)).toBe(true);
+    },
+  );
+
+  it('a /terms body read cut by the deadline throws Timeout, not a bare DOMException', async () => {
+    // The headers arrive at once; the body sends its first bytes and stalls until the
+    // request signal aborts, as a real body does.
+    route({
+      terms: (signal) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"response":{"terms":["Azt'));
+              signal.addEventListener('abort', () => controller.error(signal.reason), {
+                once: true,
+              });
+            },
+          }),
+          { status: 200 },
+        ),
+    });
+    vi.useFakeTimers();
+
+    const call = track(readOn(makeService(), 'terms', deadlineIn(5_000)));
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(call.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(call.settled).toBe(true);
+    expect((call.outcome as Error).name).not.toBe('TimeoutError');
+    expect(failure(call.outcome)).toEqual(EXPIRED);
+  });
+
+  it('a caller whose deadline passes on a shared load rejects Timeout alone; the other gets the page from one request', async () => {
+    const sent = route({ search: answerAfter(10_000, 'search') });
+    vi.useFakeTimers();
+    const svc = makeService();
+
+    const early = track(readOn(svc, 'search', deadlineIn(5_000)));
+    const late = track(readOn(svc, 'search', deadlineIn(50_000)));
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(early.settled).toBe(true);
+    expect(failure(early.outcome)).toEqual({
+      code: JsonRpcErrorCode.Timeout,
+      reason: 'retry_deadline_exceeded',
+    });
+    expect(late.settled).toBe(false);
+    expect(sent.search[0]?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(late.outcome).toMatchObject({ rowCount: 42 });
+    expect(sent.search).toHaveLength(1);
+  });
+
+  it.each(['search', 'content'] as const)(
+    "the last waiter's deadline aborts the shared %s load",
+    async (read) => {
+      const sent = route({ [read]: hung });
+      vi.useFakeTimers();
+
+      const call = track(readOn(makeService(), read, deadlineIn(5_000)));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(failure(call.outcome)).toEqual(EXPIRED);
+      expect(sent[read]).toHaveLength(1);
+      expect(sent[read][0]?.aborted).toBe(true);
+    },
+  );
+
+  describe('through the single-read tools', () => {
+    beforeEach(() => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+    });
+
+    it.each([
+      [
+        'smithsonian_get_object',
+        'content',
+        () => runToolContract(smithsonianGetObject, { id: RECORD }),
+      ],
+      [
+        'smithsonian_get_media',
+        'content',
+        () => runToolContract(smithsonianGetMedia, { id: RECORD }),
+      ],
+      [
+        'smithsonian_list_terms',
+        'terms',
+        () => runToolContract(smithsonianListTerms, { field: 'culture' }),
+      ],
+    ] as const)('%s keeps a 50 s bound on a hung upstream', async (_tool, read, call) => {
+      route({ [read]: hung });
+      vi.useFakeTimers();
+
+      // Backoff jitter can end the ladder up to a second early, when the last backoff would
+      // outlast what is left, so the bound is "by 50 s", not "at 50 s".
+      const result = track(call());
+      await vi.advanceTimersByTimeAsync(50_000);
+
+      expect(result.settled).toBe(true);
+      expect(result.outcome).toMatchObject({
+        isError: true,
+        structuredContent: { error: { code: JsonRpcErrorCode.Timeout } },
+      });
+    });
   });
 });

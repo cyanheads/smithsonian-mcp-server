@@ -17,9 +17,14 @@ import {
 } from '@/mcp-server/tools/page-size.js';
 
 const add = vi.hoisted(() => vi.fn());
+/** Every counter created, by its arguments: a plain array, so no mock clearing empties it. */
+const counters = vi.hoisted((): unknown[][] => []);
 vi.mock('@cyanheads/mcp-ts-core/utils', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@cyanheads/mcp-ts-core/utils')>()),
-  createCounter: vi.fn(() => ({ add })),
+  createCounter: vi.fn((...args: unknown[]) => {
+    counters.push(args);
+    return { add };
+  }),
 }));
 
 function strictMode(): void {
@@ -67,6 +72,7 @@ describe('pageSizeInput', () => {
     ['smithsonian_browse_category', 1000],
     ['smithsonian_find_related', 1000],
     ['smithsonian_list_terms', 40_000],
+    ['smithsonian_get_media', 1000],
   ] as const)(
     '%s rejects cap + 1 with too_big under the strict switch and accepts the cap',
     (tool, cap) => {
@@ -158,6 +164,16 @@ describe('servePageSize', () => {
       [ATTR_MCP_TOOL_NAME]: 'smithsonian_list_terms',
       'smithsonian.input.name': 'rows',
     });
+  });
+
+  it('counts every clamp on one smithsonian.input.clamps counter', () => {
+    servePageSize('smithsonian_search_objects', 'rows', 1001, createMockContext());
+    servePageSize('smithsonian_browse_category', 'rows', 1001, createMockContext());
+
+    expect(counters).toEqual([
+      ['smithsonian.input.clamps', 'Over-cap page sizes served at their cap', '{clamps}'],
+    ]);
+    expect(add).toHaveBeenCalledTimes(2);
   });
 
   it('names the field it served in the notice and the count', () => {

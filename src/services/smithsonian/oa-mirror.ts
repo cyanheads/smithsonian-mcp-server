@@ -9,7 +9,7 @@
  * | `objects` (framework store) | `url` primary key; `doc` = the deflated {@link trimRecord} JSON; `shard` = the `shards.id` the record was last read from |
  * | `terms` | one row per facet value; `n` = how many records carry it |
  * | `facets` | `(term, obj)` pairs, `obj` = `objects.rowid`; its primary key is the index every facet query walks |
- * | `shards` | each applied bucket shard, with the ETag and LastModified it was applied at |
+ * | `shards` | each applied bucket shard, with the ETag and LastModified it was applied at; a NULL ETag marks a shard not re-read since a schema change |
  *
  * `facets.obj` holds `objects.rowid`, which an upsert keeps and nothing here renumbers; the
  * store is never vacuumed, since a VACUUM is allowed to renumber the rowids of a table without
@@ -49,9 +49,10 @@ export type ValueFacet =
 /**
  * Presence facets: `online_only` marks a record with any `online_media_type` value (EDAN
  * `online_media_type:*`), `cc0` one with a media item whose `usage.access` is `CC0` (EDAN
- * `media_usage:CC0`).
+ * `media_usage:CC0`), and `on_view` one whose `onPhysicalExhibit` includes `"Yes"` (EDAN
+ * `onPhysicalExhibit:"Yes"`).
  */
-export type FlagFacet = 'online_only' | 'cc0';
+export type FlagFacet = 'online_only' | 'cc0' | 'on_view';
 
 export type FacetField = ValueFacet | FlagFacet;
 
@@ -65,12 +66,15 @@ export interface FacetTerm {
 }
 
 /**
- * A facet search answered from the mirror (`page`), or declined because it would walk more than
- * {@link SCAN_BUDGET} index entries (`over_budget`, with the count it would have walked).
+ * A facet search answered from the mirror (`page`), or declined: because it would walk more than
+ * {@link SCAN_BUDGET} index entries (`over_budget`, with the count it would have walked), or
+ * because it filters on `on_view` while a shard has not been re-read since the schema added
+ * that facet (`stale`), so records of that shard are not yet indexed under it.
  */
 export type FacetSearchResult =
   | { kind: 'page'; docs: RawEDAN[]; total: number }
-  | { kind: 'over_budget'; entries: number };
+  | { kind: 'over_budget'; entries: number }
+  | { kind: 'stale' };
 
 /** The `terms.value` a presence facet is stored under. */
 const FLAG_VALUE = 'true';
@@ -91,7 +95,7 @@ const ARRAY_FACETS = [
 // ---------------------------------------------------------------------------
 
 /** The store's schema version. */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /** The auxiliary tables, one statement each: `bun:sqlite`'s multi-statement `exec` drops errors. */
 const AUXILIARY_TABLES = [
@@ -99,6 +103,21 @@ const AUXILIARY_TABLES = [
   'CREATE TABLE IF NOT EXISTS facets (term INTEGER NOT NULL, obj INTEGER NOT NULL, PRIMARY KEY (term, obj)) WITHOUT ROWID',
   'CREATE TABLE IF NOT EXISTS shards (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, etag TEXT, last_modified TEXT)',
 ];
+
+/**
+ * Version 2 stores `onPhysicalExhibit` and `exhibition` and derives the `on_view` facet. Clearing
+ * every shard's ETag makes the next sync re-read the whole bucket, which rewrites only the docs
+ * that change and indexes them under `on_view`; until a shard is re-read, its records are served
+ * live ({@link OaMirror.getDoc}, {@link OaMirror.searchFacets}). The index answers that
+ * stale-shard probe without a scan. Proportional to the shard count, not the record count.
+ */
+const SCHEMA_V2 = [
+  'UPDATE shards SET etag = NULL',
+  'CREATE INDEX IF NOT EXISTS shards_etag ON shards(etag)',
+];
+
+/** Whether any shard still awaits its re-read after a schema change. */
+const STALE_SHARD_PROBE = 'SELECT 1 AS stale FROM shards WHERE etag IS NULL LIMIT 1';
 
 /**
  * The mirror's SQLite store at `path`, created on first use. Opening it needs `bun:sqlite` on
@@ -117,6 +136,12 @@ export function oaMirrorStore(path: string): MirrorStore {
         version: 1,
         up(handle: SqliteHandle) {
           for (const sql of AUXILIARY_TABLES) handle.exec(sql);
+        },
+      },
+      {
+        version: 2,
+        up(handle: SqliteHandle) {
+          for (const sql of SCHEMA_V2) handle.exec(sql);
         },
       },
     ],
@@ -160,7 +185,9 @@ const INDEXED_KEYS = [
   'tax_class',
   'tax_order',
   'tax_family',
+  'onPhysicalExhibit',
 ];
+const EXHIBITION_KEYS = ['building', 'room', 'exhibitionTitle'];
 
 /** Copy the named keys that are set. Values pass through exactly as upstream wrote them. */
 function pick(source: Fields, keys: readonly string[]): Fields {
@@ -240,6 +267,13 @@ function trimIndexed(indexed: Fields): Fields {
       .filter((l) => !isEmpty(l));
     if (locations.length > 0) out.geoLocation = locations;
   }
+  if (Array.isArray(indexed.exhibition)) {
+    const exhibitions = indexed.exhibition
+      .filter(isRecord)
+      .map((e) => pick(e, EXHIBITION_KEYS))
+      .filter((e) => !isEmpty(e));
+    if (exhibitions.length > 0) out.exhibition = exhibitions;
+  }
   return out;
 }
 
@@ -252,7 +286,8 @@ function trimIndexed(indexed: Fields): Fields {
  * them, the same trust the live `/content` path gives a response.
  *
  * Changing what this keeps (or what {@link facetTerms} derives) changes stored docs: ship it
- * with a migration that clears `shards.etag`, so the next sync re-reads every shard.
+ * with a migration that clears `shards.etag`, so the next sync re-reads every shard, as
+ * schema version 2 does for `onPhysicalExhibit` and `exhibition`.
  */
 export function trimRecord(line: Fields): RawEDAN {
   const content = isRecord(line.content) ? line.content : {};
@@ -298,8 +333,14 @@ function arrayOf(value: unknown): unknown[] {
 /**
  * The facet values a doc is indexed under, keyed `field\u0000value`: top-level `unitCode` as
  * `unit_code`; the `indexedStructured` arrays of the same names; `indexedStructured.name`
- * entries (a string, or an object's `content`) as `name`; and the presence flags `online_only`
- * and `cc0`. Values match exactly; empty strings are not indexed.
+ * entries (a string, or an object's `content`) as `name`; and the presence flags `online_only`,
+ * `cc0`, and `on_view`. Values match exactly; empty strings are not indexed.
+ *
+ * A facet added later must derive only from keys the docs stored before it never held. A sync
+ * unindexes a changed doc under the terms this derives from its old copy, and leaves an
+ * unchanged doc's facets alone, so a new facet read from an existing key would unindex terms
+ * never written and never reach the unchanged docs. `on_view` reads `onPhysicalExhibit`, which
+ * only schema version 2 stores.
  */
 export function facetTerms(doc: RawEDAN): Map<string, FacetTerm> {
   const terms = new Map<string, FacetTerm>();
@@ -321,6 +362,7 @@ export function facetTerms(doc: RawEDAN): Map<string, FacetTerm> {
   if (media.some((m) => isRecord(m) && isRecord(m.usage) && m.usage.access === 'CC0')) {
     add('cc0', FLAG_VALUE);
   }
+  if (arrayOf(indexed?.onPhysicalExhibit).includes('Yes')) add('on_view', FLAG_VALUE);
   return terms;
 }
 
@@ -361,13 +403,29 @@ export class OaMirror {
     return state.completedAt === undefined ? undefined : state.checkpoint;
   }
 
-  /** The stored doc for a record `url` (`edanmdm:<record_ID>`), or undefined when not mirrored. */
+  /**
+   * The stored doc for a record `url` (`edanmdm:<record_ID>`), or undefined when it is not
+   * mirrored or its shard awaits a re-read after a schema change ({@link hasStaleShards}): that
+   * doc predates the schema and may lack fields the normalizers read.
+   */
   async getDoc(url: string): Promise<RawEDAN | undefined> {
     const handle = await this.store.raw();
     const row = handle
-      .prepare<{ doc: Uint8Array }>('SELECT doc FROM objects WHERE url = ?')
+      .prepare<{ doc: Uint8Array }>(
+        'SELECT o.doc FROM objects o JOIN shards s ON s.id = o.shard WHERE o.url = ? AND s.etag IS NOT NULL',
+      )
       .get(url);
     return row ? decodeDoc(row.doc) : undefined;
+  }
+
+  /**
+   * True while any shard awaits a re-read after a schema change cleared its ETag. The next sync
+   * re-reads each one; until then its records are not served ({@link getDoc}) and `on_view`
+   * searches decline ({@link searchFacets}).
+   */
+  async hasStaleShards(): Promise<boolean> {
+    const handle = await this.store.raw();
+    return handle.prepare(STALE_SHARD_PROBE).get() !== undefined;
   }
 
   /**
@@ -375,7 +433,8 @@ export class OaMirror {
    * at most `rows` of them, with the total match count. No filters matches every record, with
    * the total counted at the last completed sync; one filter takes its total from `terms.n`;
    * several are counted by intersecting them. A search that would walk more than
-   * {@link SCAN_BUDGET} index entries returns `over_budget` without walking them.
+   * {@link SCAN_BUDGET} index entries returns `over_budget` without walking them, and one that
+   * filters on `on_view` while any shard is stale ({@link hasStaleShards}) returns `stale`.
    *
    * Reads run in one transaction, so the page and its total come from one snapshot even while
    * a sync is committing shards. Call only once {@link ready} is true.
@@ -394,6 +453,13 @@ export class OaMirror {
     const syncTotal = wanted.size === 0 ? (await this.store.readState()).total : undefined;
 
     return handle.transaction((): FacetSearchResult => {
+      // A stale shard's records are not yet indexed under on_view, so its count would be short.
+      if (
+        filters.some((f) => f.field === 'on_view') &&
+        handle.prepare(STALE_SHARD_PROBE).get() !== undefined
+      ) {
+        return { kind: 'stale' };
+      }
       if (wanted.size === 0) {
         if (syncTotal === undefined) {
           throw new Error('The mirror has not completed a sync; check ready() before searching.');

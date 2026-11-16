@@ -35,10 +35,10 @@ The Smithsonian's Open Access catalog: 14.5 million objects across 20+ museums, 
 
 | Tool | Description |
 |:---|:---|
-| `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, topic, name, scientific name, media type, online-only, CC0). Returns curated summaries with total count. |
+| `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, topic, name, scientific name, media type, online-only, CC0, on view now). Returns curated summaries with total count. |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type, topic). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
-| `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, exhibition history, credit line, and identifiers. |
-| `smithsonian_get_media` | Return all CC0-licensed images for an object at multiple resolutions (thumbnail, screen, high-res JPEG/TIFF). Only CC0 images returned, never an empty list — a distinct error reason names why, whether the object has nothing digitized, only non-image media, or only restricted images. |
+| `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, the indexed values usable as search filters, current display, credit line, and identifiers. |
+| `smithsonian_get_media` | Return an object's CC0-licensed images in catalog order at multiple resolutions (thumbnail, screen, full-size JPEG, archival TIFF), with the object's `cc0_image_count`; page a long list with `start` and `limit`. Only CC0 images are returned. An object with none fails with a distinct error reason: nothing digitized, only non-image media, or only restricted images. |
 | `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium, topic) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
 | `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, named-party, topic, and period signals. |
 
@@ -46,7 +46,7 @@ The Smithsonian's Open Access catalog: 14.5 million objects across 20+ museums, 
 
 | Skill | Description |
 |:---|:---|
-| `smithsonian-guide` | Gates for agents querying the catalog: query syntax (`OR` never widens a search), counting a museum's or a place's holdings, finding a person's indexed name, genus-level scientific names, and mirror-served pages |
+| `smithsonian-guide` | Gates for agents querying the catalog: query syntax (`OR` never widens a search), counting a museum's or a place's holdings, reading a person's indexed name, what an on-view flag does and doesn't say, genus-level scientific names, and mirror-served pages |
 
 Ships in `skills/` for plugin installs, the npm package, the Docker image, and the `.mcpb` bundle, and is served over MCP as `skill://smithsonian-guide/SKILL.md`.
 
@@ -59,9 +59,10 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 - Free-text search over 14.5M objects from 20+ museums
 - Filters append hard `AND` constraints. Plain words and quoted phrases keep their matching semantics; active Lucene expressions are grouped to preserve Boolean precedence.
 - `filters.online_media_type` accepts exact `smithsonian_list_terms` media categories such as `Images`, `3D Models`, and `Sound recordings`. These describe the index; even `Images` does not guarantee attached or CC0 images. Check `smithsonian_get_object.media_summary` for deliverability. Media categories feed search, with no media-type browse mode.
-- Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, subject topic, named party (`name`), scientific name (`scientific_name`), indexed media category (`online_media_type`), online-only, CC0-only
+- Filters: museum unit code, object type, indexed date term (`1920s`, `500-1500`, `21st century`, `-2500`), culture, geographic place, subject topic, named party (`name`), scientific name (`scientific_name`), indexed media category (`online_media_type`), online-only, CC0-only, on view now (`on_view_only`)
 - `topic` and `name` are hard indexed constraints, not free text — `topic: "Quilts"` matches 1,134 objects where the bare word matches 2,677, and `name: "Warhol, Andy"` matches 421 against 715
 - Returns curated summaries: title, date, museum, object type, thumbnail URL, CC0 flag, `record_id`, plus `holding_museum_name` when the holding unit differs from the indexed `unit_code` (the 3D digitization scans)
+- `filters.on_view_only: true` selects objects the catalog flags as on physical display now (about 13,000 records from 13 museums). Most records carry no flag, so an unflagged object may still be on view, and there is no off-view filter.
 - An unknown `filters` key is rejected by name
 - Use `start` + `rows` for standard pagination (offset-based, default 20, up to 1,000 per page — a larger `rows` is served at 1,000 with a notice). When objects remain, the notice names the next `start`
 
@@ -74,14 +75,16 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 - Paginate with `start` + `rows` (default 50, up to 40,000 per page — a larger `rows` is served at 40,000 with a notice); `topic` (133k terms) and `place` (114k) are large enough to pair with `contains`
 - No per-term object counts are available upstream — only the term values themselves
 - Each field's vocabulary is cached for `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` (default 3600 seconds, `0` disables) — upstream ignores paging and returns the whole set on every call, so paging a large vocabulary uncached re-downloads it each time
-- `object_type` is not enumerable here — harvest its values from the `object_type` field in `smithsonian_search_objects` results
+- `object_type` is not enumerable here — take it from `smithsonian_get_object` `indexed.object_type` for a known object, or harvest it from the `object_type` field in `smithsonian_search_objects` results
 
 ---
 
 ### `smithsonian_get_object` <sub>tool</sub>
 
 - Input: `record_id` from `smithsonian_search_objects` — do not construct IDs manually
-- Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, exhibition history, accession identifiers, credit line, rights statement
+- Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, free-text exhibition history (rarely filled, so `[]` does not mean never exhibited), accession identifiers, credit line, rights statement
+- `indexed` holds the `name`, `place`, `object_type`, `date`, and `topic` values the record is indexed under, each passable verbatim to the `smithsonian_search_objects` filter of the same name; the free-text `makers`, `place`, `dates`, and `topics` often differ from them
+- Current display for objects the catalog flags: `on_view` (`true` or `false`, absent when the record carries no flag) and `current_exhibitions`, each `{ building?, room?, title? }` where `building` is a building code, not a `unit_code`
 - Media summary included — call `smithsonian_get_media` for full image URLs. `media_summary.non_image_media[]` lists every media item that is not an image (3D models, scanned books, documents) as `{ type, url?, is_cc0 }`, in catalog order
 - `holding_museum_name` names the holding unit when it differs from `unit_code`, the code the record is indexed under (the 3D digitization scans); the text output renders it as `Held by`
 - All nonempty notes retain their catalog labels and source order. `description` selects recognized prose labels; administrative notes stay labeled.
@@ -91,9 +94,10 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 
 ### `smithsonian_get_media` <sub>tool</sub>
 
-- Only CC0-licensed images are returned, never restricted content
-- Three distinct failure reasons when nothing is returnable: `no_media` (nothing digitized), `no_images` (media exists but is entirely non-image — 3D models, scanned books, documents; the recovery hint names the types present and points to `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item), `not_cc0` (images exist but none are CC0, thrown as `Forbidden`)
-- Each image entry includes thumbnail (~120px), screen-size (~800px), and high-resolution JPEG/TIFF URLs with pixel dimensions
+- Only CC0-licensed images are returned, never restricted content, in catalog order with `cc0_image_count` (the same count as `smithsonian_get_object`'s `media_summary.cc0_image_count`)
+- `start` and `limit` page the image list: omit `limit` to get every image from `start`; `limit` is capped at 1,000 and a larger value is served at the cap with a notice. A `start` at or past `cc0_image_count` returns an empty `images` list
+- Three distinct failure reasons when an object has no CC0 image, decided on the whole record before paging: `no_media` (nothing digitized), `no_images` (media exists but is entirely non-image — 3D models, scanned books, documents; the recovery hint names the types present and points to `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item), `not_cc0` (images exist but none are CC0, thrown as `Forbidden`)
+- Each image entry includes a thumbnail (~150px), a screen-size image (~1,200px on the long edge), a full-size JPEG (the catalog's high-resolution JPEG with pixel dimensions, or the image's full-size delivery URL without them when none is listed), and an archival TIFF when one exists
 - Use `smithsonian_search_objects` with `filters.cc0_only: true` to find objects with downloadable CC0 images before calling this tool
 
 ---
@@ -101,10 +105,10 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 ### `smithsonian_browse_category` <sub>tool</sub>
 
 - Five modes: `museum` (by unit code, e.g. `"NASM"` — matched exactly, not by museum name), `culture` (e.g. `"Aztecs"`), `period` (indexed date term, e.g. `"1940s"` or `"500-1500"`), `medium` (object type, e.g. `"Paintings"`), `topic` (subject term, e.g. `"Quilts"`)
-- `value` must be an exact indexed category term — resolve `museum`, `culture`, `period`, and `topic` vocabulary with `smithsonian_list_terms` first; `object_type` is not enumerable there, so harvest it from `smithsonian_search_objects` results
+- `value` must be an exact indexed category term — resolve `museum`, `culture`, `period`, and `topic` vocabulary with `smithsonian_list_terms` first; `object_type` is not enumerable there, so take it from `smithsonian_get_object` `indexed.object_type` for a known object, or harvest it from `smithsonian_search_objects` results
 - Returns total count, a page of sample objects, and a museum breakdown showing which institutions hold matching items (computed from the current page)
 - Use `start` + `rows` for standard pagination (offset-based, default 10, up to 1,000 per page — a larger `rows` is served at 1,000 with a notice). When objects remain, the notice names the next `start` — adjacent pages retrieve the objects a capped sample omits
-- A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint: a value outside the vocabulary gets the exact `smithsonian_list_terms` call that resolves it, and a value the index enumerates but that matches no objects is named as such and routed elsewhere
+- A category value that matches nothing throws `invalid_category` with a mode-specific recovery hint: a value outside the vocabulary gets the exact `smithsonian_list_terms` call that resolves it, and a value the index enumerates but that matches no objects is named as such and routed elsewhere. When the vocabulary read fails or the call's time runs out, membership is unknown: the hint names the `smithsonian_list_terms { field, contains: value }` lookup that settles it (for `unit_code` it matches museum names as well as codes), claims neither membership nor non-membership, and says what to do with either answer. The call still fails `invalid_category`
 - For open-ended or topic discovery, use `smithsonian_search_objects` instead — this tool requires an exact category value
 
 ---
@@ -116,8 +120,9 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 - The topic signal is a hard `topic:` filter, so every object it tags carries that subject term rather than merely mentioning the word
 - `similarity_signals` on each result names every metadata term that connected it to the anchor — an object surfaced by more than one signal carries all of them
 - Page with `start` — a 0-indexed offset into the interleaved related set (default `limit` 10, up to 1,000 — a larger `limit` is served at 1,000 with a notice, and the notice names the next `start`); each signal is reachable to a depth of 5,000 (fetched in ≤1,000-row chunks — a deeper page can shift an object by a bounded amount near a seam), and a truncated response reports `truncationCeiling` as an upper bound on the reachable related pool
+- `unit_code` scopes every signal to one museum: the indexed code a result row reports (matched exactly and case-sensitively, not checked against the vocabulary), never a `holding_museum_name`. It keeps related objects inside the anchor's museum, or, with another code, finds related objects held elsewhere. Each `search_continuation` carries it as `filters.unit_code`. A scoped call whose signals all come back with no match beyond the anchor says so in its notice and suggests omitting `unit_code`. Omit it, or pass an empty string, to search every museum
 - `signals[]` breaks the fan-out down per signal: `row_count` is that signal's true upstream size (uncapped, so it can exceed the 5,000 reach) and `search_continuation` is the exact `smithsonian_search_objects` input that retrieves the signal's full match set at any depth — the retrieval path past this tool's per-signal reach
-- Partial failures name the failed signals with safe categories in the same notice as paging guidance. Empty successes distinguish missing anchor signals, no non-anchor matches, and exhausted pages. All-failed searches reject with the first signal failure; caller cancellation always rejects.
+- Partial failures name the failed signals with safe categories in the same notice as paging guidance; a signal still pending when the call's 50 s deadline passes is named `(timeout)` beside the ones that finished. Empty successes distinguish missing anchor signals, no non-anchor matches, and exhausted pages. All-failed searches reject with the first signal failure; caller cancellation always rejects.
 
 ---
 
@@ -137,7 +142,7 @@ Smithsonian-specific:
 Agent-friendly output:
 
 - `has_media` on every object summary — agents can gate image download calls without an extra lookup (the `is_cc0` flag is the metadata license, which the Open Access corpus carries almost everywhere)
-- Typed error reasons (`no_results`, `invalid_filter`, `not_found`, `no_media`, `no_images`, `not_cc0`, `invalid_id`) with recovery hints for each case
+- Typed error reasons (`no_results`, `invalid_filter`, `no_terms`, `invalid_category`, `not_found`, `no_media`, `no_images`, `not_cc0`, `invalid_id`, `api_key_rejected`) with recovery hints for each case
 - `similarity_signals` on related-object results let agents explain why objects were surfaced
 - `total_count` on all search responses enables agents to communicate result scope before paginating
 - Over-cap page sizes are served at the cap with a notice instead of rejected, and paging notices name the next `start` outright
@@ -232,7 +237,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 SMITHSONIAN_API_KEY=your-api-key bun 
 
 ### Prerequisites
 
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.4](https://bun.sh/) or higher (or Node.js v24+).
 - A free `api.data.gov` API key — register at [https://api.data.gov/signup](https://api.data.gov/signup). Approval is instant.
 - Optional: about 17 GB of disk for the full [Open Access mirror](#optional-open-access-mirror), and `better-sqlite3` on Node.
 
@@ -299,6 +304,7 @@ By default every read goes to the live Smithsonian API, whose key allows 1,000 r
 - Object reads (`smithsonian_get_object`, `smithsonian_get_media`, and the anchor of `smithsonian_find_related`) come from the mirror once it is built, and go live on a miss or a store error.
 - Filter-only searches (an empty or `*` query) come from the mirror when they stay within a 100,000-index-entry scan budget.
 - Free-text searches, over-budget searches, and `smithsonian_list_terms` stay live.
+- `filters.on_view_only` searches come from the mirror too, once every shard has been read under the current schema (see **Upgrading a store** below).
 - Mirror pages run in mirror order, not the live API's, and their notice says so.
 
 **Provenance.** Every tool except `smithsonian_list_terms` gains two optional fields when a mirror is configured: `sources` (`oa_mirror`, `edan_api`, or both) and, when part of the answer came from the mirror, `mirror_snapshot` (the ISO date of the bulk publish).
@@ -312,9 +318,11 @@ SMITHSONIAN_MIRROR_PATH=./smithsonian-oa.sqlite bun run mirror:refresh  # bring 
 SMITHSONIAN_MIRROR_PATH=./smithsonian-oa.sqlite bun run mirror:status   # print the sync state
 ```
 
-The `mirror:*` scripts run `dist/mirror/cli.js`. On the HTTP transport the server refreshes the mirror on `SMITHSONIAN_MIRROR_REFRESH_CRON` by running `mirror:refresh` in a child process, so a refresh never stalls requests; on stdio, run `mirror:refresh` yourself. Only `mirror:init` starts a build: a refresh of a store that holds nothing fails and asks for `mirror:init`, and a server whose store has no completed build logs a warning and answers every read live. The store holds the whole corpus, so it needs substantial disk. Never `VACUUM` it: the facet index stores row ids that `VACUUM` may renumber.
+The `mirror:*` scripts run `dist/mirror/cli.js`. On the HTTP transport the server refreshes the mirror on `SMITHSONIAN_MIRROR_REFRESH_CRON` by running `mirror:refresh` in a child process, so a refresh never stalls requests; on stdio, run `mirror:refresh` yourself. One sync runs on a store at a time: a `mirror:init` or `mirror:refresh` that finds another process syncing the store exits 75 without syncing, and a scheduled refresh that meets one skips that tick. Only `mirror:init` starts a build: a refresh of a store that holds nothing fails and asks for `mirror:init`, and a server whose store has no completed build logs a warning and answers every read live. The store holds the whole corpus, so it needs substantial disk. Never `VACUUM` it: the facet index stores row ids that `VACUUM` may renumber.
 
 On Node, the mirror needs the optional peer dependency `better-sqlite3`; Bun uses its built-in SQLite.
+
+**Upgrading a store.** A store built under an older schema migrates when the server or a `mirror:*` command first opens it, which marks every shard to be re-read on the next sync. Until a shard is re-read, its records are answered from the live API, and so is every `on_view_only` search; other filter-only searches stay on the mirror. A server with a refresh schedule (HTTP, unless `SMITHSONIAN_MIRROR_REFRESH_CRON` is empty) starts that refresh at once; without one, startup logs a notice naming `mirror:refresh`.
 
 **Docker.** The image creates `/var/lib/smithsonian-mcp-server`, owned by the runtime user. Mount a volume there, point `SMITHSONIAN_MIRROR_PATH` at a file inside it, and build once:
 

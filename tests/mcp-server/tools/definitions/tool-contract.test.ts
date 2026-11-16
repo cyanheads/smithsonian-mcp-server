@@ -186,6 +186,7 @@ describe('tool contract boundary', () => {
   it('relays specimen fields through both object wire surfaces', async () => {
     stubJson({
       response: {
+        url: 'edanmdm:nmnhvz_10292842',
         title: 'Lampropeltis triangulum',
         content: {
           indexedStructured: {
@@ -503,6 +504,37 @@ describe('tool contract boundary', () => {
       expect(error.data?.recovery?.hint).toBe(declaredRecovery(def, 'not_found'));
       expect(text(result)).toContain('(reason not_found)');
     });
+
+    // A refused key fails every tool's first read. Forbidden is not a baseline code, so
+    // each tool declares the reason its service raises and advertises it in the contract.
+    it.each([
+      ['smithsonian_search_objects', smithsonianSearchObjects, { query: 'aircraft' }],
+      ['smithsonian_list_terms', smithsonianListTerms, { field: 'culture' }],
+      ['smithsonian_get_object', smithsonianGetObject, { id: 'nasm_TEST001' }],
+      ['smithsonian_get_media', smithsonianGetMedia, { id: 'nasm_TEST001' }],
+      ['smithsonian_browse_category', smithsonianBrowseCategory, { mode: 'museum', value: 'NASM' }],
+      ['smithsonian_find_related', smithsonianFindRelated, { id: 'nasm_TEST001' }],
+    ] as const)('declares and delivers api_key_rejected through %s', async (_name, def, input) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(
+          async () =>
+            new Response(JSON.stringify({ error: { code: 'API_KEY_INVALID' } }), {
+              status: 403,
+              statusText: 'Forbidden',
+              headers: { 'Content-Type': 'application/json' },
+            }),
+        ),
+      );
+
+      const result = await runToolContract(def, input as never);
+
+      const error = errorOf(result);
+      expect(error.code).toBe(-32005);
+      expect(error.data?.reason).toBe('api_key_rejected');
+      expect(error.data?.recovery?.hint).toBe(declaredRecovery(def, 'api_key_rejected'));
+      expect(text(result)).toContain('(reason api_key_rejected)');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -771,6 +803,42 @@ describe('Open Access mirror provenance (issue #66)', () => {
       expect(text(result)).toContain(answer.notice);
     });
 
+    it('serves an on_view_only filter-only search with no EDAN request, its total the facet count (issue #74)', async () => {
+      const edan = stubEdan();
+      const facetCount = (await t.store.raw())
+        .prepare<{ n: number }>("SELECT n FROM terms WHERE field = 'on_view' AND value = 'true'")
+        .get()?.n;
+
+      const result = await runToolContract(smithsonianSearchObjects, {
+        query: '',
+        filters: { on_view_only: true },
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(edan.fetchMock).not.toHaveBeenCalled();
+      const answer = answerOf(result);
+      expect(facetCount).toBe(1);
+      expect(answer.total_count).toBe(facetCount);
+      expect(answer.objects?.map((o) => o.record_id)).toEqual(['nasm_A19820121000']);
+      expect(answer.sources).toEqual(['oa_mirror']);
+    });
+
+    it('reads on_view and current_exhibitions from the mirrored doc on both surfaces (issue #74)', async () => {
+      const edan = stubEdan();
+
+      const result = await CALLS.get_object();
+
+      expect(edan.fetchMock).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({
+        on_view: true,
+        current_exhibitions: [{ building: 'HAZY' }],
+      });
+      const lines = text(result).split('\n');
+      const at = lines.indexOf('**On view:** Yes');
+      expect(at).toBeGreaterThan(-1);
+      expect(lines[at + 1]).toBe('- HAZY');
+    });
+
     it('composes a clamped, truncated filter-only notice as clamp, guidance, then mirror sentence', async () => {
       const edan = stubEdan();
 
@@ -940,7 +1008,10 @@ describe('Open Access mirror provenance (issue #66)', () => {
           'place',
           'culture',
           'topics',
+          'indexed',
           'exhibitions',
+          'on_view',
+          'current_exhibitions',
           'credit_line',
           'identifiers',
           'object_rights',
@@ -950,7 +1021,10 @@ describe('Open Access mirror provenance (issue #66)', () => {
           'error',
         ],
       ],
-      ['smithsonian_get_media', ['record_id', 'title', 'is_cc0', 'images', 'error']],
+      [
+        'smithsonian_get_media',
+        ['record_id', 'title', 'is_cc0', 'cc0_image_count', 'images', ...PAGE_ENRICHMENT, 'error'],
+      ],
     ])(
       '%s advertises exactly sources and mirror_snapshot beyond its own keys, both optional',
       (name, own) => {

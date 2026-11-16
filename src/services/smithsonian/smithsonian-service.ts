@@ -6,10 +6,12 @@
 
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import {
+  forbidden,
   JsonRpcErrorCode,
   McpError,
   notFound,
   serviceUnavailable,
+  timeout,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
@@ -20,6 +22,7 @@ import { ResponseCache } from './response-cache.js';
 import type {
   FullObject,
   ImageItem,
+  IndexedFilterValues,
   MediaResolution,
   NonImageMedia,
   ObjectSummary,
@@ -27,6 +30,7 @@ import type {
   RawContentResponse,
   RawEDAN,
   RawFreetextEntry,
+  RawIndexedStructured,
   RawMediaItem,
   RawSearchResponse,
   RawTermsResponse,
@@ -128,21 +132,33 @@ function museumName(unitCode: string | undefined): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Tags that separate lines rather than sit inside one, replaced with a space so
- * the words on either side stay apart. Every other tag is dropped outright,
- * which is what turns an anchor into its link text and keeps `H<sub>2</sub>O`
- * as `H2O` rather than `H 2 O`. `<br>` and `<p>` are the two EDAN emits;
- * `<div>` and `<li>` cost nothing to cover and would jam words without it.
+ * A markup tag: `<`, an optional `/`, then one of the nine element names EDAN emits
+ * (`a b br em i p span sub sup` — every name in a 46,352-record sample across 34
+ * units), in any case, ending at whitespace, `/`, or `>`. Every other bracketed run
+ * is catalog text and stays as written: MARC supplied text (`Issues for <winter
+ * 1988->`), qualifiers (`Berberin <Frau>`), `<U+309A>`, `<p. 23>`, `Depth <20 m`.
+ *
+ * The attributes run to the first `>` outside quotes, so a quoted value may hold
+ * `<` or `>` and a SICI DOI (`href="…14<238:CLOARB>2.0.CO;2"`) stays inside its
+ * anchor. The scan is linear in the text: a candidate ends at the first unquoted
+ * `<`, each step takes one character or one whole quoted value, and a quote moves a
+ * candidate between three states in a way no two candidates can share, so at most
+ * three are open at any position.
  */
-const LINE_BREAKING_TAG = /<\/?(?:br|p|div|li)\b[^>]*>/gi;
+const MARKUP_TAG = /<\/?(a|b|br|em|i|p|span|sub|sup)(?=[\s/>])(?:[^<>"']|"[^"]*"|'[^']*')*>/gi;
 
 /**
- * An HTML tag: `<`, an optional `/`, then a name opening on an ASCII letter.
- * That letter is what leaves a bare `<` in a real title alone — `Depth <20 m`
- * opens on a digit and `1856 < 1857` on a space, so neither is read as a tag
- * and neither loses the text that follows it.
+ * The elements that separate lines rather than sit inside one, replaced with a
+ * space so the words on either side stay apart. Every other tag is dropped
+ * outright, which is what turns an anchor into its link text and keeps
+ * `H<sub>2</sub>O` as `H2O` rather than `H 2 O`.
  */
-const HTML_TAG = /<\/?[a-zA-Z][^>]*>/g;
+const LINE_BREAKING_ELEMENTS = new Set(['br', 'p']);
+
+/** Replace one {@link MARKUP_TAG} match: a space for a line-breaking element, nothing otherwise. */
+function replaceMarkupTag(_tag: string, name: string): string {
+  return LINE_BREAKING_ELEMENTS.has(name.toLowerCase()) ? ' ' : '';
+}
 
 /**
  * The five predefined XML entities plus `&nbsp;`. EDAN's live output uses
@@ -178,13 +194,14 @@ function decodeCharacterReference(match: string, body: string): string {
 }
 
 /**
- * Render upstream EDAN text as plain text — markup removed, character
- * references decoded (issue #49).
+ * Render upstream EDAN text as plain text — {@link MARKUP_TAG} markup removed,
+ * character references decoded (issue #49), every other bracketed run kept.
  *
  * The consumer of these fields is a language model, so an anchor tag or an
  * undecoded `&#39;` is noise it will quote back verbatim (`Women&#39;s`).
  * Records under `SLA_SRO` carry an `<a href>` citation in nearly every
- * description, and entity-bearing titles appear across the corpus.
+ * description, and entity-bearing titles appear across the corpus. Catalog text
+ * in angle brackets is not markup: deleting it loses words from the record.
  *
  * **Strip, then decode — in that order, once.** Decoding first would turn
  * `&lt;b&gt;`, which is an object title that talks ABOUT a tag, into a tag the
@@ -197,9 +214,7 @@ function decodeCharacterReference(match: string, body: string): string {
  * or angle bracket, and the line structure of an unmarked-up note, both survive.
  */
 export function toPlainText(value: string): string {
-  const stripped = value.includes('<')
-    ? value.replace(LINE_BREAKING_TAG, ' ').replace(HTML_TAG, '')
-    : value;
+  const stripped = value.includes('<') ? value.replace(MARKUP_TAG, replaceMarkupTag) : value;
   const text = stripped === value ? value : stripped.replace(/\s+/g, ' ').trim();
   return text.replace(CHARACTER_REFERENCE, decodeCharacterReference);
 }
@@ -284,9 +299,10 @@ function isObjectCC0(raw: RawEDAN): boolean {
   return raw.content?.descriptiveNonRepeating?.metadata_usage?.access === 'CC0';
 }
 
-/** Extract thumbnail URL from the first media item in online_media. */
+/** The thumbnail of the first media item in online_media, by the rule get_media's images use. */
 function firstThumbnail(raw: RawEDAN): string | undefined {
-  return raw.content?.descriptiveNonRepeating?.online_media?.media?.[0]?.thumbnail;
+  const first = raw.content?.descriptiveNonRepeating?.online_media?.media?.[0];
+  return first ? mediaThumbnail(first) : undefined;
 }
 
 /**
@@ -317,6 +333,59 @@ function holdingMuseumName(raw: RawEDAN): string | undefined {
   const source = dnr.data_source?.trim();
   if (!source) return undefined;
   return unitName(source) ?? source;
+}
+
+function isText(value: unknown): value is string {
+  return typeof value === 'string' && value !== '';
+}
+
+/** The non-empty strings of an upstream array, in order; any other entry is dropped. */
+function nonEmptyStrings(values: readonly unknown[] | undefined): string[] {
+  return (values ?? []).filter(isText);
+}
+
+/**
+ * `indexedStructured.onPhysicalExhibit` as a flag: true for `"Yes"`, false for `"No"`, and
+ * undefined for a record that sets neither, which says nothing about display.
+ */
+function onView(indexed: RawIndexedStructured | undefined): boolean | undefined {
+  const flags = indexed?.onPhysicalExhibit ?? [];
+  if (flags.includes('Yes')) return true;
+  return flags.includes('No') ? false : undefined;
+}
+
+/**
+ * Where the object is on display now: one entry per `indexedStructured.exhibition` item, with
+ * its building code, room, and `exhibitionTitle` where set. An item naming none is dropped.
+ */
+function currentExhibitions(
+  indexed: RawIndexedStructured | undefined,
+): FullObject['current_exhibitions'] {
+  return (indexed?.exhibition ?? []).flatMap((entry) => {
+    if (!isRecord(entry)) return [];
+    const { building, room, exhibitionTitle: title } = entry;
+    const exhibition = {
+      ...(isText(building) && { building }),
+      ...(isText(room) && { room }),
+      ...(isText(title) && { title }),
+    };
+    return Object.keys(exhibition).length > 0 ? [exhibition] : [];
+  });
+}
+
+/**
+ * The values a record is indexed under for the `name`, `place`, `object_type`, `date`, and
+ * `topic` search filters, each usable as that filter's value verbatim. A `name` entry wrapped
+ * as `{ type, content }` (bibliographic and authority records) contributes its `content`.
+ */
+function indexedFilterValues(indexed: RawIndexedStructured | undefined): IndexedFilterValues {
+  return {
+    name: nonEmptyStrings(indexed?.name?.map((entry) => (isRecord(entry) ? entry.content : entry))),
+    place: nonEmptyStrings(indexed?.place),
+    object_type: nonEmptyStrings(indexed?.object_type),
+    date: nonEmptyStrings(indexed?.date),
+    topic: nonEmptyStrings(indexed?.topic),
+  };
 }
 
 /** Normalize a raw EDAN record into an ObjectSummary. */
@@ -460,6 +529,8 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     }
   }
 
+  const on_view = onView(indexed);
+
   // Credit
   const credit_line = firstContent(freetext?.creditLine);
 
@@ -501,7 +572,10 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     place,
     culture,
     topics,
+    indexed: indexedFilterValues(indexed),
     exhibitions,
+    ...(on_view !== undefined && { on_view }),
+    current_exhibitions: currentExhibitions(indexed),
     ...(credit_line !== undefined && { credit_line }),
     identifiers,
     ...(object_rights !== undefined && { object_rights }),
@@ -541,39 +615,69 @@ function buildResolution(
   return width !== undefined && height !== undefined ? { url, width, height } : { url };
 }
 
-/** Normalize a raw media item into an ImageItem. */
+/** What a media resource is, from the first rendition its label names. */
+function resourceRole(label: string | undefined): 'tiff' | 'jpeg' | 'screen' | 'thumb' | undefined {
+  const l = (label ?? '').toLowerCase();
+  if (l.includes('tif')) return 'tiff';
+  if (l.includes('jpeg') || l.includes('jpg') || l.includes('high-res')) return 'jpeg';
+  if (l.includes('screen')) return 'screen';
+  return l.includes('thumb') ? 'thumb' : undefined;
+}
+
+/**
+ * A media item's thumbnail: the last resource labelled one, else the item's `thumbnail`. On
+ * IDS items `thumbnail` repeats the full-size `content` URL, and the "Thumbnail Image"
+ * resource is the small rendition.
+ */
+function mediaThumbnail(m: RawMediaItem): string | undefined {
+  let thumbnail = m.thumbnail;
+  for (const r of m.resources ?? []) {
+    if (r.url && resourceRole(r.label) === 'thumb') thumbnail = r.url;
+  }
+  return thumbnail;
+}
+
+/**
+ * Normalize a raw media item into an ImageItem. `content` is the IDS delivery URL for
+ * the full-size file, so it stands in for a missing Screen Image and, without its
+ * dimensions, for a missing high-resolution JPEG (issue #71): the item-level
+ * `width`/`height` describe the master, not what `content` serves. Empty accessibility
+ * text is left out, as absent text is.
+ */
 function normalizeToImage(m: RawMediaItem): ImageItem | null {
   const mediaId = m.idsId ?? m.id ?? '';
   if (!mediaId) return null;
 
-  // Parse resource list for high-res, screen, thumb
   let high_res_jpeg: MediaResolution | undefined;
   let high_res_tiff: MediaResolution | undefined;
   let screen_url: string | undefined;
-  let thumbnail_url = m.thumbnail;
+  const thumbnail_url = mediaThumbnail(m);
 
   for (const r of m.resources ?? []) {
-    const label = (r.label ?? '').toLowerCase();
     if (!r.url) continue;
-    if (label.includes('tiff') || label.includes('tif')) {
-      high_res_tiff = buildResolution(r.url, r.width, r.height);
-    } else if (label.includes('jpeg') || label.includes('jpg') || label.includes('high-res')) {
-      high_res_jpeg = buildResolution(r.url, r.width, r.height);
-    } else if (label.includes('screen')) {
-      screen_url = r.url;
-    } else if (label.includes('thumb')) {
-      thumbnail_url = r.url;
+    switch (resourceRole(r.label)) {
+      case 'tiff':
+        high_res_tiff = buildResolution(r.url, r.width, r.height);
+        break;
+      case 'jpeg':
+        high_res_jpeg = buildResolution(r.url, r.width, r.height);
+        break;
+      case 'screen':
+        screen_url = r.url;
+        break;
     }
   }
 
-  // Fallbacks using the content URL (IDS delivery service)
-  if (!screen_url && m.content) screen_url = m.content;
+  if (m.content) {
+    screen_url ??= m.content;
+    high_res_jpeg ??= { url: m.content };
+  }
 
   return {
     media_id: mediaId,
     is_cc0: isMediaCC0(m),
-    ...(m.altTextAccessibility !== undefined && { alt_text: m.altTextAccessibility }),
-    ...(m.extDescrAccessibility !== undefined && { description: m.extDescrAccessibility }),
+    ...(m.altTextAccessibility && { alt_text: m.altTextAccessibility }),
+    ...(m.extDescrAccessibility && { description: m.extDescrAccessibility }),
     ...(thumbnail_url !== undefined && { thumbnail_url }),
     ...(screen_url !== undefined && { screen_url }),
     ...(high_res_jpeg !== undefined && { high_res_jpeg }),
@@ -634,8 +738,10 @@ export function luceneField(field: string, value: string): string {
 
 /**
  * The Lucene term the live API matches a facet filter with: an exact value as a
- * {@link luceneField} phrase, `online_only` as any indexed `online_media_type`, and
- * `cc0` as `media_usage:CC0` (records carrying CC0 media).
+ * {@link luceneField} phrase, `online_only` as any indexed `online_media_type`,
+ * `cc0` as `media_usage:CC0` (records carrying CC0 media), and `on_view` as
+ * `onPhysicalExhibit:"Yes"`, which matches exactly the records flagged Yes. Upstream has no
+ * exact off-view term: `onPhysicalExhibit:"No"` returns records flagged Yes.
  */
 export function luceneFilter(filter: FacetFilter): string {
   switch (filter.field) {
@@ -643,6 +749,8 @@ export function luceneFilter(filter: FacetFilter): string {
       return 'online_media_type:*';
     case 'cc0':
       return 'media_usage:CC0';
+    case 'on_view':
+      return 'onPhysicalExhibit:"Yes"';
     default:
       return luceneField(filter.field, filter.value);
   }
@@ -827,8 +935,8 @@ function tightestNeighbors(
 // SmithsonianService
 // ---------------------------------------------------------------------------
 
-/** Per-request options for {@link SmithsonianService.get}. */
-interface GetOptions {
+/** Per-request options for {@link SmithsonianService.get}, whose answer is a `T` that holds a `U`. */
+interface GetOptions<T, U extends T> {
   /**
    * Marks a path whose resource is a collection that exists for as long as the
    * service does — `/search` and `/terms/{field}`. A 404 on one of those is
@@ -848,6 +956,13 @@ interface GetOptions {
    */
   collectionEndpoint?: boolean;
   /**
+   * Epoch milliseconds by which the read must finish: the calling tool's
+   * {@link CallDeadline}, or a shared cache load's own ceiling. Every attempt,
+   * backoff, and body read runs inside it, and a read that starts past it sends
+   * nothing.
+   */
+  deadline: number;
+  /**
    * Non-2xx statuses that are an expected outcome for this call, logged at
    * `debug` instead of `error` (the status-mapped throw is unchanged). Only
    * getContent passes this — a missing object is a real 404 from EDAN, and a
@@ -858,6 +973,24 @@ interface GetOptions {
   expectedStatuses?: number[];
   /** Request headers merged over `Accept` — every call site passes the API key here. */
   headers?: Record<string, string>;
+  /**
+   * The payload a 200 must carry to be an answer. EDAN never answers a working read
+   * with a 200 that lacks it — a missing record is an HTTP 404 and an unknown terms
+   * field an HTTP 400 — so a reply without it is an upstream fault, and read as an
+   * empty page, an empty vocabulary, or a blank record it would be cached for its TTL
+   * and served to every caller (issue #72).
+   *
+   * Checked INSIDE the retry closure, after the error-in-200 branch (so an error body
+   * keeps its own classification), and only on a 200 (so a 403 key rejection never
+   * reaches it). A reply that fails it throws a retryable `ServiceUnavailable`
+   * (`reason: 'upstream_unavailable'`): a one-off is retried within the read's
+   * deadline, and no cache ever receives it.
+   */
+  payload: {
+    /** What the reply must carry, as the error names it. */
+    description: string;
+    holds: (raw: T) => raw is U;
+  };
   /**
    * The signal the request runs on, when it is not the caller's own. A cached
    * read passes the response cache's signal, so one caller cancelling never
@@ -876,11 +1009,71 @@ interface GetOptions {
 const RESPONSE_CACHE_BYTES = 64 * 1024 * 1024;
 
 /**
- * One deadline across every attempt and backoff of a request. Four 15 s attempts
- * with 2/4/8 s backoff would run 74 s, past the 60 s request timeout MCP SDK
- * clients default to, so a hung upstream fails here first.
+ * One deadline across every read a tool call makes — each attempt, backoff, and body
+ * read of each request, and every request the call chains (anchor, fan-out, deeper
+ * chunks; search, vocabulary lookup, harvest). MCP SDK clients give up on a request
+ * after 60 s by default; four 15 s attempts with 2/4/8 s backoff would run 74 s for
+ * one read alone, and a deadline per read multiplies by the reads chained. One 50 s
+ * deadline leaves the work after the last read about 10 s inside the client's limit,
+ * so a hung upstream fails here first (issue #68).
+ *
+ * It also caps a shared response-cache load, which runs on its own deadline rather
+ * than the starting caller's.
  */
-const RETRY_DEADLINE_MS = 50_000;
+export const CALL_DEADLINE_MS = 50_000;
+
+/**
+ * The instant, in epoch milliseconds, by which every read of one tool call must finish.
+ * Each tool handler creates one with {@link startCallDeadline} at entry and passes it to
+ * every read it makes, so each read gets the time the call has left.
+ */
+export type CallDeadline = number & { readonly __brand: 'CallDeadline' };
+
+/** A tool call's deadline, {@link CALL_DEADLINE_MS} from now. */
+export function startCallDeadline(): CallDeadline {
+  return (Date.now() + CALL_DEADLINE_MS) as CallDeadline;
+}
+
+/**
+ * The next step for a call the api.data.gov edge refused for the server's key. Every call fails
+ * the same way until the key is replaced, and only the operator can replace it.
+ */
+const API_KEY_RECOVERY =
+  "The server's SMITHSONIAN_API_KEY was refused, so every call fails until it is replaced and retrying will not help. The operator sets it to a valid key from https://api.data.gov/signup and restarts the server.";
+
+/**
+ * The `errors[]` entry for a refused key, which `get()` raises on any tool's read. Every tool
+ * declares it: `Forbidden` is not a baseline code, so an undeclared reason would reach callers
+ * that no contract advertises.
+ */
+export const API_KEY_REJECTED_ERROR = {
+  reason: 'api_key_rejected',
+  code: JsonRpcErrorCode.Forbidden,
+  when: "The Smithsonian API refused this server's SMITHSONIAN_API_KEY (an api.data.gov API_KEY_* error).",
+  recovery: API_KEY_RECOVERY,
+  thrownBy: 'service',
+} as const;
+
+/**
+ * The `API_KEY_*` code (`API_KEY_INVALID`, `API_KEY_MISSING`, …) an api.data.gov HTTP 403 names
+ * in its JSON body, `{ "error": { "code" } }`; undefined for any other failure. The body is read
+ * from the copy `fetchWithTimeout` keeps on the server: no client envelope carries it, so this
+ * code is all of it the caller sees.
+ */
+function rejectedKeyCode(err: McpError): string | undefined {
+  if (err.data?.status !== 403) return undefined;
+  const body = err.data.body;
+  if (typeof body !== 'string') return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // A 403 that is not JSON (a proxy's page) is not the edge's key rejection.
+    return undefined;
+  }
+  const code = isRecord(parsed) && isRecord(parsed.error) ? parsed.error.code : undefined;
+  return typeof code === 'string' && /^API_KEY_[A-Z_]+$/.test(code) ? code : undefined;
+}
 
 /**
  * The caller's cancellation signal. `RequestContext` does not declare it; the
@@ -910,7 +1103,7 @@ export class SmithsonianService {
    * has an entry cap and no byte bound, throws on `set` once full, and rejects
    * URL characters in keys.
    */
-  private readonly responses = new ResponseCache(RESPONSE_CACHE_BYTES);
+  private readonly responses = new ResponseCache(RESPONSE_CACHE_BYTES, CALL_DEADLINE_MS);
 
   /**
    * @param mirror The Open Access bulk mirror, when one is configured. Object reads and
@@ -955,17 +1148,32 @@ export class SmithsonianService {
   }
 
   /**
-   * Execute a GET request with retry/backoff. Handles error-in-200 responses. Every
-   * attempt and backoff runs on the request's signal, so cancelling it ends a backoff
-   * at once, and inside one {@link RETRY_DEADLINE_MS} deadline.
+   * Execute a GET request with retry/backoff. Names a key the edge refuses (HTTP 403,
+   * `reason: 'api_key_rejected'`), handles error-in-200 responses, and refuses a 200
+   * without the read's {@link GetOptions.payload}. Every attempt and backoff runs on
+   * the request's signal, so cancelling it ends a backoff at once, and inside the time
+   * left before {@link GetOptions.deadline}, so expiry mid-attempt, mid-backoff, or
+   * mid-body surfaces as `withRetry`'s `Timeout` (`reason: 'retry_deadline_exceeded'`).
+   * The deadline stays out of `withRetry`'s `signal`, whose aborts pass through raw as
+   * caller cancellations.
+   *
+   * @throws McpError `Timeout` (`reason: 'retry_deadline_exceeded'`), sending nothing,
+   *   when the deadline has already passed.
    */
-  private get<T extends { error?: { code?: string; message?: string } }>(
+  private async get<T extends { error?: { code?: string; message?: string } }, U extends T>(
     url: string,
     ctx: RequestContext,
-    options: GetOptions = {},
-  ): Promise<T> {
+    options: GetOptions<T, U>,
+  ): Promise<U> {
+    const remainingMs = options.deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw timeout(
+        `The request was not sent: the tool call's ${CALL_DEADLINE_MS / 1000} s deadline had already passed.`,
+        { reason: 'retry_deadline_exceeded' },
+      );
+    }
     const signal = options.signal ?? callerSignal(ctx);
-    return withRetry(
+    return await withRetry(
       async (attempt) => {
         let response: Response;
         try {
@@ -975,14 +1183,24 @@ export class SmithsonianService {
             ...(options.expectedStatuses && { expectedStatuses: options.expectedStatuses }),
           });
         } catch (err: unknown) {
-          if (
-            options.collectionEndpoint &&
-            err instanceof McpError &&
-            err.code === JsonRpcErrorCode.NotFound
-          ) {
+          if (!(err instanceof McpError)) throw err;
+          if (options.collectionEndpoint && err.code === JsonRpcErrorCode.NotFound) {
             throw serviceUnavailable(
               'The Smithsonian API is not routing requests — a collection endpoint that exists whenever the service is up returned HTTP 404. This is an upstream outage, not a missing record.',
               { ...err.data, reason: 'upstream_unavailable' },
+              { cause: err },
+            );
+          }
+          const keyCode = rejectedKeyCode(err);
+          if (keyCode !== undefined) {
+            throw forbidden(
+              `The Smithsonian API refused this server's API key (${keyCode}).`,
+              {
+                ...err.data,
+                reason: 'api_key_rejected',
+                errorCode: keyCode,
+                recovery: { hint: API_KEY_RECOVERY },
+              },
               { cause: err },
             );
           }
@@ -990,7 +1208,8 @@ export class SmithsonianService {
         }
         const raw = (await response.json()) as T;
 
-        // The API returns HTTP 200 with an error body for key/rate issues.
+        // An error body on an HTTP 200. The edge itself answers a refused key with 403
+        // (above) and a rate limit with 429 (status-mapped to RateLimited).
         if (raw.error) {
           const code = raw.error.code ?? '';
           if (code === 'API_KEY_MISSING') {
@@ -1013,6 +1232,12 @@ export class SmithsonianService {
           });
         }
 
+        if (!options.payload.holds(raw)) {
+          throw serviceUnavailable(
+            `The Smithsonian API answered HTTP 200 without ${options.payload.description}. This is an upstream fault, not an empty result.`,
+            { reason: 'upstream_unavailable' },
+          );
+        }
         return raw;
       },
       {
@@ -1020,7 +1245,7 @@ export class SmithsonianService {
         context: ctx,
         baseDelayMs: 2000,
         maxRetries: 3,
-        deadlineMs: RETRY_DEADLINE_MS,
+        deadlineMs: remainingMs,
         ...(signal && { signal }),
       },
     );
@@ -1031,12 +1256,14 @@ export class SmithsonianService {
    *
    * A search with no query (`''` or `*`) is answered by facet filters alone, so the mirror
    * serves it when it can do so within its scan budget: rows then come in mirror order, and
-   * the total is the facet count. Free text, an over-budget search, and every search on a
-   * server without a ready mirror go to the live API, from the response cache when the same
+   * the total is the facet count. Free text, an over-budget search, an `on_view` search while
+   * a mirror shard awaits its post-upgrade re-read, and every search on a server without a
+   * ready mirror go to the live API, from the response cache when the same
    * request URL succeeded within the search TTL.
    *
    * On the live path each filter becomes a {@link luceneFilter} term ANDed into `q` (EDAN has
-   * no `fq` parameter), so each is a hard constraint rather than a scoring-only hint.
+   * no `fq` parameter), so each is a hard constraint rather than a scoring-only hint. The
+   * live read, cached or not, ends by `deadline`.
    */
   async search(
     params: {
@@ -1047,6 +1274,7 @@ export class SmithsonianService {
       filters?: readonly FacetFilter[];
     },
     ctx: RequestContext,
+    deadline: CallDeadline,
   ): Promise<SearchPage> {
     const activeFilters = params.filters ?? [];
     if (params.query === '' || params.query === '*') {
@@ -1087,17 +1315,25 @@ export class SmithsonianService {
     // Pass API key as header (not query param) so it never appears in logs, errors,
     // or the cache key.
     const ttlMs = cfg.searchCacheTtlSeconds * 1000;
-    const page = await this.responses.fetch(url, ttlMs, callerSignal(ctx), async (signal) => {
-      const raw = await this.get<RawSearchResponse>(url, ctx, {
+    const caller = { signal: callerSignal(ctx), deadline };
+    const page = await this.responses.fetch(url, ttlMs, caller, async (signal, readDeadline) => {
+      const raw = await this.get(url, ctx, {
         headers: { 'X-Api-Key': cfg.apiKey },
         collectionEndpoint: true,
+        payload: {
+          description: 'a page of results (a response.rows array and a numeric response.rowCount)',
+          holds: (
+            r: RawSearchResponse,
+          ): r is RawSearchResponse & { response: { rows: RawEDAN[]; rowCount: number } } =>
+            Array.isArray(r.response?.rows) && typeof r.response?.rowCount === 'number',
+        },
         signal,
+        deadline: readDeadline,
       });
-      const rows = (raw.response?.rows ?? []).map(normalizeToSummary);
+      // get() refuses a 200 without a page, so every page that reaches here is kept.
       return {
-        value: { rows, rowCount: raw.response?.rowCount ?? rows.length },
-        // A 200 without a page still reads as zero rows, but is not a success to keep.
-        storable: Array.isArray(raw.response?.rows) && typeof raw.response?.rowCount === 'number',
+        value: { rows: raw.response.rows.map(normalizeToSummary), rowCount: raw.response.rowCount },
+        storable: true,
       };
     });
     const provenance = this.live();
@@ -1111,13 +1347,19 @@ export class SmithsonianService {
    * `edanmdm:` forms of an ID share an entry.
    * The content endpoint returns the object directly at `response` (not `response.rows[0]`).
    *
-   * Both not-found throw sites carry `reason: 'not_found'` and no recovery: every
-   * caller (`smithsonian_get_object`, `smithsonian_get_media`, `smithsonian_find_related`)
-   * declares a `not_found` entry, and the framework fills that tool's own hint on the wire.
-   * Both sit outside the cached read, so each caller sharing a request is named by
-   * the ID it passed.
+   * EDAN answers a missing object with HTTP 404, which leaves here with `reason: 'not_found'`
+   * and no recovery: every caller (`smithsonian_get_object`, `smithsonian_get_media`,
+   * `smithsonian_find_related`) declares a `not_found` entry, and the framework fills that
+   * tool's own hint on the wire. The throw sits outside the cached read, so each caller
+   * sharing a request is named by the ID it passed. A 200 without a record is an upstream
+   * fault, not a missing object (issue #72): it fails `ServiceUnavailable` inside the read.
+   * The live read, cached or not, ends by `deadline`.
    */
-  async getContent(recordId: string, ctx: RequestContext): Promise<ContentRead> {
+  async getContent(
+    recordId: string,
+    ctx: RequestContext,
+    deadline: CallDeadline,
+  ): Promise<ContentRead> {
     const prefixed = recordId.startsWith('edanmdm:') ? recordId : `edanmdm:${recordId}`;
     const mirrored = await this.fromMirror((mirror) => mirror.getDoc(prefixed), ctx);
     if (mirrored) return { record: mirrored.value, provenance: mirrored.provenance };
@@ -1128,18 +1370,28 @@ export class SmithsonianService {
     // Pass API key as header (not query param) so it never appears in logs, errors,
     // or the cache key.
     const ttlMs = cfg.contentCacheTtlSeconds * 1000;
-    let record: RawEDAN | undefined;
+    const caller = { signal: callerSignal(ctx), deadline };
+    let record: RawEDAN;
     try {
-      record = await this.responses.fetch(url, ttlMs, callerSignal(ctx), async (signal) => {
+      record = await this.responses.fetch(url, ttlMs, caller, async (signal, readDeadline) => {
         // EDAN returns a real HTTP 404 for a missing object; expect it so a bad ID
         // logs at debug, not as a server error. The NotFound throw still fires and
         // is rewrapped below with the declared reason.
-        const raw = await this.get<RawContentResponse>(url, ctx, {
+        const raw = await this.get(url, ctx, {
           headers: { 'X-Api-Key': cfg.apiKey },
           expectedStatuses: [404],
+          payload: {
+            description: 'an object record (a response carrying a string url)',
+            holds: (
+              r: RawContentResponse,
+            ): r is RawContentResponse & { response: RawEDAN & { url: string } } =>
+              typeof r.response?.url === 'string',
+          },
           signal,
+          deadline: readDeadline,
         });
-        return { value: raw.response, storable: isRecord(raw.response) };
+        // get() refuses a 200 without a record, so every record that reaches here is kept.
+        return { value: raw.response, storable: true };
       });
     } catch (err: unknown) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
@@ -1151,12 +1403,6 @@ export class SmithsonianService {
       throw err;
     }
 
-    if (!record) {
-      throw notFound(`No Smithsonian object found for ID "${recordId}".`, {
-        recordId,
-        reason: 'not_found',
-      });
-    }
     const provenance = this.live();
     return provenance ? { record, provenance } : { record };
   }
@@ -1197,8 +1443,20 @@ export class SmithsonianService {
    *
    * The framework's storage key validator only accepts `^[a-zA-Z0-9_.\-/]+$`, so
    * the key separator is `/` — a `terms:${field}` key throws at runtime.
+   *
+   * Only an array is stored: a 200 without `response.terms` fails inside `get()`
+   * (issue #72), where it would otherwise be stored as an empty vocabulary that
+   * every caller of the instance reads as "no such term" for the whole TTL. An empty
+   * array is a real answer and is stored like any other.
+   *
+   * A warm vocabulary answers whatever time the call has left; a cold one is read by
+   * `deadline`, and past it is not read at all.
    */
-  private async vocabulary(field: string, ctx: RequestContext): Promise<string[]> {
+  private async vocabulary(
+    field: string,
+    ctx: RequestContext,
+    deadline: CallDeadline,
+  ): Promise<string[]> {
     const cfg = getServerConfig();
     const key = `terms/${field}`;
     const ttl = cfg.termsCacheTtlSeconds;
@@ -1209,11 +1467,17 @@ export class SmithsonianService {
     }
 
     const url = `${cfg.baseUrl}/terms/${encodeURIComponent(field)}`;
-    const raw = await this.get<RawTermsResponse>(url, ctx, {
+    const raw = await this.get(url, ctx, {
       headers: { 'X-Api-Key': cfg.apiKey },
       collectionEndpoint: true,
+      payload: {
+        description: 'a term vocabulary (a response.terms array)',
+        holds: (r: RawTermsResponse): r is RawTermsResponse & { response: { terms: string[] } } =>
+          Array.isArray(r.response?.terms),
+      },
+      deadline,
     });
-    const terms = raw.response?.terms ?? [];
+    const terms = raw.response.terms;
 
     if (ttl > 0) await this.storage.set(key, terms, ctx, { ttl });
     return terms;
@@ -1238,8 +1502,9 @@ export class SmithsonianService {
   async listTerms(
     params: { field: string; start: number; rows: number; contains?: string },
     ctx: RequestContext,
+    deadline: CallDeadline,
   ): Promise<{ terms: string[]; total: number; labels?: Record<string, string> }> {
-    const all = await this.vocabulary(params.field, ctx);
+    const all = await this.vocabulary(params.field, ctx, deadline);
     const labelled = params.field === 'unit_code';
 
     const needle = params.contains?.toLowerCase();
@@ -1287,8 +1552,13 @@ export class SmithsonianService {
    * route to offer and says so instead of sending the caller back into the same
    * value (issue #46).
    */
-  async describeTerm(field: string, value: string, ctx: RequestContext): Promise<TermDescription> {
-    const vocabulary = await this.vocabulary(field, ctx);
+  async describeTerm(
+    field: string,
+    value: string,
+    ctx: RequestContext,
+    deadline: CallDeadline,
+  ): Promise<TermDescription> {
+    const vocabulary = await this.vocabulary(field, ctx, deadline);
     if (!vocabulary.includes(value)) return { indexed: false };
 
     const neighbors = tightestNeighbors(value, vocabulary);

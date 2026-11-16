@@ -5,18 +5,28 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline, markdownLink } from '@cyanheads/mcp-ts-core/utils';
+import {
+  escapeMarkdownInline,
+  markdown,
+  markdownImage,
+  markdownLink,
+} from '@cyanheads/mcp-ts-core/utils';
+import { headingText } from '@/mcp-server/tools/markdown-encoders.js';
 import {
   enrichProvenance,
   provenanceEnrichment,
   provenanceTrailer,
 } from '@/mcp-server/tools/provenance.js';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import {
+  API_KEY_REJECTED_ERROR,
+  getSmithsonianService,
+  startCallDeadline,
+} from '@/services/smithsonian/smithsonian-service.js';
 
 export const smithsonianGetObject = tool('smithsonian_get_object', {
   title: 'Get Smithsonian Object',
   description:
-    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns title, dates, description, labeled notes, makers, materials, dimensions, places, cultures, topics, exhibitions, credit line, identifiers, rights, and a media summary. Natural-history records can include scientific_names, taxonomy, and collection coordinates without inferred precision. The media summary counts the media and links every non-image item (3D models, scanned books, documents); full image URLs come from smithsonian_get_media.',
+    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns title, dates, description, labeled notes, makers, materials, dimensions, places, cultures, topics, exhibition history, current display (on_view and current_exhibitions, for objects the catalog flags), credit line, identifiers, rights, and a media summary. indexed carries the exact name, place, object_type, date, and topic values the record is indexed under, each passable verbatim to the smithsonian_search_objects filter of the same name — the free-text makers, places, dates, and topics often differ from them. Natural-history records can include scientific_names, taxonomy, and collection coordinates without inferred precision. The media summary counts the media and links every non-image item (3D models, scanned books, documents); full image URLs come from smithsonian_get_media.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -144,7 +154,36 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     culture: z.array(z.string().describe('A culture term.')).describe('Culture associations.'),
     topics: z
       .array(z.string().describe('A subject or topic term.'))
-      .describe('Subject and topic terms.'),
+      .describe(
+        'Subject and topic terms: the indexed topic terms merged with the free-text subject strings of the catalog ("Quilts--History"), so not every entry is a topic filter value — take those from indexed.topic.',
+      ),
+    indexed: z
+      .object({
+        name: z
+          .array(z.string().describe('An indexed named party.'))
+          .describe(
+            'Indexed named parties, surname-first ("Armstrong, Neil A.") — each a smithsonian_search_objects filters.name value as written. makers[] is the free-text form of the same parties and often differs.',
+          ),
+        place: z
+          .array(z.string().describe('An indexed place term.'))
+          .describe(
+            'Indexed place terms ("Virginia", "United States") — each a filters.place value as written. place[] is the free-text form.',
+          ),
+        object_type: z
+          .array(z.string().describe('An indexed object type term.'))
+          .describe('Indexed object type terms ("Quilts") — each a filters.object_type value.'),
+        date: z
+          .array(z.string().describe('An indexed date term.'))
+          .describe(
+            'Indexed date terms ("1860s") — each a filters.date value. dates[] is the free-text form ("ca. 1850").',
+          ),
+        topic: z
+          .array(z.string().describe('An indexed topic term.'))
+          .describe('Indexed topic terms ("Quilts") — each a filters.topic value as written.'),
+      })
+      .describe(
+        "The record's indexed values for five smithsonian_search_objects filters, in catalog order, each passable verbatim as that filter's value to find objects sharing it. An empty array means the record indexes nothing for that filter. culture, scientific_names, and unit_code already carry indexed values.",
+      ),
     exhibitions: z
       .array(
         z
@@ -157,7 +196,31 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
           })
           .describe('A single exhibition entry.'),
       )
-      .describe('Exhibition history.'),
+      .describe(
+        'Free-text exhibition history, which the catalog rarely fills: [] does not mean the object was never exhibited. on_view and current_exhibitions report current display.',
+      ),
+    on_view: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when the catalog flags the object as on physical display now, false when it flags it as not. Absent when the record carries no flag, which most do — absence says nothing about display. smithsonian_search_objects filters.on_view_only finds the flagged objects.',
+      ),
+    current_exhibitions: z
+      .array(
+        z
+          .object({
+            building: z
+              .string()
+              .optional()
+              .describe(
+                'Building code where the object is shown ("NASM", "HAZY", "NPG", "NMAI NY") — not a unit_code.',
+              ),
+            room: z.string().optional().describe('Gallery or room within the building.'),
+            title: z.string().optional().describe('Title of the exhibition showing it.'),
+          })
+          .describe('One place the object is on display; absent parts are omitted.'),
+      )
+      .describe('Where the object is on display now, from the catalog; [] when it names none.'),
     credit_line: z.string().optional().describe('Attribution or credit string.'),
     identifiers: z
       .array(
@@ -189,12 +252,15 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
         cc0_image_count: z
           .number()
           .describe(
-            'Number of CC0 images smithsonian_get_media returns for this object. Lower than count when the object has non-image media (e.g. 3D models) or non-CC0 images.',
+            'CC0 images on the object: the same count smithsonian_get_media reports as its cc0_image_count and pages through with start and limit. Lower than count when the object has non-image media (e.g. 3D models) or non-CC0 images.',
           ),
         has_cc0_images: z
           .boolean()
           .describe('True when at least one CC0 image is available (cc0_image_count > 0).'),
-        thumbnail_url: z.string().optional().describe('Thumbnail URL from the first media item.'),
+        thumbnail_url: z
+          .string()
+          .optional()
+          .describe('Thumbnail URL (~150px) of the first media item.'),
         non_image_media: z
           .array(
             z
@@ -243,9 +309,11 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       recovery:
         'Use record_id values directly from smithsonian_search_objects results — do not construct IDs manually.',
     },
+    API_KEY_REJECTED_ERROR,
   ],
 
   async handler(input, ctx) {
+    const deadline = startCallDeadline();
     if (!input.id.trim()) {
       throw ctx.fail('invalid_id', 'Object ID must not be empty.', { id: input.id });
     }
@@ -253,7 +321,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     const svc = getSmithsonianService();
     ctx.log.info('Fetching Smithsonian object', { id: input.id });
 
-    const { record, provenance } = await svc.getContent(input.id, ctx);
+    const { record, provenance } = await svc.getContent(input.id, ctx, deadline);
     const obj = svc.toFullObject(record);
 
     ctx.log.info('Object fetched', {
@@ -267,95 +335,119 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
   },
 
   format: (result) => {
-    const lines: string[] = [];
-    lines.push(`# ${result.title}`);
-    lines.push(
-      `**ID:** ${result.record_id} | **Museum:** ${result.museum_name} (${result.unit_code})`,
-    );
-    if (result.holding_museum_name) {
-      lines.push(`**Held by:** ${escapeMarkdownInline(result.holding_museum_name)}`);
-    }
+    const esc = escapeMarkdownInline;
+    const lines: string[] = [
+      `# ${headingText(result.title)}`,
+      `**ID:** ${markdown().inlineCode(result.record_id).build()} | **Museum:** ${esc(result.museum_name)} (${esc(result.unit_code)})`,
+    ];
+    /**
+     * A labelled list of already-encoded items, one per value: values carry `, ` and `; `
+     * themselves, so a join would not read back. The blank line before it ends the list above,
+     * which would otherwise take this label in as a lazy continuation of its last item.
+     */
+    const list = (label: string, items: string[]) => {
+      if (items.length > 0) lines.push('', `**${label}:**`, ...items.map((item) => `- ${item}`));
+    };
+    if (result.holding_museum_name) lines.push(`**Held by:** ${esc(result.holding_museum_name)}`);
     lines.push(`**CC0:** ${result.is_cc0 ? 'Yes' : 'No'}`);
-    if (result.record_link) lines.push(`**Link:** ${result.record_link}`);
-    if (result.description) {
-      lines.push('');
-      lines.push(result.description);
+    if (result.record_link) {
+      lines.push(`**Link:** ${markdownLink('Catalog record', result.record_link)}`);
     }
-    if (result.dates.length > 0) {
-      lines.push('');
-      lines.push('**Dates:**');
-      for (const d of result.dates) lines.push(`- ${d.label}: ${d.value}`);
+    if (result.description) lines.push('', esc(result.description));
+    list(
+      'Dates',
+      result.dates.map((d) => `${esc(d.label)}: ${esc(d.value)}`),
+    );
+    list(
+      'Notes',
+      result.notes.map((note) => `${esc(note.label)}: ${esc(note.content)}`),
+    );
+    list(
+      'Scientific names',
+      result.scientific_names.map((name) => esc(name)),
+    );
+    for (const [rank, values] of Object.entries(result.taxonomy ?? {})) {
+      list(
+        `Taxonomy ${rank}`,
+        (values ?? []).map((value) => esc(value)),
+      );
     }
-    if (result.notes.length > 0) {
-      lines.push('', '**Notes:**');
-      for (const note of result.notes) lines.push(`- ${note.label}: ${note.content}`);
+    list(
+      'Collection coordinates',
+      result.coordinates.map(
+        (point) =>
+          `${point.latitude}, ${point.longitude}${point.locality ? ` (${esc(point.locality)})` : ''}`,
+      ),
+    );
+    list(
+      'Makers',
+      result.makers.map((m) => `${esc(m.role)}: ${esc(m.name)}`),
+    );
+    list(
+      'Materials',
+      result.materials.map((material) => esc(material)),
+    );
+    list(
+      'Dimensions',
+      result.dimensions.map((dimension) => esc(dimension)),
+    );
+    list(
+      'Culture',
+      result.culture.map((culture) => esc(culture)),
+    );
+    list(
+      'Topics',
+      result.topics.map((topic) => esc(topic)),
+    );
+    list(
+      'Places',
+      result.place.map((p) => `${esc(p.label)}: ${esc(p.value)}`),
+    );
+    list(
+      'Indexed filter values',
+      Object.entries(result.indexed).flatMap(([key, values]) =>
+        values.map((value) => `${key}: ${esc(value)}`),
+      ),
+    );
+    // One item per venue: `<title> · <building>, <room>`, absent parts dropped.
+    const venues = result.current_exhibitions.map((ex) => {
+      const where = [ex.building, ex.room].filter((part) => part !== undefined);
+      const parts = [ex.title, where.length > 0 ? where.join(', ') : undefined];
+      return `- ${esc(parts.filter((part) => part !== undefined).join(' · '))}`;
+    });
+    if (result.on_view !== undefined) {
+      lines.push('', `**On view:** ${result.on_view ? 'Yes' : 'No'}`, ...venues);
+    } else if (venues.length > 0) {
+      lines.push('', '**Current exhibitions:**', ...venues);
     }
-    if (result.scientific_names.length > 0)
-      lines.push(`**Scientific names:** ${result.scientific_names.join('; ')}`);
-    if (result.taxonomy) {
-      for (const [rank, values] of Object.entries(result.taxonomy)) {
-        if (values) lines.push(`**Taxonomy ${rank}:** ${values.join('; ')}`);
-      }
-    }
-    if (result.coordinates.length > 0) {
-      lines.push('**Collection coordinates:**');
-      for (const point of result.coordinates)
-        lines.push(
-          `- ${point.latitude}, ${point.longitude}${point.locality ? ` (${point.locality})` : ''}`,
-        );
-    }
-    if (result.makers.length > 0) {
-      lines.push('');
-      lines.push('**Makers:**');
-      for (const m of result.makers) lines.push(`- ${m.role}: ${m.name}`);
-    }
-    if (result.materials.length > 0) {
-      lines.push('');
-      lines.push(`**Materials:** ${result.materials.join('; ')}`);
-    }
-    if (result.dimensions.length > 0) {
-      lines.push(`**Dimensions:** ${result.dimensions.join('; ')}`);
-    }
-    if (result.culture.length > 0) {
-      lines.push(`**Culture:** ${result.culture.join(', ')}`);
-    }
-    if (result.topics.length > 0) {
-      lines.push(`**Topics:** ${result.topics.join(', ')}`);
-    }
-    if (result.place.length > 0) {
-      lines.push(`**Places:** ${result.place.map((p) => `${p.label}: ${p.value}`).join('; ')}`);
-    }
-    if (result.exhibitions.length > 0) {
-      lines.push('');
-      lines.push('**Exhibitions:**');
-      for (const ex of result.exhibitions) {
-        lines.push(`- ${ex.name}${ex.building ? ` (${ex.building})` : ''}`);
-      }
-    }
-    if (result.identifiers.length > 0) {
-      lines.push('');
-      lines.push('**Identifiers:**');
-      for (const id of result.identifiers) lines.push(`- ${id.label}: ${id.value}`);
-    }
-    if (result.credit_line) lines.push(`**Credit:** ${result.credit_line}`);
-    if (result.object_rights) lines.push(`**Rights:** ${result.object_rights}`);
-    lines.push('');
+    list(
+      'Exhibitions',
+      result.exhibitions.map(
+        (ex) => `${esc(ex.name)}${ex.building ? ` (${esc(ex.building)})` : ''}`,
+      ),
+    );
+    list(
+      'Identifiers',
+      result.identifiers.map((id) => `${esc(id.label)}: ${esc(id.value)}`),
+    );
+    if (result.credit_line || result.object_rights) lines.push('');
+    if (result.credit_line) lines.push(`**Credit:** ${esc(result.credit_line)}`);
+    if (result.object_rights) lines.push(`**Rights:** ${esc(result.object_rights)}`);
     const media = result.media_summary;
     lines.push(
+      '',
       `**Media:** ${media.count} total item(s); ${media.cc0_image_count} CC0 image(s) via smithsonian_get_media. CC0 images: ${media.has_cc0_images ? 'Yes' : 'No'}`,
     );
     if (media.thumbnail_url) {
-      lines.push(`**Thumbnail:** ${media.thumbnail_url}`);
+      lines.push(`**Thumbnail:** ${markdownImage('Thumbnail', media.thumbnail_url)}`);
     }
-    if (media.non_image_media.length > 0) {
-      lines.push('**Non-image media:**');
-      for (const item of media.non_image_media) {
-        const label = item.url
-          ? markdownLink(item.type, item.url)
-          : `${escapeMarkdownInline(item.type)} (no URL)`;
-        lines.push(`- ${label} · CC0: ${item.is_cc0 ? 'Yes' : 'No'}`);
-      }
-    }
+    list(
+      'Non-image media',
+      media.non_image_media.map((item) => {
+        const label = item.url ? markdownLink(item.type, item.url) : `${esc(item.type)} (no URL)`;
+        return `${label} · CC0: ${item.is_cc0 ? 'Yes' : 'No'}`;
+      }),
+    );
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });

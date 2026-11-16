@@ -14,8 +14,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianSearchObjects } from '@/mcp-server/tools/definitions/smithsonian-search-objects.tool.js';
+import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
+import { codeSpans, headings, images, labelValues } from '../markdown-read-back.js';
 import { luceneTermsOf, textOf } from './tool-result.js';
 
 /** The error envelope a failed contract call puts on `structuredContent`. */
@@ -74,6 +76,7 @@ describe('smithsonianSearchObjects', () => {
       'online_media_type',
       'Sound recordings',
       expect.anything(),
+      expect.any(Number),
     );
     expect(result.structuredContent).toMatchObject({
       error: {
@@ -515,7 +518,7 @@ describe('smithsonianSearchObjects', () => {
         expect(hint).not.toMatch(/no fragment of it/i);
         expect(hint).not.toMatch(/found no different/i);
         expect(hint).toContain('drop the filter and search on the query alone');
-        expect(describeTerm).toHaveBeenCalledWith(field, value, ctx);
+        expect(describeTerm).toHaveBeenCalledWith(field, value, ctx, expect.any(Number));
       },
     );
 
@@ -660,11 +663,12 @@ describe('smithsonianSearchObjects', () => {
       expect(result.structuredContent).toMatchObject({
         error: { data: { reason: 'invalid_filter', recovery: { hint: expectedHint } } },
       });
-      // The reliable source is the find_related name signal — it carries the indexed
-      // form. makers[] is the free-text form of the same parties, written differently
-      // often enough that pointing there alone dead-ends the caller.
-      expect(expectedHint).toContain('smithsonian_find_related');
-      expect(expectedHint).toContain('makers[]');
+      // The reliable source is smithsonian_get_object indexed — it carries every indexed
+      // name verbatim (issue #73). makers is the free-text form of the same parties,
+      // written differently often enough that pointing there alone dead-ends the caller.
+      expect(expectedHint).toContain('smithsonian_get_object indexed');
+      expect(expectedHint).toContain('makers');
+      expect(expectedHint).not.toContain('smithsonian_find_related');
     });
   });
 
@@ -790,6 +794,37 @@ describe('smithsonianSearchObjects', () => {
     expect(description).toContain('media_usage:CC0');
     expect(description).toContain('has_media');
     expect(description).not.toMatch(/restrict to CC0 open-access objects/i);
+  });
+
+  it('points name, topic, and object_type at smithsonian_get_object indexed values (issue #73)', () => {
+    // topics[] mixes free-text subject strings in with the indexed terms, and makers[] is
+    // the free-text form of the indexed names, so neither is a reliable filter source.
+    const filters = (
+      z.toJSONSchema(smithsonianSearchObjects.input) as unknown as {
+        properties: { filters: { properties: Record<string, { description?: string }> } };
+      }
+    ).properties.filters.properties;
+    expect(filters.name?.description).toContain('smithsonian_get_object indexed.name');
+    expect(filters.name?.description).not.toContain('smithsonian_find_related');
+    expect(filters.topic?.description).toContain('indexed.topic');
+    expect(filters.topic?.description).not.toMatch(/Matches the topics\[\] values/);
+    expect(filters.object_type?.description).toContain('indexed.object_type');
+  });
+
+  it('describes on_view_only as the catalog flag, with no off-view counterpart (issue #74)', () => {
+    // Most records carry no flag, so an unflagged object may still be on display, and
+    // onPhysicalExhibit:"No" upstream matches flagged-Yes records, so no off-view filter exists.
+    const description =
+      (
+        z.toJSONSchema(smithsonianSearchObjects.input) as unknown as {
+          properties: { filters: { properties: Record<string, { description?: string }> } };
+        }
+      ).properties.filters.properties.on_view_only?.description ?? '';
+    expect(description).toContain('onPhysicalExhibit');
+    expect(description).toContain('current_exhibitions');
+    expect(description).toMatch(/unflagged object may still be on view/);
+    expect(description).toMatch(/no off-view filter/);
+    expect(smithsonianSearchObjects.description).toContain('objects on display now');
   });
 
   it('quotes multi-word filter values in Lucene terms', async () => {
@@ -1267,6 +1302,83 @@ describe('smithsonianSearchObjects', () => {
       });
     });
 
+    describe('on_view_only (issue #74)', () => {
+      it.each([
+        [
+          'true after unit_code',
+          { unit_code: 'NASM', on_view_only: true },
+          'unit_code:"NASM" AND onPhysicalExhibit:"Yes"',
+        ],
+        [
+          'false, the same as omitting it',
+          { unit_code: 'NASM', on_view_only: false },
+          'unit_code:"NASM"',
+        ],
+        ['omitted', { unit_code: 'NASM' }, 'unit_code:"NASM"'],
+        ['true alone', { on_view_only: true }, 'onPhysicalExhibit:"Yes"'],
+      ] as const)('sends the q for on_view_only %s', async (_label, filters, q) => {
+        const sent = routeSearch(() => ({ rows: [edanRow(0)], rowCount: 1 }));
+
+        const result = await runToolContract(smithsonianSearchObjects, { query: '', filters });
+
+        expect(result.isError).toBeFalsy();
+        expect(sent.map((p) => p.get('q'))).toEqual([q]);
+      });
+
+      it('ANDs the flag after a free-text query', async () => {
+        const sent = routeSearch(() => ({ rows: [edanRow(0)], rowCount: 1 }));
+
+        await runToolContract(smithsonianSearchObjects, {
+          query: 'apollo',
+          filters: { on_view_only: true },
+        });
+
+        expect(sent.map((p) => p.get('q'))).toEqual(['apollo AND onPhysicalExhibit:"Yes"']);
+      });
+    });
+
+    it('returns the thumbnail resource of an IDS row as thumbnail_url on both surfaces', async () => {
+      // As a live /search row carries nasm_A19700102000's first media item (2026-11-15):
+      // `thumbnail` repeats the full-size `content` URL.
+      const fullSize = 'https://ids.si.edu/ids/deliveryService?id=NASM-NASM2022-05013-000003';
+      const thumb = 'https://ids.si.edu/ids/download?id=NASM-NASM2022-05013-000003_thumb';
+      const row = edanRow(0);
+      routeSearch(() => ({
+        rows: [
+          {
+            ...row,
+            content: {
+              ...row.content,
+              descriptiveNonRepeating: {
+                ...row.content.descriptiveNonRepeating,
+                online_media: {
+                  mediaCount: 1,
+                  media: [
+                    {
+                      type: 'Images',
+                      content: fullSize,
+                      thumbnail: fullSize,
+                      resources: [
+                        { label: 'Thumbnail Image', url: thumb },
+                        { label: 'Screen Image', url: `${thumb.slice(0, -6)}_screen` },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+        rowCount: 1,
+      }));
+
+      const result = await runToolContract(smithsonianSearchObjects, { query: 'apollo' });
+
+      expect(result.structuredContent).toMatchObject({ objects: [{ thumbnail_url: thumb }] });
+      expect(textOf(result)).toContain(`**Thumbnail:** ![Thumbnail](<${thumb}>)`);
+      expect(textOf(result)).not.toContain(fullSize);
+    });
+
     describe('page size served at its cap (issue #63)', () => {
       it('serves rows 1500 at 1,000 with the clamp and the continuation in one notice', async () => {
         const sent = routeSearch(corpus(2694));
@@ -1490,7 +1602,7 @@ describe('smithsonianSearchObjects', () => {
 
       const lines = textOf(result).split('\n');
       const museumLine = lines.findIndex(
-        (l) => l.includes('**ID:** dpo_3d_200012') && l.includes('**Museum:**'),
+        (l) => l.includes('**ID:** `dpo_3d_200012`') && l.includes('**Museum:**'),
       );
       expect(museumLine).toBeGreaterThanOrEqual(0);
       expect(lines[museumLine + 1]).toBe(`**Held by:** ${HOLDER}`);
@@ -1514,5 +1626,174 @@ describe('smithsonianSearchObjects', () => {
       );
       expect(item.required).not.toContain('holding_museum_name');
     });
+  });
+});
+
+describe('invalid_filter recovery under the call deadline (issue #68)', () => {
+  /** A zero-match search on `culture` and `unit_code`, which both recovery lookups serve. */
+  const INPUT = { query: 'lunar', filters: { culture: 'Aztecs', unit_code: 'NASM' } };
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('fails invalid_filter at 50 s, claiming nothing, when the lookups never answer', async () => {
+    // The real service over a fetch stub: the filtered search answers zero rows at once, and
+    // the unfiltered harvest search and the /terms read never answer.
+    const lookups: Array<{ path: string; signal: AbortSignal }> = [];
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string, init: RequestInit) => {
+        const url = new URL(input);
+        const signal = init.signal as AbortSignal;
+        if (url.pathname.endsWith('/search') && url.searchParams.get('q') !== INPUT.query) {
+          return new Response(
+            JSON.stringify({ status: 200, responseCode: 1, response: { rows: [], rowCount: 0 } }),
+            { status: 200 },
+          );
+        }
+        lookups.push({ path: url.pathname.split('/').slice(-2).join('/'), signal });
+        return new Promise<Response>((_, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }),
+    );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+      new svcModule.SmithsonianService(createInMemoryStorage()),
+    );
+    vi.useFakeTimers();
+    let settled = false;
+
+    // A tenant lets the vocabulary read reach its storage cache and then the upstream.
+    const pending = runToolContract(smithsonianSearchObjects, INPUT, {
+      context: { tenantId: 'test-tenant' },
+    }).finally(() => {
+      settled = true;
+    });
+    // Backoff jitter can end a lookup's ladder up to a second early, so the bound is "by 50 s".
+    await vi.advanceTimersByTimeAsync(50_000);
+
+    expect(settled).toBe(true);
+    const error = errorOf(await pending);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.data?.reason).toBe('invalid_filter');
+    expect(error.data?.recovery?.hint).toContain(
+      'resolve it to an exact term with smithsonian_list_terms { field: "culture", contains: "Aztecs" }',
+    );
+    expect(error.data?.recovery?.hint).not.toContain('Values present');
+    // Both lookups ran at once, each retrying after its 15 s attempt timeouts, and none
+    // is left running.
+    expect(new Set(lookups.map((l) => l.path))).toEqual(new Set(['terms/culture', 'v1.0/search']));
+    expect(lookups.every((l) => l.signal.aborted)).toBe(true);
+  });
+
+  it('passes the deadline it sets at entry to the search, the vocabulary lookup, and the harvest', async () => {
+    vi.useFakeTimers();
+    const search = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+    const service = makeFilteredZeroService(search);
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+    const entry = Date.now();
+
+    await runToolContract(smithsonianSearchObjects, INPUT);
+
+    expect(search).toHaveBeenCalledTimes(2);
+    const deadlines = [
+      ...search.mock.calls.map((call) => call[2]),
+      vi.mocked(service.describeTerm).mock.calls[0]?.[3],
+    ];
+    expect(deadlines).toEqual([entry + 50_000, entry + 50_000, entry + 50_000]);
+  });
+
+  it.each(['vocabulary lookup', 'harvest'] as const)(
+    'rethrows a caller cancellation that lands during the %s',
+    async (during) => {
+      let controller = new AbortController();
+      /** Abort the call from inside the lookup in flight, then fail it as the read would. */
+      const cancel = () => {
+        controller.abort();
+        throw new Error('SECRET aborted read');
+      };
+      const search = vi.fn(async (params: { filters: unknown[] }) => {
+        if (params.filters.length > 0) return { rows: [], rowCount: 0 };
+        if (during === 'harvest') cancel();
+        return { rows: [makeObjectSummary()], rowCount: 1 };
+      });
+      const describeTerm = vi.fn(async (): Promise<TermDescription> => {
+        if (during === 'vocabulary lookup') cancel();
+        return { indexed: false };
+      });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+        search,
+        describeTerm,
+      } as unknown as svcModule.SmithsonianService);
+
+      const direct = await smithsonianSearchObjects
+        .handler(
+          smithsonianSearchObjects.input.parse(INPUT),
+          createMockContext({ errors: smithsonianSearchObjects.errors, signal: controller.signal }),
+        )
+        .catch((error: unknown) => error);
+      expect((direct as Error).name).toBe('AbortError');
+
+      controller = new AbortController();
+      const result = await runToolContract(smithsonianSearchObjects, INPUT, {
+        context: { signal: controller.signal },
+      });
+      expect(errorOf(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+    },
+  );
+});
+
+describe('smithsonianSearchObjects content[] encoding (issue #70)', () => {
+  const render = (objects: ObjectSummary[]) =>
+    smithsonianSearchObjects.format!({ objects, total_count: objects.length })
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+
+  it('renders titles as headings that keep edge spaces and line breaks', () => {
+    const text = render([
+      { ...makeObjectSummary('nmah_1'), title: 'Samuel Peck & Co. ' },
+      { ...makeObjectSummary('nmah_2'), title: 'Trees and Flowers in Washington, \nDC' },
+    ]);
+    const lines = text.split('\n');
+    expect(lines).toContain('### Samuel Peck & Co.&#32;');
+    expect(lines).toContain('### Trees and Flowers in Washington,&#32;&#10;DC');
+    expect(headings(text)).toEqual(['Samuel Peck & Co. ', 'Trees and Flowers in Washington, \nDC']);
+  });
+
+  it('reads every row back to its structuredContent value under CommonMark', () => {
+    const rows: ObjectSummary[] = [
+      {
+        record_id: 'siris_sil_1155821',
+        title: 'Berberin <Frau> *1*',
+        unit_code: 'SIL',
+        museum_name: 'Smithsonian <Libraries>',
+        holding_museum_name: 'Held _by_ [someone]',
+        object_type: 'Books ',
+        date: '1980s *',
+        thumbnail_url: 'https://ids.si.edu/ids/deliveryService?id=SIL-1&max=150',
+        is_cc0: true,
+        has_media: true,
+      },
+      { ...makeObjectSummary('nmah_`tick`'), title: '# M*A*S*H' },
+    ];
+    const text = render(rows);
+    expect(headings(text)).toEqual(rows.map((row) => row.title));
+    expect(codeSpans(text)).toEqual(rows.map((row) => row.record_id));
+    expect(labelValues(text, 'Museum')).toEqual(
+      rows.map((row) => `${row.museum_name} (${row.unit_code})`),
+    );
+    expect(labelValues(text, 'Held by')).toEqual([rows[0]?.holding_museum_name]);
+    expect(labelValues(text, 'Type')).toEqual(rows.map((row) => row.object_type));
+    expect(labelValues(text, 'Date')).toEqual(rows.map((row) => row.date));
+    expect(images(text).map((image) => image.url)).toEqual(rows.map((row) => row.thumbnail_url));
+  });
+
+  it('renders its notice through the escaping trailer', () => {
+    expect(smithsonianSearchObjects.enrichmentTrailer?.notice).toBe(noticeTrailer);
   });
 });

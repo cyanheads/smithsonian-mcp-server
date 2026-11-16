@@ -14,9 +14,11 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianBrowseCategory } from '@/mcp-server/tools/definitions/smithsonian-browse-category.tool.js';
+import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
-import { luceneTermsOf } from './tool-result.js';
+import { headings, images, items } from '../markdown-read-back.js';
+import { luceneTermsOf, textOf } from './tool-result.js';
 
 /**
  * Fixture rows alternate two codes from the live `unit_code` vocabulary. A bare
@@ -461,7 +463,7 @@ describe('smithsonianBrowseCategory', () => {
           expect(hint).not.toMatch(/found no different/i);
         }
         // The membership test runs against the mode's own indexed field.
-        expect(describeTerm).toHaveBeenCalledWith(field, value, ctx);
+        expect(describeTerm).toHaveBeenCalledWith(field, value, ctx, expect.any(Number));
       },
     );
 
@@ -563,9 +565,42 @@ describe('smithsonianBrowseCategory', () => {
       expect(recoveryHint(err)).toContain('smithsonian_search_objects { query: "Painting" }');
     });
 
-    it('falls back to the resolve-it hint when the vocabulary lookup throws', async () => {
-      // The check is best-effort and failure-path only: an unreachable /terms must not
-      // turn a clean invalid_category into a crash.
+    it.each([
+      ['museum', 'NASM', 'unit_code'],
+      ['culture', 'Guiana', 'culture'],
+      ['period', '1210s', 'date'],
+      ['topic', 'Quilts', 'topic'],
+    ] as const)(
+      '%s mode: a failed vocabulary lookup leaves membership unknown, and the hint claims none (issue #72)',
+      async (mode, value, field) => {
+        // The check is best-effort and failure-path only: an unreachable /terms must not
+        // turn a clean invalid_category into a crash, nor into a claim it never checked.
+        vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+          makeZeroMatchService(
+            vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+            new Error('EDAN unavailable'),
+          ),
+        );
+
+        const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
+        const input = smithsonianBrowseCategory.input.parse({ mode, value });
+        const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
+
+        expect(err.data?.reason).toBe('invalid_category');
+        const hint = recoveryHint(err);
+        expect(hint).toContain(
+          `smithsonian_list_terms { field: "${field}", contains: "${value}" }`,
+        );
+        expect(hint).not.toContain('is not an exact');
+        expect(hint).not.toContain('is an indexed');
+        expect(hint).not.toContain('matched no indexed');
+        // Either answer that lookup can give leads somewhere: an exact term to browse, or the
+        // value itself, which then has no retrievable objects to browse.
+        expect(hint).toContain('smithsonian_search_objects');
+      },
+    );
+
+    it('names museum names as a unit_code lookup route when membership is unknown', async () => {
       vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
         makeZeroMatchService(
           vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
@@ -574,12 +609,113 @@ describe('smithsonianBrowseCategory', () => {
       );
 
       const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors });
-      const input = smithsonianBrowseCategory.input.parse({ mode: 'culture', value: 'Guiana' });
+      const input = smithsonianBrowseCategory.input.parse({
+        mode: 'museum',
+        value: 'National Air and Space',
+      });
       const err = await smithsonianBrowseCategory.handler(input, ctx).catch((e) => e);
 
-      expect(err.data?.reason).toBe('invalid_category');
-      expect(recoveryHint(err)).toContain('is not an exact culture term');
+      expect(recoveryHint(err)).toContain('museum names as well as codes');
     });
+  });
+
+  describe('a vocabulary read that fails (issue #72)', () => {
+    /**
+     * The real service over a stubbed fetch: `/search` answers zero rows, and `/terms/{field}`
+     * answers with `terms`. The vocabulary read fails inside the service's retry closure, so a
+     * service stand-in cannot exercise it.
+     */
+    function stubUpstream(terms: () => unknown) {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      const fetchMock = vi.fn(async (url: string) => {
+        const path = new URL(url).pathname;
+        const answer = path.endsWith('/search')
+          ? { status: 200, responseCode: 1, response: { rows: [], rowCount: 0 } }
+          : path.includes('/terms/')
+            ? terms()
+            : undefined;
+        if (answer === undefined) throw new Error('unmocked fetch');
+        const status = (answer as { status?: number }).status ?? 200;
+        return {
+          ok: status === 200,
+          status,
+          statusText: status === 200 ? 'OK' : 'Service Unavailable',
+          headers: { get: () => null },
+          json: async () => answer,
+          text: async () => JSON.stringify(answer),
+        };
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+      return fetchMock;
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it.each([
+      ['malformed', () => ({ status: 200, responseCode: 1, response: {} })],
+      ['HTTP 503', () => ({ status: 503 })],
+    ])(
+      'culture "Aztecs" with /terms/culture %s names the lookup and claims nothing',
+      async (_label, terms) => {
+        const fetchMock = stubUpstream(terms);
+        const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors, tenantId: 't' });
+        const input = smithsonianBrowseCategory.input.parse({ mode: 'culture', value: 'Aztecs' });
+
+        vi.useFakeTimers();
+        const pending = smithsonianBrowseCategory.handler(input, ctx).catch((e: unknown) => e);
+        await vi.runAllTimersAsync();
+        const err = await pending;
+
+        expect((err as { data?: { reason?: string } }).data?.reason).toBe('invalid_category');
+        const hint = recoveryHint(err);
+        expect(hint).toContain('smithsonian_list_terms { field: "culture", contains: "Aztecs" }');
+        expect(hint).not.toContain('is not an exact');
+        expect(hint).not.toContain('is an indexed');
+        // The vocabulary read ran through its retries before the hint gave up on it.
+        expect(
+          fetchMock.mock.calls.filter(([url]) => new URL(url).pathname.includes('/terms/culture')),
+        ).toHaveLength(4);
+      },
+    );
+
+    it('a real member still gets the indexed hint, and a non-member the resolve-it hint', async () => {
+      stubUpstream(() => ({
+        status: 200,
+        responseCode: 1,
+        response: { terms: ['Aztecs', 'Maya'] },
+      }));
+      const ctx = createMockContext({ errors: smithsonianBrowseCategory.errors, tenantId: 't' });
+
+      const member = await smithsonianBrowseCategory
+        .handler(smithsonianBrowseCategory.input.parse({ mode: 'culture', value: 'Aztecs' }), ctx)
+        .catch((e: unknown) => e);
+      const outsider = await smithsonianBrowseCategory
+        .handler(smithsonianBrowseCategory.input.parse({ mode: 'culture', value: 'Aztec' }), ctx)
+        .catch((e: unknown) => e);
+
+      expect(recoveryHint(member)).toContain('"Aztecs" is an indexed culture term');
+      expect(recoveryHint(outsider)).toContain('"Aztec" is not an exact culture term');
+    });
+  });
+
+  it('names smithsonian_get_object indexed.object_type as the exact source for a known object (issue #73)', () => {
+    const value = smithsonianBrowseCategory.input.shape.value.description ?? '';
+    for (const text of [smithsonianBrowseCategory.description, value]) {
+      expect(text).toContain('smithsonian_get_object indexed.object_type');
+      expect(text).toContain('smithsonian_search_objects results');
+    }
+    // The casing split still binds whichever source the term came from.
+    expect(smithsonianBrowseCategory.description).toContain(
+      'treat each casing as its own category',
+    );
+    expect(value).toContain('casing variants are indexed as SEPARATE categories');
   });
 
   it('non-truncated result validates against the effective output schema (issue #13)', async () => {
@@ -996,11 +1132,6 @@ describe('smithsonianBrowseCategory', () => {
       return search;
     }
 
-    /** Every text block of a result, the trailer that carries the notice included. */
-    function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
-      return result.content.map((b) => (b.type === 'text' ? (b.text ?? '') : '')).join('\n');
-    }
-
     /** The `rows` property as `tools/list` advertises it, serialized as on the wire. */
     function advertisedRows(): Record<string, unknown> {
       const schema = smithsonianBrowseCategory.input['~standard'].jsonSchema.input({
@@ -1147,5 +1278,165 @@ describe('smithsonianBrowseCategory', () => {
         expect(rows.description).toBe('Number of sample objects to return (default 10, max 1000).');
       });
     });
+  });
+});
+
+describe('invalid_category recovery under the call deadline (issue #68)', () => {
+  /** The error envelope a failed contract call puts on `structuredContent`. */
+  function errorOf(result: { structuredContent?: unknown }) {
+    return (
+      (
+        result.structuredContent as
+          | { error?: { code?: number; data?: { reason?: string; recovery?: { hint?: string } } } }
+          | undefined
+      )?.error ?? {}
+    );
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('sends no /terms request when the zero-row search answers as the deadline expires', async () => {
+    vi.useFakeTimers();
+    const deadline = Date.now() + 50_000;
+    const terms: string[] = [];
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string) => {
+        const path = new URL(input).pathname;
+        if (path.endsWith('/search')) {
+          // The answer lands on the deadline itself.
+          vi.setSystemTime(deadline);
+          return new Response(
+            JSON.stringify({ status: 200, responseCode: 1, response: { rows: [], rowCount: 0 } }),
+            { status: 200 },
+          );
+        }
+        terms.push(path);
+        return new Response(
+          JSON.stringify({ status: 200, responseCode: 1, response: { terms: ['Quilts'] } }),
+          { status: 200 },
+        );
+      }),
+    );
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+      new svcModule.SmithsonianService(createInMemoryStorage()),
+    );
+
+    // A tenant lets the vocabulary read reach its storage cache and then the upstream.
+    const result = await runToolContract(
+      smithsonianBrowseCategory,
+      { mode: 'topic', value: 'Quilts' },
+      { context: { tenantId: 'test-tenant' } },
+    );
+
+    expect(terms).toEqual([]);
+    const error = errorOf(result);
+    expect(error.data?.reason).toBe('invalid_category');
+    expect(error.data?.recovery?.hint).toContain('could not be checked');
+    expect(error.data?.recovery?.hint).toContain(
+      'smithsonian_list_terms { field: "topic", contains: "Quilts" }',
+    );
+  });
+
+  it.each([
+    ['topic', 2],
+    ['medium', 2],
+  ] as const)(
+    'passes the deadline it sets at entry to every read of a %s zero match',
+    async (mode, reads) => {
+      vi.useFakeTimers();
+      const search = vi.fn().mockResolvedValue({ rows: [], rowCount: 0 });
+      const service = makeZeroMatchService(search);
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(service);
+      const entry = Date.now();
+
+      await runToolContract(smithsonianBrowseCategory, { mode, value: 'Quilts' });
+
+      const deadlines = [
+        ...search.mock.calls.map((call) => call[2]),
+        ...vi.mocked(service.describeTerm).mock.calls.map((call) => call[3]),
+      ];
+      expect(deadlines).toEqual(Array.from({ length: reads }, () => entry + 50_000));
+    },
+  );
+
+  it.each([
+    ['topic', 'vocabulary lookup'],
+    ['medium', 'object_type harvest'],
+  ] as const)('rethrows a caller cancellation that lands during the %s %s', async (mode) => {
+    let controller = new AbortController();
+    /** Abort the call from inside the lookup in flight, then fail it as the read would. */
+    const cancel = (): never => {
+      controller.abort();
+      throw new Error('SECRET aborted read');
+    };
+    const search = vi.fn(async (params: { query: string }) =>
+      params.query === '' ? { rows: [], rowCount: 0 } : cancel(),
+    );
+    const describeTerm = vi.fn(async (): Promise<TermDescription> => cancel());
+    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
+      search,
+      describeTerm,
+    } as unknown as svcModule.SmithsonianService);
+    const input = { mode, value: 'Quilts' };
+
+    const direct = await smithsonianBrowseCategory
+      .handler(
+        smithsonianBrowseCategory.input.parse(input),
+        createMockContext({ errors: smithsonianBrowseCategory.errors, signal: controller.signal }),
+      )
+      .catch((error: unknown) => error);
+    expect((direct as Error).name).toBe('AbortError');
+
+    controller = new AbortController();
+    const result = await runToolContract(smithsonianBrowseCategory, input, {
+      context: { signal: controller.signal },
+    });
+    expect(errorOf(result).code).toBe(JsonRpcErrorCode.RequestCancelled);
+  });
+});
+
+describe('smithsonianBrowseCategory content[] encoding (issue #70)', () => {
+  it('reads the category value, every row, and the breakdown back under CommonMark', () => {
+    const output = {
+      mode: 'topic',
+      value: 'M*A*S*H Television Series ',
+      total_count: 2,
+      sample_objects: [
+        {
+          record_id: 'nmah_680562',
+          title: 'Berberin <Frau>, *1*',
+          unit_code: 'NMAH',
+          thumbnail_url: 'https://ids.si.edu/ids/deliveryService?id=NMAH-1&max=150',
+          is_cc0: true,
+        },
+        { record_id: 'nmah_`2`', title: '- Trees\nDC ', unit_code: 'NMAH_[x]', is_cc0: false },
+      ],
+      museum_breakdown: [{ unit_code: 'NMAH_[x]', museum_name: 'American <History>', count: 2 }],
+    };
+    const text = smithsonianBrowseCategory.format!(output)
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('');
+
+    expect(text.split('\n')[0]).toBe('# Smithsonian — topic: M\\*A\\*S\\*H Television Series&#32;');
+    expect(headings(text)).toEqual([`Smithsonian — topic: ${output.value}`]);
+    expect(items(text)).toEqual([
+      'Berberin <Frau>, *1* (NMAH) — ID: nmah_680562 · CC0: Yes\nThumbnail: Thumbnail',
+      '- Trees\nDC  (NMAH_[x]) — ID: nmah_`2` · CC0: No',
+      'American <History> (NMAH_[x]): 2 in sample',
+    ]);
+    expect(images(text).map((image) => image.url)).toEqual([
+      output.sample_objects[0]?.thumbnail_url,
+    ]);
+  });
+
+  it('renders its notice through the escaping trailer', () => {
+    expect(smithsonianBrowseCategory.enrichmentTrailer?.notice).toBe(noticeTrailer);
   });
 });

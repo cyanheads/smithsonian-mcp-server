@@ -5,11 +5,15 @@
  * `dist/` under Bun or Node: `bun run mirror:<command>` in a checkout or the Docker image, or
  * `node dist/mirror/cli.js <command>`. Progress goes to stderr; the result prints to stdout as
  * JSON. SIGINT or SIGTERM stops the run after the current shard, and the next run resumes.
+ * Exits 0 on success, 75 when another process's sync holds the store (nothing ran), 1 on any
+ * other failure, and 2 on an unknown command.
  * @module mirror/cli
  */
 
+import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { defineMirror, type MirrorLogger, type SyncMode } from '@cyanheads/mcp-ts-core/mirror';
 import { getMirrorConfig } from '@/config/server-config.js';
+import { SYNC_LOCKED_EXIT_CODE } from '@/mirror/server-mirror.js';
 import { createOaSync } from '@/services/smithsonian/oa-ingest.js';
 import { oaMirrorStore } from '@/services/smithsonian/oa-mirror.js';
 
@@ -85,6 +89,12 @@ async function main(command: Command): Promise<void> {
 const command = process.argv[2];
 if (isCommand(command)) {
   await main(command).catch((err: unknown) => {
+    // Another process's sync holds the store: nothing ran, and the next run picks up its result.
+    if (err instanceof McpError && err.data?.reason === 'sync_locked') {
+      line('notice', `${err.message} Nothing was synced; run again once it finishes.`);
+      process.exitCode = SYNC_LOCKED_EXIT_CODE;
+      return;
+    }
     line('error', err instanceof Error ? err.message : String(err));
     process.exitCode = 1;
   });

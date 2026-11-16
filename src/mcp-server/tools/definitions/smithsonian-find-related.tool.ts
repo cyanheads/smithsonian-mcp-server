@@ -5,7 +5,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown, markdownImage } from '@cyanheads/mcp-ts-core/utils';
+import { headingText, noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import {
   enrichPageNotice,
   pageSizeInput,
@@ -19,7 +20,11 @@ import {
   provenanceTrailer,
 } from '@/mcp-server/tools/provenance.js';
 import type { FacetFilter } from '@/services/smithsonian/oa-mirror.js';
-import { getSmithsonianService } from '@/services/smithsonian/smithsonian-service.js';
+import {
+  API_KEY_REJECTED_ERROR,
+  getSmithsonianService,
+  startCallDeadline,
+} from '@/services/smithsonian/smithsonian-service.js';
 import type { Provenance } from '@/services/smithsonian/types.js';
 
 /**
@@ -59,7 +64,7 @@ const RelatedObjectSchema = z
       .describe(
         "The unit that holds the object, from the record's own data source, when it differs from the unit that indexes it (unit_code). Absent otherwise.",
       ),
-    thumbnail_url: z.string().optional().describe('Thumbnail URL if available.'),
+    thumbnail_url: z.string().optional().describe('Thumbnail URL (~150px) if available.'),
     is_cc0: z
       .boolean()
       .describe(
@@ -93,6 +98,12 @@ const SearchContinuationSchema = z
       ),
     filters: z
       .object({
+        unit_code: z
+          .string()
+          .optional()
+          .describe(
+            'smithsonian_search_objects filters.unit_code value. Present when this call was scoped with unit_code.',
+          ),
         culture: z
           .string()
           .optional()
@@ -114,10 +125,22 @@ const SearchContinuationSchema = z
     "Exact smithsonian_search_objects input that reproduces this signal's full match set, at any depth.",
   );
 
+/** The continuation filters in the order `format` renders them. */
+const CONTINUATION_FILTER_KEYS = [
+  'unit_code',
+  'culture',
+  'object_type',
+  'date',
+  'name',
+  'topic',
+] as const satisfies ReadonlyArray<
+  keyof NonNullable<z.infer<typeof SearchContinuationSchema>['filters']>
+>;
+
 export const smithsonianFindRelated = tool('smithsonian_find_related', {
   title: 'Find Related Smithsonian Objects',
   description:
-    'Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, named parties, and topic terms. Each related object is tagged with the signals that connected it to the anchor; a named-party signal carries the catalog\'s own role for that party (maker, Collector, Donor, issuing authority, …), not a fixed "maker" label. Matches surface across museums — an NASM aerospace anchor can pull related objects from NMNHPALEO, SAAM, and NMAH.',
+    'Discover objects across Smithsonian collections related to a given anchor object, matched on shared metadata signals — culture, period, object type, named parties, and topic terms. Each related object is tagged with the signals that connected it to the anchor; a named-party signal carries the catalog\'s own role for that party (maker, Collector, Donor, issuing authority, …), not a fixed "maker" label. Matches surface across museums — an NASM aerospace anchor can pull related objects from NMNHPALEO, SAAM, and NMAH, and library and archive records that share a name or topic. Pass unit_code to keep every signal inside one museum.',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -142,6 +165,12 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       .default(0)
       .describe(
         `Pagination offset — 0-indexed. Page contiguously by advancing start by the number of objects returned (a truncated page names the next start in its notice); each signal is reachable to a depth of ${MAX_FETCH_PER_SIGNAL} objects, beyond which truncated stays true but deeper pages aren't retrievable.`,
+      ),
+    unit_code: z
+      .string()
+      .optional()
+      .describe(
+        'Scope every signal to one museum: the indexed unit code a result row\'s unit_code reports (e.g. "NASM"; the 3D scans are "OCIO_DPO3D"), never a holding_museum_name. Matched exactly and case-sensitively and not checked against the vocabulary — smithsonian_list_terms { field: "unit_code" } lists the codes. The anchor\'s own code keeps related objects in its museum; another code finds related objects held elsewhere. Omit it, or pass an empty string, to search every museum.',
       ),
   }),
 
@@ -210,7 +239,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       ),
     ...provenanceEnrichment,
   },
-  enrichmentTrailer: provenanceTrailer,
+  enrichmentTrailer: { ...provenanceTrailer, notice: noticeTrailer },
 
   errors: [
     {
@@ -229,9 +258,12 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       recovery:
         'Use record_id values directly from smithsonian_search_objects results — do not construct IDs manually.',
     },
+    API_KEY_REJECTED_ERROR,
   ],
 
   async handler(input, ctx) {
+    // One deadline for the anchor, every fan-out, and every deeper chunk (issue #68).
+    const deadline = startCallDeadline();
     if (!input.id.trim()) {
       throw ctx.fail('invalid_id', 'Anchor object ID must not be empty.', { id: input.id });
     }
@@ -240,10 +272,16 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const svc = getSmithsonianService();
     const pageSize = servePageSize('smithsonian_find_related', 'limit', input.limit, ctx);
     const limit = pageSize.value;
-    ctx.log.info('Finding related objects', { id: input.id, limit });
+    // An empty string reads as omitted, as smithsonian_search_objects' filters.unit_code does.
+    const unitCode = input.unit_code || undefined;
+    ctx.log.info('Finding related objects', { id: input.id, limit, unit_code: unitCode });
 
     // Step 1: fetch anchor
-    const { record: anchorRaw, provenance: anchorProvenance } = await svc.getContent(input.id, ctx);
+    const { record: anchorRaw, provenance: anchorProvenance } = await svc.getContent(
+      input.id,
+      ctx,
+      deadline,
+    );
     const anchorSummary = svc.toSummary(anchorRaw);
 
     const indexed = anchorRaw.content?.indexedStructured;
@@ -301,14 +339,36 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       signal: string;
       continuation: z.infer<typeof SearchContinuationSchema>;
     };
+    type ContinuationFilters = NonNullable<FanOut['continuation']['filters']>;
     const fanOuts: FanOut[] = [];
 
-    if (culture0) {
+    /**
+     * Add one fan-out, scoped to `unitCode` when one is set (issue #75). The unit_code
+     * filter leads, where smithsonian_search_objects puts it, so the continuation sends
+     * the same filters in the same order and lands on the same request. A continuation
+     * with no filter at all — an unscoped free-text signal — omits `filters`.
+     */
+    const addFanOut = (
+      signal: string,
+      query: string,
+      filters: FacetFilter[],
+      named: ContinuationFilters,
+    ) => {
+      const continuationFilters = unitCode ? { unit_code: unitCode, ...named } : named;
       fanOuts.push({
-        query: '',
-        filters: [{ field: 'culture', value: culture0 }],
-        signal: `culture: ${culture0}`,
-        continuation: { query: '', filters: { culture: culture0 } },
+        query,
+        filters: unitCode ? [{ field: 'unit_code', value: unitCode }, ...filters] : filters,
+        signal,
+        continuation:
+          Object.keys(continuationFilters).length > 0
+            ? { query, filters: continuationFilters }
+            : { query },
+      });
+    };
+
+    if (culture0) {
+      addFanOut(`culture: ${culture0}`, '', [{ field: 'culture', value: culture0 }], {
+        culture: culture0,
       });
     }
     // The culture fan-out above already runs culture0 as a hard filter, so a name
@@ -320,34 +380,28 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const namePick = nameCandidates.find((candidate) => candidate.value !== culture0);
     if (namePick) {
       const signal = `${namePick.label}: ${namePick.value}`;
-      fanOuts.push(
-        namePick.hardFilter
-          ? {
-              query: '',
-              filters: [{ field: 'name', value: namePick.value }],
-              signal,
-              continuation: { query: '', filters: { name: namePick.value } },
-            }
-          : { query: namePick.value, filters: [], signal, continuation: { query: namePick.value } },
-      );
+      if (namePick.hardFilter) {
+        addFanOut(signal, '', [{ field: 'name', value: namePick.value }], {
+          name: namePick.value,
+        });
+      } else {
+        addFanOut(signal, namePick.value, [], {});
+      }
     }
     // topic is an indexed facet, so the fan-out is a hard filter rather than free
     // text: topic:"Quilts" matches 1,134 records against 2,677 for the bare word, so
     // the free-text form tagged more than half its results with a topic the catalog
     // never assigned them.
     if (topic0) {
-      fanOuts.push({
-        query: '',
-        filters: [{ field: 'topic', value: topic0 }],
-        signal: `topic: ${topic0}`,
-        continuation: { query: '', filters: { topic: topic0 } },
-      });
+      addFanOut(`topic: ${topic0}`, '', [{ field: 'topic', value: topic0 }], { topic: topic0 });
     }
     // Always add period+type combo
     if (period || objType) {
+      // object_type before date, the order smithsonian_search_objects ANDs them in, so
+      // the continuation replays this exact search.
       const filters: FacetFilter[] = [];
-      if (period) filters.push({ field: 'date', value: period });
       if (objType) filters.push({ field: 'object_type', value: objType });
+      if (period) filters.push({ field: 'date', value: period });
       const signal = [period && `period: ${period}`, objType && `type: ${objType}`]
         .filter(Boolean)
         .join(', ');
@@ -355,14 +409,10 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
       // year ranges, century, and BCE forms EDAN indexes alongside decades — so the
       // structured filter carries every period this fan-out can produce and the
       // continuation is the same shape regardless of the term's shape.
-      const continuation: z.infer<typeof SearchContinuationSchema> = {
-        query: '',
-        filters: {
-          ...(period && { date: period }),
-          ...(objType && { object_type: objType }),
-        },
-      };
-      fanOuts.push({ query: '', filters, signal, continuation });
+      addFanOut(signal, '', filters, {
+        ...(period && { date: period }),
+        ...(objType && { object_type: objType }),
+      });
     }
 
     const searchSignalsUsed = fanOuts.map((f) => f.signal);
@@ -380,7 +430,9 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     // the requested depth and the real total exceed one chunk. rowCount is the signal's
     // upstream total, used for the ceiling and truncation below. A chunk rejection
     // bubbles to the outer allSettled, dropping the whole signal rather than leaving a
-    // gap in the middle of its contiguous range.
+    // gap in the middle of its contiguous range. Every read runs on what the call's
+    // deadline leaves, so a signal still pending when it passes rejects with Timeout and
+    // is named "(timeout)" beside the signals that finished.
     const neededDepth = Math.min(input.start + limit, MAX_FETCH_PER_SIGNAL);
     const fetchSignal = async (fo: FanOut) => {
       const wave1 = await svc.search(
@@ -391,6 +443,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
           filters: fo.filters,
         },
         ctx,
+        deadline,
       );
       const items = [...wave1.rows];
       const reads: Array<Provenance | undefined> = [wave1.provenance];
@@ -410,6 +463,7 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
                 filters: fo.filters,
               },
               ctx,
+              deadline,
             ),
           ),
         );
@@ -551,7 +605,8 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
     const moreInMerged = merged.length > input.start + limit;
     const moreUpstream = buckets.some((b) => b.rowCount > neededDepth);
     // Enrichment `notice` is last-wins, so the clamp sentence leads the one composed
-    // string. Signal labels are catalog text inside rendered Markdown, so they are escaped.
+    // string. It carries signal labels and the scoped unit_code raw, as structuredContent
+    // carries every other catalog string; the content[] render escapes the notice.
     const notices = pageSize.notice ? [pageSize.notice] : [];
     if (failures.length > 0) {
       const failedSignals = failures.map(({ signal, error }) => {
@@ -561,13 +616,19 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
             : error instanceof McpError && error.code === JsonRpcErrorCode.RateLimited
               ? 'rate limited'
               : 'unavailable';
-        return `${escapeMarkdownInline(signal.slice(0, 120).replace(/\s+/g, ' '))} (${category})`;
+        return `${signal.slice(0, 120).replace(/\s+/g, ' ')} (${category})`;
       });
       notices.push(
         `Partial results: signal searches failed for ${failedSignals.join('; ')}. Retry this call to include those signals.`,
       );
     }
     if (related.length === 0) {
+      // Every window held its signal's whole match set, so finding nothing but the anchor
+      // in them means nothing else matches — inside the unit_code scope, a statement about
+      // the scope (issue #75). A window that stopped short of its signal says only what it saw.
+      const windowsComplete = fanOutResults.every(
+        (r) => r.status !== 'fulfilled' || r.value.rowCount <= r.value.items.length,
+      );
       notices.push(
         fanOuts.length === 0
           ? 'The anchor has no usable metadata signals. Try another anchor or smithsonian_search_objects with a topic.'
@@ -575,7 +636,9 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
             ? `No related objects at offset ${input.start}. Try start: 0 or use signals[].search_continuation with smithsonian_search_objects.`
             : failures.length > 0
               ? 'Successful fetched windows contained no non-anchor matches; failed signals may still have matches. Retry or use signals[].search_continuation with smithsonian_search_objects.'
-              : 'The fetched windows contained no non-anchor matches. Try signals[].search_continuation with smithsonian_search_objects for a signal with more rows, or another anchor.',
+              : unitCode && windowsComplete
+                ? `No object other than the anchor matches a signal within unit_code "${unitCode}". unit_code matches the indexed code exactly and case-sensitively (smithsonian_list_terms { field: "unit_code" } lists them), so check it, or omit unit_code to search every museum.`
+                : 'The fetched windows contained no non-anchor matches. Try signals[].search_continuation with smithsonian_search_objects for a signal with more rows, or another anchor.',
       );
     }
     // The mirror-order sentence closes the notice whenever a signal page came from the mirror.
@@ -615,39 +678,48 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
   },
 
   format: (result) => {
-    const lines: string[] = [];
-    lines.push(`# Related: ${result.anchor.title}`);
-    lines.push(`**Anchor:** \`${result.anchor.record_id}\` (${result.anchor.unit_code})`);
-    lines.push(`**Signals used:** ${result.search_signals_used.join(', ')}`);
-    lines.push(`**Related objects:** ${result.related.length}\n`);
+    const esc = escapeMarkdownInline;
+    const code = (value: string) => markdown().inlineCode(value).build();
+    /** One item per signal: a signal carries `, ` itself, so a join would not read back. */
+    const signalItems = (signals: string[]) => signals.map((signal) => `- ${esc(signal)}`);
+    const lines: string[] = [
+      `# Related: ${headingText(result.anchor.title)}`,
+      `**Anchor:** ${code(result.anchor.record_id)} (${esc(result.anchor.unit_code)})`,
+      `**Related objects:** ${result.related.length}`,
+    ];
+    if (result.search_signals_used.length > 0) {
+      lines.push('', '**Signals used:**', ...signalItems(result.search_signals_used));
+    }
     for (const obj of result.related) {
-      lines.push(`### ${obj.title}`);
-      lines.push(`**ID:** ${obj.record_id} | **Museum:** ${obj.museum_name} (${obj.unit_code})`);
-      if (obj.holding_museum_name) {
-        lines.push(`**Held by:** ${escapeMarkdownInline(obj.holding_museum_name)}`);
-      }
-      lines.push(`**Connected by:** ${obj.similarity_signals.join(', ')}`);
+      lines.push('', `### ${headingText(obj.title)}`);
+      lines.push(
+        `**ID:** ${code(obj.record_id)} | **Museum:** ${esc(obj.museum_name)} (${esc(obj.unit_code)})`,
+      );
+      if (obj.holding_museum_name) lines.push(`**Held by:** ${esc(obj.holding_museum_name)}`);
       lines.push(`**CC0:** ${obj.is_cc0 ? 'Yes' : 'No'}`);
-      if (obj.thumbnail_url) lines.push(`**Thumbnail:** ${obj.thumbnail_url}`);
+      if (obj.thumbnail_url) {
+        lines.push(`**Thumbnail:** ${markdownImage('Thumbnail', obj.thumbnail_url)}`);
+      }
+      // Last in the row: a label line after the list would join its final item.
+      lines.push('**Connected by:**', ...signalItems(obj.similarity_signals));
     }
     if (result.signals.length > 0) {
-      lines.push('\n## Signals');
+      lines.push('', '## Signals');
       lines.push("Retrieve a signal past this tool's reach with smithsonian_search_objects:\n");
       for (const s of result.signals) {
         const c = s.search_continuation;
         // Each filter key renders in its own block, never as exclusive branches —
         // every field must reach content[] on the same render.
-        const filterArgs: string[] = [];
-        if (c.filters?.culture) filterArgs.push(`culture: ${JSON.stringify(c.filters.culture)}`);
-        if (c.filters?.object_type)
-          filterArgs.push(`object_type: ${JSON.stringify(c.filters.object_type)}`);
-        if (c.filters?.date) filterArgs.push(`date: ${JSON.stringify(c.filters.date)}`);
-        if (c.filters?.name) filterArgs.push(`name: ${JSON.stringify(c.filters.name)}`);
-        if (c.filters?.topic) filterArgs.push(`topic: ${JSON.stringify(c.filters.topic)}`);
+        const filterArgs = CONTINUATION_FILTER_KEYS.flatMap((key) => {
+          const value = c.filters?.[key];
+          return value ? [`${key}: ${JSON.stringify(value)}`] : [];
+        });
         const filterArg = filterArgs.length > 0 ? `, filters: { ${filterArgs.join(', ')} }` : '';
-        lines.push(`- **${s.signal}** — ${s.row_count} upstream matches`);
+        lines.push(`- **${esc(s.signal)}** — ${s.row_count} upstream matches`);
+        // The span's fence is sized past any backtick run in the values, so the call reads
+        // back whole.
         lines.push(
-          `  \`smithsonian_search_objects { query: ${JSON.stringify(c.query)}${filterArg} }\``,
+          `  ${code(`smithsonian_search_objects { query: ${JSON.stringify(c.query)}${filterArg} }`)}`,
         );
       }
     }

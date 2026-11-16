@@ -5,11 +5,32 @@
  * @module tests/services/smithsonian/oa-ingest.test
  */
 
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import type { SqliteHandle } from '@cyanheads/mcp-ts-core/mirror';
+import {
+  defineMirror,
+  type MirrorStore,
+  type SqliteHandle,
+  sqliteMirrorStore,
+} from '@cyanheads/mcp-ts-core/mirror';
+import { createInMemoryStorage, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { encodeDoc, trimRecord } from '@/services/smithsonian/oa-mirror.js';
+import { createOaSync } from '@/services/smithsonian/oa-ingest.js';
+import {
+  encodeDoc,
+  type FacetFilter,
+  OaMirror,
+  oaMirrorStore,
+  trimRecord,
+} from '@/services/smithsonian/oa-mirror.js';
+import {
+  SmithsonianService,
+  startCallDeadline,
+} from '@/services/smithsonian/smithsonian-service.js';
+import type { RawEDAN } from '@/services/smithsonian/types.js';
 import { bulkLine, FakeBucket, md5, openTestMirror, type TestMirror } from './oa-bucket-fake.js';
 
 const T1 = '2026-10-19T07:00:00.000Z';
@@ -408,5 +429,267 @@ describe('refresh', () => {
     expect(bucket.downloads()).toEqual([B]);
     expect(urls()).toContain('edanmdm:b2');
     expect(await t.reader.snapshot()).toBe(T2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upgrading a v1 store (issue #74)
+// ---------------------------------------------------------------------------
+
+/** The auxiliary tables of the v1 store, as v1 created them. */
+const V1_AUXILIARY_TABLES = [
+  'CREATE TABLE IF NOT EXISTS terms (id INTEGER PRIMARY KEY, field TEXT NOT NULL, value TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, UNIQUE (field, value))',
+  'CREATE TABLE IF NOT EXISTS facets (term INTEGER NOT NULL, obj INTEGER NOT NULL, PRIMARY KEY (term, obj)) WITHOUT ROWID',
+  'CREATE TABLE IF NOT EXISTS shards (id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, etag TEXT, last_modified TEXT)',
+];
+
+/** The store spec v1 shipped: the same declared table, at version 1 with its one migration. */
+function v1Store(path: string): MirrorStore {
+  return sqliteMirrorStore({
+    path,
+    table: 'objects',
+    primaryKey: 'url',
+    columns: { url: 'TEXT', doc: 'BLOB NOT NULL', shard: 'INTEGER NOT NULL' },
+    indexes: [{ columns: ['shard'] }],
+    version: 1,
+    migrations: [
+      {
+        version: 1,
+        up(h: SqliteHandle) {
+          for (const sql of V1_AUXILIARY_TABLES) h.exec(sql);
+        },
+      },
+    ],
+  });
+}
+
+describe('opening a v1 store (issue #74)', () => {
+  /** Real `metadata/edan/` lines; nasm_A19820121000 is flagged on view at HAZY. */
+  const FIXTURE_LINES = readFileSync(
+    new URL('./fixtures/oa-bulk-lines.jsonl', import.meta.url),
+    'utf8',
+  )
+    .split('\n')
+    .filter(Boolean);
+  const SHARDS = new Map([
+    [A, FIXTURE_LINES.slice(0, 5)],
+    [B, FIXTURE_LINES.slice(5)],
+  ]);
+  const ON_VIEW = 'nasm_A19820121000';
+  const ON_VIEW_FILTER: FacetFilter[] = [{ field: 'on_view' }];
+  const NASM_FILTER: FacetFilter[] = [{ field: 'unit_code', value: 'NASM' }];
+  const RECORDS = FIXTURE_LINES.map((l) => JSON.parse(l) as RawEDAN).filter(
+    (r) => r.type === 'edanmdm',
+  );
+
+  /** A bulk line as the v1 store saw it: without the two keys only v2 stores. */
+  function v1Line(line: string): string {
+    const parsed = JSON.parse(line) as {
+      content?: { indexedStructured?: Record<string, unknown> };
+    };
+    delete parsed.content?.indexedStructured?.onPhysicalExhibit;
+    delete parsed.content?.indexedStructured?.exhibition;
+    return JSON.stringify(parsed);
+  }
+
+  let dir: string;
+  let path: string;
+  let upgraded: MirrorStore | undefined;
+  /** The live API's requests, by path and `q`. */
+  let live: string[];
+
+  /**
+   * Build a store with the v1 schema. v1 stored neither key, so its docs and facets are those
+   * of the stripped lines (byte-identical to a v1 build of the full lines); its shards carry the
+   * ETags of the bodies it read, which the bucket still serves unchanged.
+   */
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'oa-upgrade-test-'));
+    path = join(dir, 'oa.db');
+    for (const [key, lines] of SHARDS) bucket.put(key, lines.map(v1Line));
+    const v1 = v1Store(path);
+    await defineMirror({ name: 'oa-v1', store: v1, logger: {}, sync: createOaSync(v1) }).runSync({
+      mode: 'init',
+    });
+    const v1Handle = await v1.raw();
+    for (const [key, lines] of SHARDS) {
+      bucket.put(key, lines);
+      v1Handle
+        .prepare('UPDATE shards SET etag = ? WHERE key = ?')
+        .run(md5(bucket.objects.get(key)?.body ?? ''), key);
+    }
+    await v1.close();
+    bucket.requests.length = 0;
+
+    // The bucket for the shards, and the live API at its default base URL for everything else.
+    live = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(input instanceof Request ? input.url : input);
+        if (url.hostname !== 'api.si.edu') return bucket.fetch(input, init);
+        if (url.pathname.endsWith('/search')) {
+          live.push(`search ${url.searchParams.get('q')}`);
+          return Response.json({
+            status: 200,
+            response: { rows: RECORDS.slice(0, 1), rowCount: 7 },
+          });
+        }
+        live.push('content');
+        const id = decodeURIComponent(url.pathname.split('/').at(-1) ?? '');
+        const record = RECORDS.find((r) => r.url === id);
+        if (!record) throw new Error(`unmocked fetch: ${url.href}`);
+        return Response.json({ status: 200, response: record });
+      }),
+    );
+    vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+  });
+
+  afterEach(async () => {
+    await upgraded?.close();
+    upgraded = undefined;
+    vi.unstubAllEnvs();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Open the store under the current schema, the connection the helpers above read through. */
+  async function openUpgraded(): Promise<OaMirror> {
+    upgraded = oaMirrorStore(path);
+    handle = await upgraded.raw();
+    return new OaMirror(upgraded);
+  }
+
+  function dump(h: SqliteHandle) {
+    return {
+      objects: h
+        .prepare('SELECT rowid, url, hex(doc) AS doc, shard FROM objects ORDER BY rowid')
+        .all(),
+      terms: h.prepare('SELECT id, field, value, n FROM terms ORDER BY id').all(),
+      facets: h.prepare('SELECT term, obj FROM facets ORDER BY term, obj').all(),
+    };
+  }
+
+  /** The facet rows and terms of the two presence flags v1 already indexed. */
+  function presenceRows(h: SqliteHandle) {
+    return h
+      .prepare(
+        "SELECT t.id, t.field, t.value, t.n, f.obj FROM terms t JOIN facets f ON f.term = t.id WHERE t.field IN ('cc0', 'online_only') ORDER BY t.id, f.obj",
+      )
+      .all();
+  }
+
+  const search = (svc: SmithsonianService, filters: FacetFilter[]) =>
+    svc.search(
+      { query: '', rows: 10, start: 0, filters },
+      createMockContext(),
+      startCallDeadline(),
+    );
+
+  it('is a store the bucket has not changed under: a v1 refresh downloads nothing', async () => {
+    const v1 = v1Store(path);
+    try {
+      await defineMirror({ name: 'oa-v1', store: v1, logger: {}, sync: createOaSync(v1) }).runSync({
+        mode: 'refresh',
+      });
+      expect(bucket.downloads()).toEqual([]);
+    } finally {
+      await v1.close();
+    }
+  });
+
+  it('clears every shard ETag on open, indexes shards(etag), and leaves every record and facet in place', async () => {
+    const v1 = v1Store(path);
+    const before = dump(await v1.raw());
+    const shardsBefore = (await v1.raw())
+      .prepare<{ key: string; last_modified: string }>(
+        'SELECT key, last_modified FROM shards ORDER BY id',
+      )
+      .all();
+    await v1.close();
+
+    const reader = await openUpgraded();
+
+    expect(
+      handle.prepare<{ v: number }>('SELECT MAX(version) AS v FROM schema_version').get()?.v,
+    ).toBe(2);
+    expect(
+      handle
+        .prepare<{ key: string; etag: string | null; last_modified: string }>(
+          'SELECT key, etag, last_modified FROM shards ORDER BY id',
+        )
+        .all(),
+    ).toEqual(shardsBefore.map((s) => ({ ...s, etag: null })));
+    expect(
+      handle
+        .prepare<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'shards' AND sql LIKE '%(etag)%'",
+        )
+        .all(),
+    ).toHaveLength(1);
+    expect(dump(handle)).toEqual(before);
+    expect(await reader.ready()).toBe(true);
+    expect(bucket.requests).toEqual([]);
+  });
+
+  it('until a refresh, sends object reads and on_view searches live and keeps other filter-only searches on the mirror', async () => {
+    const reader = await openUpgraded();
+    const svc = new SmithsonianService(createInMemoryStorage(), reader);
+
+    const read = await svc.getContent(ON_VIEW, createMockContext(), startCallDeadline());
+    const onView = await search(svc, ON_VIEW_FILTER);
+    const nasm = await search(svc, NASM_FILTER);
+
+    expect(live).toEqual(['content', 'search onPhysicalExhibit:"Yes"']);
+    expect(read.provenance).toStrictEqual({ source: 'edan_api' });
+    expect(svc.toFullObject(read.record)).toMatchObject({
+      on_view: true,
+      current_exhibitions: [{ building: 'HAZY' }],
+    });
+    expect(onView.provenance).toStrictEqual({ source: 'edan_api' });
+    expect(onView.rowCount).toBe(7);
+    expect(nasm.provenance).toMatchObject({ source: 'oa_mirror' });
+    expect(nasm.rows.map((r) => r.record_id)).toEqual([ON_VIEW]);
+    expect(await reader.ready()).toBe(true);
+  });
+
+  it('refreshes every shard, rewriting only the record whose doc changed and leaving the presence rows alone; then serves all three from the mirror', async () => {
+    const reader = await openUpgraded();
+    const presence = presenceRows(handle);
+    expect(presence.length).toBeGreaterThan(0);
+    expect(termN('on_view', 'true')).toBeUndefined();
+    const writes = auditWrites();
+
+    await defineMirror({
+      name: 'oa-v2',
+      store: upgraded as MirrorStore,
+      logger: {},
+      sync: createOaSync(upgraded as MirrorStore),
+    }).runSync({ mode: 'refresh' });
+
+    expect(bucket.downloads()).toEqual([A, B]);
+    expect(writes()).toEqual([`update edanmdm:${ON_VIEW}`]);
+    expect(presenceRows(handle)).toEqual(presence);
+    expect(facetsOf(`edanmdm:${ON_VIEW}`)).toContain('on_view=true');
+    expect(termN('on_view', 'true')).toBe(1);
+    expect(
+      handle.prepare<{ n: number }>('SELECT COUNT(*) AS n FROM shards WHERE etag IS NULL').get()?.n,
+    ).toBe(0);
+    expectIndexConsistent();
+
+    const svc = new SmithsonianService(createInMemoryStorage(), reader);
+    const read = await svc.getContent(ON_VIEW, createMockContext(), startCallDeadline());
+    const onView = await search(svc, ON_VIEW_FILTER);
+    const nasm = await search(svc, NASM_FILTER);
+
+    expect(live).toEqual([]);
+    expect(read.provenance).toMatchObject({ source: 'oa_mirror' });
+    expect(svc.toFullObject(read.record)).toMatchObject({
+      on_view: true,
+      current_exhibitions: [{ building: 'HAZY' }],
+    });
+    expect(onView.provenance).toMatchObject({ source: 'oa_mirror' });
+    expect(onView.rows.map((r) => r.record_id)).toEqual([ON_VIEW]);
+    expect(onView.rowCount).toBe(termN('on_view', 'true'));
+    expect(nasm.provenance).toMatchObject({ source: 'oa_mirror' });
   });
 });

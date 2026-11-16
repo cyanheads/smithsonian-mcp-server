@@ -13,6 +13,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { smithsonianGetObject } from '@/mcp-server/tools/definitions/smithsonian-get-object.tool.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { FullObject, RawEDAN } from '@/services/smithsonian/types.js';
+import {
+  codeSpans,
+  headings,
+  images,
+  items,
+  labelValues,
+  links,
+  paragraphs,
+} from '../markdown-read-back.js';
 import { textOf } from './tool-result.js';
 
 function makeFullObject(id = 'nasm_TEST001'): FullObject {
@@ -32,7 +41,15 @@ function makeFullObject(id = 'nasm_TEST001'): FullObject {
     place: [{ label: 'Place of Origin', value: 'United States of America' }],
     culture: ['American'],
     topics: ['Aviation', 'Space Exploration'],
+    indexed: {
+      name: ['Lockheed'],
+      place: ['United States of America'],
+      object_type: ['Aircraft'],
+      date: ['1960s'],
+      topic: ['Aviation'],
+    },
     exhibitions: [{ name: 'Milestones of Flight', building: 'Milestones of Flight Hall' }],
+    current_exhibitions: [],
     credit_line: 'Transferred from NASA',
     identifiers: [{ label: 'Accession Number', value: 'A19670093000' }],
     object_rights: 'CC0',
@@ -50,7 +67,8 @@ function makeFullObject(id = 'nasm_TEST001'): FullObject {
 
 /**
  * Route `fetch` to `/content/{id}` records by pathname, rejecting every other call.
- * Records are keyed by bare record_id; the service requests `edanmdm:<id>`.
+ * Records are keyed by bare record_id; the service requests `edanmdm:<id>`. Each answer
+ * carries the requested `url` unless the record sets its own, as every live record does.
  */
 function stubContent(records: Record<string, RawEDAN>): void {
   vi.stubGlobal(
@@ -58,15 +76,17 @@ function stubContent(records: Record<string, RawEDAN>): void {
     vi.fn(async (input: string | URL) => {
       const { hostname, pathname } = new URL(String(input));
       const segment = /\/content\/([^/]+)$/.exec(pathname)?.[1];
-      const record =
-        hostname === 'api.si.edu' && segment
-          ? records[decodeURIComponent(segment).replace(/^edanmdm:/, '')]
-          : undefined;
+      const id = segment ? decodeURIComponent(segment).replace(/^edanmdm:/, '') : undefined;
+      const record = hostname === 'api.si.edu' && id ? records[id] : undefined;
       if (!record) throw new Error(`unmocked fetch: ${String(input)}`);
       return {
         ok: true,
         status: 200,
-        json: async () => ({ status: 200, responseCode: 1, response: record }),
+        json: async () => ({
+          status: 200,
+          responseCode: 1,
+          response: { url: `edanmdm:${id}`, ...record },
+        }),
       };
     }),
   );
@@ -171,6 +191,49 @@ const FIELD_BOOK: RawEDAN = {
           },
         ],
       },
+    },
+  },
+};
+
+/**
+ * nasm_A19700102000's indexed block as `/content` returns it (2026-11-15), with one free-text
+ * name: the name filter matches the indexed "Armstrong, Neil A." and nothing for the free-text
+ * "Neil A. Armstrong". It is flagged on view, at a venue named by building alone.
+ */
+const APOLLO_11: RawEDAN = {
+  title: 'Command Module Columbia, Apollo 11',
+  unitCode: 'NASM',
+  url: 'edanmdm:nasm_A19700102000',
+  content: {
+    descriptiveNonRepeating: { record_ID: 'nasm_A19700102000', unit_code: 'NASM' },
+    freetext: { name: [{ label: 'Astronaut', content: 'Neil A. Armstrong' }] },
+    indexedStructured: {
+      name: ['Collins, Michael', 'Armstrong, Neil A.', 'Aldrin, Buzz', 'North American Rockwell'],
+      place: ['United States of America'],
+      object_type: ['Spacecraft'],
+      topic: ['Outer space', 'Spaceflight'],
+      onPhysicalExhibit: ['Yes'],
+      exhibition: [{ building: 'NASM' }],
+    },
+  },
+};
+
+/** npg_NPG.2020.41's on-view keys as `/content` returns them (2026-11-15): all three venue parts. */
+const NPG_PORTRAIT: RawEDAN = {
+  title: 'Portrait',
+  unitCode: 'NPG',
+  url: 'edanmdm:npg_NPG.2020.41',
+  content: {
+    descriptiveNonRepeating: { record_ID: 'npg_NPG.2020.41', unit_code: 'NPG' },
+    indexedStructured: {
+      onPhysicalExhibit: ['Yes'],
+      exhibition: [
+        {
+          room: 'East Gallery 142',
+          building: 'NPG',
+          exhibitionTitle: 'Out of Many: Portraits from 1600 to 1900',
+        },
+      ],
     },
   },
 };
@@ -315,7 +378,9 @@ describe('smithsonianGetObject', () => {
       place: [],
       culture: [],
       topics: [],
+      indexed: { name: [], place: [], object_type: [], date: [], topic: [] },
       exhibitions: [],
+      current_exhibitions: [],
       identifiers: [],
       is_cc0: false,
       media_summary: { count: 0, cc0_image_count: 0, has_cc0_images: false, non_image_media: [] },
@@ -591,6 +656,435 @@ describe('smithsonianGetObject', () => {
       const result = await runToolContract(smithsonianGetObject, { id: 'dpo_3d_200018' });
       expect(result.structuredContent).toMatchObject({ media_summary: { non_image_media: [] } });
       expect(textOf(result)).not.toContain('Non-image media');
+    });
+  });
+
+  describe('indexed filter values (issue #73)', () => {
+    // The real service over a pathname-routed fetch: the values come from normalizeToFull,
+    // and runToolContract parses the output schema, so an undeclared field is stripped here.
+    beforeEach(() => {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      stubContent({
+        nasm_A19700102000: APOLLO_11,
+        slasro_79883: {
+          title: 'Paper',
+          url: 'edanmdm:slasro_79883',
+          unitCode: 'SLA_SRO',
+          content: {
+            descriptiveNonRepeating: { record_ID: 'slasro_79883', unit_code: 'SLA_SRO' },
+            indexedStructured: {
+              // RawIndexedName models the wrapper's content only; `type` is its provenance.
+              name: [
+                { type: 'author', content: 'Stewart, M. M.' } as never,
+                { type: 'author', content: 'Biuso, L. F.' } as never,
+              ],
+              object_type: ['Journal articles'],
+              date: ['1980s'],
+            },
+          },
+        },
+        nmah_mash: {
+          title: 'Costume',
+          url: 'edanmdm:nmah_mash',
+          unitCode: 'NMAH',
+          content: {
+            descriptiveNonRepeating: { record_ID: 'nmah_mash', unit_code: 'NMAH' },
+            indexedStructured: { topic: ['M*A*S*H Television Series', '<b>x</b>'] },
+          },
+        },
+        nmah_bare: {
+          title: 'Bare',
+          url: 'edanmdm:nmah_bare',
+          unitCode: 'NMAH',
+          content: { descriptiveNonRepeating: { record_ID: 'nmah_bare', unit_code: 'NMAH' } },
+        },
+      });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    /** The lines from the `**Indexed filter values:**` heading through its last list item. */
+    function indexedBlock(text: string): string[] {
+      const lines = text.split('\n');
+      const at = lines.indexOf('**Indexed filter values:**');
+      if (at === -1) return [];
+      const end = lines.findIndex((line, i) => i > at && !line.startsWith('- '));
+      return lines.slice(at, end === -1 ? undefined : end);
+    }
+
+    it('returns the indexed values of nasm_A19700102000 and lists one per line', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_A19700102000' });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        indexed: {
+          name: [
+            'Collins, Michael',
+            'Armstrong, Neil A.',
+            'Aldrin, Buzz',
+            'North American Rockwell',
+          ],
+          place: ['United States of America'],
+          object_type: ['Spacecraft'],
+          date: [],
+          topic: ['Outer space', 'Spaceflight'],
+        },
+        makers: [{ role: 'Astronaut', name: 'Neil A. Armstrong' }],
+      });
+      expect(indexedBlock(textOf(result))).toEqual([
+        '**Indexed filter values:**',
+        '- name: Collins, Michael',
+        '- name: Armstrong, Neil A.',
+        '- name: Aldrin, Buzz',
+        '- name: North American Rockwell',
+        '- place: United States of America',
+        '- object_type: Spacecraft',
+        '- topic: Outer space',
+        '- topic: Spaceflight',
+      ]);
+    });
+
+    it('returns the content of each wrapped name (slasro_79883)', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'slasro_79883' });
+
+      expect(result.structuredContent).toMatchObject({
+        indexed: { name: ['Stewart, M. M.', 'Biuso, L. F.'], object_type: ['Journal articles'] },
+      });
+      expect(indexedBlock(textOf(result))).toContain('- name: Biuso, L. F.');
+    });
+
+    it('escapes Markdown syntax in a value on content[] and keeps it raw on structuredContent', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmah_mash' });
+
+      expect(result.structuredContent).toMatchObject({
+        indexed: { topic: ['M*A*S*H Television Series', '<b>x</b>'] },
+      });
+      expect(indexedBlock(textOf(result))).toEqual([
+        '**Indexed filter values:**',
+        '- topic: M\\*A\\*S\\*H Television Series',
+        '- topic: \\<b>x\\</b>',
+      ]);
+    });
+
+    it('renders no block for a record with no indexed values', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmah_bare' });
+
+      expect(result.structuredContent).toMatchObject({
+        indexed: { name: [], place: [], object_type: [], date: [], topic: [] },
+      });
+      expect(textOf(result)).not.toContain('Indexed filter values');
+    });
+  });
+
+  describe('on view and current exhibitions (issue #74)', () => {
+    // The real service over a pathname-routed fetch: the flag and venues come from
+    // normalizeToFull, and runToolContract parses the output schema, so an undeclared field
+    // is stripped here.
+    const unflagged = (id: string, indexedStructured?: Record<string, unknown>): RawEDAN => ({
+      title: `Object ${id}`,
+      unitCode: 'NMAH',
+      content: {
+        descriptiveNonRepeating: { record_ID: id, unit_code: 'NMAH' },
+        ...(indexedStructured && { indexedStructured }),
+      },
+    });
+
+    beforeEach(() => {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      stubContent({
+        nasm_A19700102000: APOLLO_11,
+        'npg_NPG.2020.41': NPG_PORTRAIT,
+        // Neither key, as /content returns nmah_556181 (2026-11-15).
+        nmah_556181: unflagged('nmah_556181'),
+        nmah_off: unflagged('nmah_off', { onPhysicalExhibit: ['No'] }),
+        nmah_venues: unflagged('nmah_venues', {
+          exhibition: [
+            { building: 'NMAH', room: 'East Wing 1' },
+            { exhibitionTitle: 'Entertainment Nation', building: 'NMAH' },
+          ],
+        }),
+        nmah_markup: unflagged('nmah_markup', {
+          onPhysicalExhibit: ['Yes'],
+          exhibition: [
+            { exhibitionTitle: 'M*A*S*H <b>x</b>', building: 'NMAH', room: '[Gallery]' },
+            { exhibitionTitle: '# 1 Hits', building: 'NMAH' },
+          ],
+        }),
+      });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    /** The `**On view:**` or `**Current exhibitions:**` line and the venue items under it. */
+    function displayBlock(text: string): string[] {
+      const lines = text.split('\n');
+      const at = lines.findIndex(
+        (line) => line.startsWith('**On view:**') || line === '**Current exhibitions:**',
+      );
+      if (at === -1) return [];
+      const end = lines.findIndex((line, i) => i > at && !line.startsWith('- '));
+      return lines.slice(at, end === -1 ? undefined : end);
+    }
+
+    it('reports nasm_A19700102000 on view at NASM on both surfaces, its history still empty', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_A19700102000' });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        on_view: true,
+        current_exhibitions: [{ building: 'NASM' }],
+        exhibitions: [],
+      });
+      expect(displayBlock(textOf(result))).toEqual(['**On view:** Yes', '- NASM']);
+    });
+
+    it('names the title, building, and room of npg_NPG.2020.41 in one item', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'npg_NPG.2020.41' });
+
+      expect(
+        (result.structuredContent as { current_exhibitions: unknown }).current_exhibitions,
+      ).toStrictEqual([
+        {
+          building: 'NPG',
+          room: 'East Gallery 142',
+          title: 'Out of Many: Portraits from 1600 to 1900',
+        },
+      ]);
+      expect(displayBlock(textOf(result))).toEqual([
+        '**On view:** Yes',
+        '- Out of Many: Portraits from 1600 to 1900 · NPG, East Gallery 142',
+      ]);
+    });
+
+    it('omits on_view and renders neither line for a record with no flag (nmah_556181)', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmah_556181' });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).not.toHaveProperty('on_view');
+      expect(result.structuredContent).toMatchObject({ current_exhibitions: [] });
+      expect(textOf(result)).not.toContain('**On view:**');
+      expect(textOf(result)).not.toContain('**Current exhibitions:**');
+    });
+
+    it('reports a record flagged off view as on_view false and "No"', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmah_off' });
+
+      expect(result.structuredContent).toMatchObject({ on_view: false, current_exhibitions: [] });
+      expect(displayBlock(textOf(result))).toEqual(['**On view:** No']);
+    });
+
+    it('lists venues without a flag under their own heading, one item each in order', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmah_venues' });
+
+      expect(result.structuredContent).not.toHaveProperty('on_view');
+      expect(result.structuredContent).toMatchObject({
+        current_exhibitions: [
+          { building: 'NMAH', room: 'East Wing 1' },
+          { building: 'NMAH', title: 'Entertainment Nation' },
+        ],
+      });
+      expect(displayBlock(textOf(result))).toEqual([
+        '**Current exhibitions:**',
+        '- NMAH, East Wing 1',
+        '- Entertainment Nation · NMAH',
+      ]);
+    });
+
+    it('escapes Markdown syntax in a venue on content[] and keeps it raw on structuredContent', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmah_markup' });
+
+      expect(result.structuredContent).toMatchObject({
+        current_exhibitions: [
+          { title: 'M*A*S*H <b>x</b>', building: 'NMAH', room: '[Gallery]' },
+          { title: '# 1 Hits', building: 'NMAH' },
+        ],
+      });
+      expect(displayBlock(textOf(result))).toEqual([
+        '**On view:** Yes',
+        '- M\\*A\\*S\\*H \\<b>x\\</b> · NMAH, \\[Gallery\\]',
+        '- \\# 1 Hits · NMAH',
+      ]);
+    });
+  });
+
+  describe('content[] encoding (issue #70)', () => {
+    /** A projection whose strings carry Markdown syntax, separators, edge spaces, and line breaks. */
+    function hostileObject(): FullObject {
+      return {
+        record_id: 'siris_sil_43136',
+        title:
+          'Tables of functions with formulae and curves <Funktionentafeln mit Formeln und Kurven> by Dr. Eugene Jahnke ... and Fritz Emde ..',
+        unit_code: 'SIL',
+        museum_name: 'Smithsonian <Libraries>',
+        holding_museum_name: 'Held *here*',
+        dates: [{ label: 'Date', value: '©1981-<c1985>' }],
+        description: 'A *catalog* description\n\nwith a blank line ',
+        notes: [
+          { label: 'Notes', content: 'Issues for <winter 1988-> carry also whole numbering.' },
+          {
+            label: '[Citation]',
+            content: '238–241. https://doi.org/10.1130/0091-7613(1986)14<238:CLOARB>2.0.CO;2.',
+          },
+        ],
+        scientific_names: ['Crotalus horridus', 'Genus *sp.*, nov.'],
+        taxonomy: { kingdom: ['Animalia'], family: ['Viperidae; sensu lato', '[Incertae sedis]'] },
+        coordinates: [
+          { latitude: -12.5, longitude: 40, locality: 'Near <river> _bank_' },
+          { latitude: 1, longitude: 2 },
+        ],
+        makers: [
+          { role: 'Author', name: 'Jahnke, Eugen, 1861-1921' },
+          { role: '*Printer*', name: '[Teubner]' },
+        ],
+        materials: ['Ink, paper', 'Gold *leaf*'],
+        dimensions: ['24 cm; 1 vol.', '<2> parts'],
+        place: [
+          { label: 'Place', value: 'Leipzig; Berlin' },
+          { label: 'Site', value: '# 1 Main St' },
+        ],
+        culture: ['German, Saxon', 'Plains `Indian`'],
+        topics: ['Berberin <Frau>', 'M*A*S*H Television Series', 'Korean War, 1950-1953'],
+        indexed: { name: ['Jahnke, Eugen'], place: [], object_type: [], date: [], topic: [] },
+        exhibitions: [
+          { name: 'Math <Tables>', building: 'NMAH *East*' },
+          { name: '- Mathematics' },
+        ],
+        on_view: true,
+        current_exhibitions: [{ title: 'Numbers', building: 'NMAH' }],
+        credit_line: 'Gift of *someone* ',
+        identifiers: [{ label: 'Call number', value: 'QA55 .J27 1909_x' }],
+        object_rights: '<a> rights',
+        is_cc0: true,
+        record_link:
+          'https://siris-libraries.si.edu/ipac20/ipac.jsp?uri=full=3100001~!43136~!0#focus',
+        media_summary: {
+          count: 2,
+          cc0_image_count: 1,
+          has_cc0_images: true,
+          thumbnail_url: 'https://ids.si.edu/ids/deliveryService?id=SIL-43136&max=150',
+          non_image_media: [
+            {
+              type: 'Scanned *books*',
+              url: 'https://library.si.edu/digital-library/book/tablesoffunctio00jahn',
+              is_cc0: true,
+            },
+          ],
+        },
+      };
+    }
+
+    const render = (obj: FullObject) =>
+      smithsonianGetObject.format!(obj)
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('');
+
+    it('renders the bracketed title, date, and topic escaped (siris_sil_43136, _1091363, _1155821)', () => {
+      const text = render(hostileObject());
+      expect(text.split('\n')[0]).toBe(
+        '# Tables of functions with formulae and curves \\<Funktionentafeln mit Formeln und Kurven> by Dr. Eugene Jahnke ... and Fritz Emde ..',
+      );
+      expect(text).toContain('\n- Date: ©1981-\\<c1985>\n');
+      expect(text).toContain('\n- Berberin \\<Frau>\n');
+      expect(text).toContain('\n- M\\*A\\*S\\*H Television Series\n');
+    });
+
+    it('reads back to every structuredContent value under CommonMark', () => {
+      const obj = hostileObject();
+      const text = render(obj);
+
+      expect(headings(text)).toEqual([obj.title]);
+      expect(codeSpans(text)).toContain(obj.record_id);
+      expect(labelValues(text, 'Museum')).toEqual([`${obj.museum_name} (${obj.unit_code})`]);
+      expect(labelValues(text, 'Held by')).toEqual([obj.holding_museum_name]);
+      expect(labelValues(text, 'Credit')).toEqual([obj.credit_line]);
+      expect(labelValues(text, 'Rights')).toEqual([obj.object_rights]);
+      expect(paragraphs(text)).toContain(obj.description);
+      expect(links(text).map((link) => link.url)).toEqual([
+        obj.record_link,
+        obj.media_summary.non_image_media[0]?.url,
+      ]);
+      expect(images(text).map((image) => image.url)).toEqual([obj.media_summary.thumbnail_url]);
+      // Every multi-value field one item per value, in order, and no label line folded into the
+      // item before it.
+      expect(items(text)).toEqual([
+        'Date: ©1981-<c1985>',
+        'Notes: Issues for <winter 1988-> carry also whole numbering.',
+        '[Citation]: 238–241. https://doi.org/10.1130/0091-7613(1986)14<238:CLOARB>2.0.CO;2.',
+        'Crotalus horridus',
+        'Genus *sp.*, nov.',
+        'Animalia',
+        'Viperidae; sensu lato',
+        '[Incertae sedis]',
+        '-12.5, 40 (Near <river> _bank_)',
+        '1, 2',
+        'Author: Jahnke, Eugen, 1861-1921',
+        '*Printer*: [Teubner]',
+        'Ink, paper',
+        'Gold *leaf*',
+        '24 cm; 1 vol.',
+        '<2> parts',
+        'German, Saxon',
+        'Plains `Indian`',
+        'Berberin <Frau>',
+        'M*A*S*H Television Series',
+        'Korean War, 1950-1953',
+        'Place: Leipzig; Berlin',
+        'Site: # 1 Main St',
+        'name: Jahnke, Eugen',
+        'Numbers · NMAH',
+        'Math <Tables> (NMAH *East*)',
+        '- Mathematics',
+        'Call number: QA55 .J27 1909_x',
+        'Scanned *books* · CC0: Yes',
+      ]);
+    });
+
+    it('lists each of the seven topics of nmah_680562 as its own item', () => {
+      // nmah_680562 as /content returns its topics (2026-11-15): four indexed, four free-text.
+      const raw: RawEDAN = {
+        title: 'M*A*S*H Signpost',
+        unitCode: 'NMAH',
+        content: {
+          descriptiveNonRepeating: { record_ID: 'nmah_680562', unit_code: 'NMAH' },
+          indexedStructured: {
+            topic: ['M*A*S*H Television Series', 'Amusements', 'Military', 'Korean War, 1950-1953'],
+          },
+          freetext: {
+            topic: [
+              { label: 'related object association proper name', content: 'M*A*S*H' },
+              { label: 'general subject association', content: 'Television' },
+              { label: 'general subject association', content: 'Television' },
+              { label: 'related event', content: 'Korean War' },
+            ],
+          },
+        },
+      };
+      const obj = new svcModule.SmithsonianService(createInMemoryStorage()).toFullObject(raw);
+      const topics = [
+        'M*A*S*H Television Series',
+        'Amusements',
+        'Military',
+        'Korean War, 1950-1953',
+        'M*A*S*H',
+        'Television',
+        'Korean War',
+      ];
+      expect(obj.topics).toEqual(topics);
+      const text = render(obj);
+      expect(headings(text)).toEqual(['M*A*S*H Signpost']);
+      expect(items(text)).toEqual([...topics, ...obj.indexed.topic.map((t) => `topic: ${t}`)]);
     });
   });
 });
