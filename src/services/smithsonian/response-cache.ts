@@ -6,16 +6,6 @@
 
 import { requestCancelled, timeout } from '@cyanheads/mcp-ts-core/errors';
 
-/** What a load hands back: the value its callers receive, and whether it may be stored. */
-export interface Loaded<T> {
-  /**
-   * False for an answer that is not a validated success. Every caller waiting on
-   * the load still receives it; the cache does not keep it.
-   */
-  storable: boolean;
-  value: T;
-}
-
 /** The caller a fetch answers: how it is cancelled, and when it stops waiting. */
 export interface Caller {
   /** Epoch milliseconds after which the caller has no time left for this value. */
@@ -26,9 +16,10 @@ export interface Caller {
 /**
  * Fetches the value for one key, finishing by `deadline` (epoch milliseconds). Runs on
  * the cache's own signal and its own load deadline while the cache is on, and on the
- * caller's signal and deadline when it is off.
+ * caller's signal and deadline when it is off. Resolves only with a validated success:
+ * the cache keeps whatever it resolves.
  */
-export type Load<T> = (signal: AbortSignal | undefined, deadline: number) => Promise<Loaded<T>>;
+export type Load<T> = (signal: AbortSignal | undefined, deadline: number) => Promise<T>;
 
 interface Entry {
   /** UTF-8 length of `json`, the unit of the byte budget. */
@@ -84,14 +75,14 @@ export class ResponseCache {
    * aborts, or whose deadline passes, rejects alone, and the load is aborted once no
    * caller is left waiting on it. A caller with no time left starts and joins nothing.
    * A load that rejects rejects every waiter and stores nothing; one that resolves is
-   * stored when it is `storable` and its JSON fits the budget. A stored entry answers
+   * stored when its JSON fits the budget. A stored entry answers
    * any caller whose signal has not aborted, deadline or not: it costs nothing.
    *
    * @throws McpError `RequestCancelled` when the caller's signal aborts before the value
    *   arrives, and `Timeout` (`reason: 'retry_deadline_exceeded'`) when its deadline does.
    */
   async fetch<T>(key: string, ttlMs: number, caller: Caller, load: Load<T>): Promise<T> {
-    if (ttlMs === 0) return (await load(caller.signal, caller.deadline)).value;
+    if (ttlMs === 0) return await load(caller.signal, caller.deadline);
     if (caller.signal?.aborted) throw cancelled();
 
     const json = this.read(key);
@@ -118,8 +109,8 @@ export class ResponseCache {
   }
 
   /**
-   * Start the shared load for `key`. A storable value is serialized into the cache
-   * before any waiter's continuation runs, so no caller can mutate it first.
+   * Start the shared load for `key`. Its value is serialized into the cache before any
+   * waiter's continuation runs, so no caller can mutate it first.
    */
   private start<T>(key: string, ttlMs: number, load: Load<T>): Flight {
     const controller = new AbortController();
@@ -127,8 +118,8 @@ export class ResponseCache {
       controller,
       waiters: 0,
       promise: load(controller.signal, Date.now() + this.loadDeadlineMs)
-        .then(({ storable, value }) => {
-          if (storable) this.store(key, JSON.stringify(value), ttlMs);
+        .then((value) => {
+          this.store(key, JSON.stringify(value), ttlMs);
           return value;
         })
         .finally(() => {

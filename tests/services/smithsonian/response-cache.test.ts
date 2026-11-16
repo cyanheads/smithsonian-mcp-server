@@ -6,7 +6,7 @@
 
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { type Caller, type Loaded, ResponseCache } from '@/services/smithsonian/response-cache.js';
+import { type Caller, ResponseCache } from '@/services/smithsonian/response-cache.js';
 
 const TTL_MS = 60_000;
 
@@ -19,13 +19,8 @@ function caller(signal?: AbortSignal, ms = 120_000): Caller {
 }
 
 /** A load that answers `value` at once and counts its runs. */
-function instant<T>(value: T, storable = true) {
-  return vi.fn(
-    async (_signal: AbortSignal | undefined): Promise<Loaded<T>> => ({
-      value,
-      storable,
-    }),
-  );
+function instant<T>(value: T) {
+  return vi.fn(async (_signal: AbortSignal | undefined): Promise<T> => value);
 }
 
 /**
@@ -36,10 +31,10 @@ function instant<T>(value: T, storable = true) {
 function held<T>(value: T) {
   const signals: Array<AbortSignal | undefined> = [];
   const deadlines: number[] = [];
-  const gate = Promise.withResolvers<Loaded<T>>();
+  const gate = Promise.withResolvers<T>();
   const load = vi.fn(
     (signal: AbortSignal | undefined, deadline: number) =>
-      new Promise<Loaded<T>>((resolve, reject) => {
+      new Promise<T>((resolve, reject) => {
         signals.push(signal);
         deadlines.push(deadline);
         signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
@@ -50,7 +45,7 @@ function held<T>(value: T) {
     load,
     signals,
     deadlines,
-    resolve: () => gate.resolve({ value, storable: true }),
+    resolve: () => gate.resolve(value),
     reject: (error: unknown) => gate.reject(error),
   };
 }
@@ -59,7 +54,7 @@ function held<T>(value: T) {
 function through(cache: ResponseCache, loads: Map<string, number>, key: string, value: string) {
   return cache.fetch(key, TTL_MS, caller(), async () => {
     loads.set(key, (loads.get(key) ?? 0) + 1);
-    return { value, storable: true };
+    return value;
   });
 }
 
@@ -218,14 +213,14 @@ describe('ResponseCache', () => {
       const cache = new ResponseCache(12, LOAD_DEADLINE_MS);
       const loads = new Map<string, number>();
       // A load that ignores its signal: it resolves after its only caller left.
-      const late = Promise.withResolvers<Loaded<string>>();
+      const late = Promise.withResolvers<string>();
       const abandoning = new AbortController();
       const abandoned = cache.fetch('a', TTL_MS, caller(abandoning.signal), () => late.promise);
       abandoning.abort();
       expect(await codeOf(abandoned)).toBe(JsonRpcErrorCode.RequestCancelled);
 
       await through(cache, loads, 'a', 'aaaa'); // a fresh load stores 6 bytes
-      late.resolve({ value: 'zzzz', storable: true }); // the late success replaces it
+      late.resolve('zzzz'); // the late success replaces it
       await late.promise;
       await through(cache, loads, 'b', 'bbbb'); // fits only if 'a' counts 6 bytes once
 
@@ -248,16 +243,6 @@ describe('ResponseCache', () => {
       await cache.fetch('k', TTL_MS, caller(), load);
 
       expect(load).toHaveBeenCalledTimes(1);
-    });
-
-    it('returns an unstorable answer to its caller without keeping it', async () => {
-      const cache = new ResponseCache(1024, LOAD_DEADLINE_MS);
-      const load = instant({ rows: [], rowCount: 0 }, false);
-
-      expect(await cache.fetch('k', TTL_MS, caller(), load)).toEqual({ rows: [], rowCount: 0 });
-      await cache.fetch('k', TTL_MS, caller(), load);
-
-      expect(load).toHaveBeenCalledTimes(2);
     });
   });
 

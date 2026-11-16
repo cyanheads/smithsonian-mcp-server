@@ -1330,11 +1330,7 @@ export class SmithsonianService {
         signal,
         deadline: readDeadline,
       });
-      // get() refuses a 200 without a page, so every page that reaches here is kept.
-      return {
-        value: { rows: raw.response.rows.map(normalizeToSummary), rowCount: raw.response.rowCount },
-        storable: true,
-      };
+      return { rows: raw.response.rows.map(normalizeToSummary), rowCount: raw.response.rowCount };
     });
     const provenance = this.live();
     return provenance ? { ...page, provenance } : page;
@@ -1390,8 +1386,7 @@ export class SmithsonianService {
           signal,
           deadline: readDeadline,
         });
-        // get() refuses a 200 without a record, so every record that reaches here is kept.
-        return { value: raw.response, storable: true };
+        return raw.response;
       });
     } catch (err: unknown) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
