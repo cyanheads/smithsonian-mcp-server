@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-11-15
+
+One 50 s deadline per tool call, on-view status and filter, a record's indexed filter values, and catalog text kept and rendered as written
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-11-01
 
 Optional local Open Access mirror, a response cache, and a published guide skill
