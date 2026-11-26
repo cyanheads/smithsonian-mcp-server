@@ -37,8 +37,8 @@ The Smithsonian's Open Access catalog: 14.5 million objects across 20+ museums, 
 |:---|:---|
 | `smithsonian_search_objects` | Search across 14.5M objects by text query with optional filters (museum, type, date term, culture, place, topic, name, scientific name, media type, online-only, CC0, on view now). Returns curated summaries with total count. |
 | `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field (unit_code, culture, place, date, online_media_type, topic). Call before filtering to avoid empty results from invalid values; pass `contains` to resolve a guessed value to its exact term(s). `unit_code` terms come back with their museum names. |
-| `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, materials, dimensions, the indexed values usable as search filters, current display, credit line, and identifiers. |
-| `smithsonian_get_media` | Return an object's CC0-licensed images in catalog order at multiple resolutions (thumbnail, screen, full-size JPEG, archival TIFF), with the object's `cc0_image_count`; page a long list with `start` and `limit`. Only CC0 images are returned. An object with none fails with a distinct error reason: nothing digitized, only non-image media, or only restricted images. |
+| `smithsonian_get_object` | Fetch a normalized catalog metadata projection for an object by ID: title, dates, the labeled physical description, the indexed values usable as search filters, current display, the sets the catalog files it under, credit line, and identifiers. |
+| `smithsonian_get_media` | Return an object's CC0-licensed images in catalog order at multiple resolutions (thumbnail, screen, full-size JPEG, archival TIFF), with the object's `cc0_image_count`; with `media: "3d"`, its CC0 3D model packages and their downloadable files, with `cc0_model_count`. Page a long list with `start` and `limit`. Only CC0 media is returned. An object with none fails with a distinct error reason: nothing digitized, no media of the requested kind, or only restricted media. |
 | `smithsonian_browse_category` | Browse objects within one exact category (museum, culture, period, medium, topic) with total count, a page of objects, and museum breakdown. Requires an exact indexed category term. |
 | `smithsonian_find_related` | Discover cross-collection objects related to an anchor, matched on shared culture, named-party, topic, and period signals. |
 
@@ -71,21 +71,24 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 ### `smithsonian_list_terms` <sub>tool</sub>
 
 - Fields: `unit_code`, `culture`, `place`, `date`, `online_media_type`, `topic` — a controlled vocabulary, often plural (e.g. `Paintings`, not `Painting`); ground filter values here before searching or browsing
-- `contains` filters the vocabulary by a case-insensitive substring — resolves a guessed value (e.g. `greek` → `Greek, Attic`) in one call; for `unit_code` it also matches museum names (`National Air and Space` → `NASM`), and each `unit_code` term comes back with a `labels` map of its museum name
+- `contains` filters the vocabulary by a case-insensitive substring — resolves a guessed value (e.g. `greek` → `Greek, Attic`) in one call; for `unit_code` it also matches museum names (`National Air and Space` → `NASM`) and the names a unit also goes by: National Museum of Natural History for the NMNH divisions, Freer Gallery of Art and Arthur M. Sackler Gallery for `NMAA`, Cooper-Hewitt, National Design Museum for `CHNDM` and `CHSDM`. Name matching ignores case, surrounding whitespace, a leading "Smithsonian" or "Smithsonian's", `&` versus "and", apostrophe style, and hyphens versus spaces; code matching is a plain case-insensitive substring. Each `unit_code` term comes back with a `labels` map of its museum name
 - Paginate with `start` + `rows` (default 50, up to 40,000 per page — a larger `rows` is served at 40,000 with a notice); `topic` (133k terms) and `place` (114k) are large enough to pair with `contains`
 - No per-term object counts are available upstream — only the term values themselves
-- Each field's vocabulary is cached for `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` (default 3600 seconds, `0` disables) — upstream ignores paging and returns the whole set on every call, so paging a large vocabulary uncached re-downloads it each time
+- Each field's vocabulary is cached for `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` (default 3600 seconds, `0` disables the cache and the sharing of concurrent cold reads) — upstream ignores paging and returns the whole set on every call, so paging a large vocabulary uncached re-downloads it each time. Concurrent cold reads of one field share one `/terms` request
 - `object_type` is not enumerable here — take it from `smithsonian_get_object` `indexed.object_type` for a known object, or harvest it from the `object_type` field in `smithsonian_search_objects` results
 
 ---
 
 ### `smithsonian_get_object` <sub>tool</sub>
 
-- Input: `record_id` from `smithsonian_search_objects` — do not construct IDs manually
-- Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), materials, dimensions, place associations, culture terms, topic/subject terms, free-text exhibition history (rarely filled, so `[]` does not mean never exhibited), accession identifiers, credit line, rights statement
+- Input: `id`, the `record_id` from `smithsonian_search_objects` — do not construct IDs manually. `record_id` is also accepted as the key; sending both fails `invalid_arguments`
+- Returns the exposed catalog fields: title, dates (all labeled), makers (with roles), `physical_description`, place associations, culture terms, topic/subject terms, free-text exhibition history (rarely filled, so `[]` does not mean never exhibited), `sets`, accession identifiers, credit line, rights statement
+- `physical_description` is `[{ label, value }]`: every catalog entry under its own label (`Medium`, `Dimensions`, `Length - Total`, `Sex`, `Preparation`, `Physical Location`), in catalog order with repeated labels kept. Nothing is sorted by label, since a label can't separate materials from measurements, specimen attributes, or storage locations. `[]` when the record has none
+- `object_rights` joins every `objectRights` entry, then every `objectRight` entry, with `; `
 - `indexed` holds the `name`, `place`, `object_type`, `date`, and `topic` values the record is indexed under, each passable verbatim to the `smithsonian_search_objects` filter of the same name; the free-text `makers`, `place`, `dates`, and `topics` often differ from them
 - Current display for objects the catalog flags: `on_view` (`true` or `false`, absent when the record carries no flag) and `current_exhibitions`, each `{ building?, room?, title? }` where `building` is a building code, not a `unit_code`
-- Media summary included — call `smithsonian_get_media` for full image URLs. `media_summary.non_image_media[]` lists every media item that is not an image (3D models, scanned books, documents) as `{ type, url?, is_cc0 }`, in catalog order
+- `sets` is `[{ label, value }]` from the catalog's set names, always present (`[]` when the record lists none): the collections and departments an object is filed under and, for a displayed object, the gallery, hangar, or exhibition (`See more items in`, `Location`, `Exhibition`, `On View`). It is catalog text, not a second display flag: a National Portrait Gallery record can read `Location: Currently not on view` with no `on_view`. Venue text comes from here
+- Media summary included — call `smithsonian_get_media` for full image URLs, or with `media: "3d"` for the model files of a 3D package. `media_summary.non_image_media[]` lists every media item that is not an image (3D models, scanned books, documents) as `{ type, url?, is_cc0 }`, in catalog order; a 3D item's `url` is its viewer page, not a file
 - `holding_museum_name` names the holding unit when it differs from `unit_code`, the code the record is indexed under (the 3D digitization scans); the text output renders it as `Held by`
 - All nonempty notes retain their catalog labels and source order. `description` selects recognized prose labels; administrative notes stay labeled.
 - Natural-history metadata includes all `scientific_names`, reported `taxonomy` ranks, and valid decimal collection `coordinates` with their own locality when present. The arrays are empty when no names or valid points are available; absent ranks are omitted. No accepted name, geocoding, or accuracy is inferred. Use `scientific_names` as exact `filters.scientific_name` values in search; this field is not enumerable via `smithsonian_list_terms`.
@@ -94,11 +97,12 @@ Ships in `skills/` for plugin installs, the npm package, the Docker image, and t
 
 ### `smithsonian_get_media` <sub>tool</sub>
 
-- Only CC0-licensed images are returned, never restricted content, in catalog order with `cc0_image_count` (the same count as `smithsonian_get_object`'s `media_summary.cc0_image_count`)
-- `start` and `limit` page the image list: omit `limit` to get every image from `start`; `limit` is capped at 1,000 and a larger value is served at the cap with a notice. A `start` at or past `cc0_image_count` returns an empty `images` list
-- Three distinct failure reasons when an object has no CC0 image, decided on the whole record before paging: `no_media` (nothing digitized), `no_images` (media exists but is entirely non-image — 3D models, scanned books, documents; the recovery hint names the types present and points to `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item), `not_cc0` (images exist but none are CC0, thrown as `Forbidden`)
+- Only CC0-licensed media is returned, never restricted content, in catalog order. `media` is `"images"` (the default) or `"3d"`. Images mode returns `images[]` with `cc0_image_count` (the same count as `smithsonian_get_object`'s `media_summary.cc0_image_count`); `"3d"` returns `models[]` with `cc0_model_count`, and `images` is `[]` while `cc0_image_count` still counts the record's CC0 images
+- `start` and `limit` page the image list, or with `media: "3d"` the model packages: omit `limit` to get everything from `start`; `limit` is capped at 1,000 and a larger value is served at the cap with a notice. A `start` at or past the count returns an empty list
+- Failure reasons when an object has no CC0 media of the requested kind, decided on the whole record before paging: `no_media` (nothing digitized, in either mode), `no_images` (images mode: media exists but is entirely non-image — 3D models, scanned books, documents; the recovery hint names the types present, points to `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item, and for an object with a 3D package names the `media: "3d"` call), `no_models` (`media: "3d"`: media exists but no 3D model package), `not_cc0` (images, or with `media: "3d"` model packages, exist but none are CC0, thrown as `Forbidden`)
 - Each image entry includes a thumbnail (~150px), a screen-size image (~1,200px on the long edge), a full-size JPEG (the catalog's high-resolution JPEG with pixel dimensions, or the image's full-size delivery URL without them when none is listed), and an archival TIFF when one exists
-- Use `smithsonian_search_objects` with `filters.cc0_only: true` to find objects with downloadable CC0 images before calling this tool
+- Each 3D package entry carries `media_id`, its Voyager `viewer_url` (a web page, not a file), a `thumbnail_url`, and `files[]`: each file's `url` and, as the catalog spells them, `filename`, `category` (resolution tier such as `Low resolution`, `Full resolution`, `iOS AR model`, `Watertight`), `file_type`, `model_file_type`, `units`, `draco_compressed`, and `size_bytes`. `files` is `[]` when the catalog lists none
+- Use `smithsonian_search_objects` with `filters.cc0_only: true` to find objects with downloadable CC0 images, or `filters.online_media_type: "3D Models"` for objects with 3D packages, before calling this tool
 
 ---
 
@@ -133,16 +137,16 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 Smithsonian-specific:
 
 - Wraps the [Smithsonian Open Access API](https://edan.si.edu/openaccess/apidocs/) (14.5M objects across 20+ museums, 5.2M carrying CC0 media) with a free `api.data.gov` key
-- CC0 gating on `smithsonian_get_media` — only open-access images returned, never restricted content
+- CC0 gating on `smithsonian_get_media` — only open-access images and 3D model packages returned, never restricted content; each image and each package is gated on its own license
 - Graceful degradation in `smithsonian_find_related` — a failure in one metadata signal doesn't abort the rest
 - Response normalization across heterogeneous museum metadata schemas
-- In-process response cache — repeated identical searches, and the `get_object` → `get_media` → `find_related` chain on one record, cost one upstream request per cache lifetime against the shared hourly key budget
+- In-process response cache — repeated identical searches, and the `get_object` → `get_media` → `find_related` chain on one record, cost one upstream request per cache lifetime against the shared hourly key budget; concurrent cold reads of one field's term vocabulary share one request too
 - Optional local mirror of the Open Access bulk metadata ([below](#optional-open-access-mirror)) — object reads and filter-only searches answer from disk instead of spending API requests
 
 Agent-friendly output:
 
 - `has_media` on every object summary — agents can gate image download calls without an extra lookup (the `is_cc0` flag is the metadata license, which the Open Access corpus carries almost everywhere)
-- Typed error reasons (`no_results`, `invalid_filter`, `no_terms`, `invalid_category`, `not_found`, `no_media`, `no_images`, `not_cc0`, `invalid_id`, `api_key_rejected`) with recovery hints for each case
+- Typed error reasons (`no_results`, `invalid_filter`, `no_terms`, `invalid_category`, `not_found`, `no_media`, `no_images`, `no_models`, `not_cc0`, `invalid_id`, `api_key_rejected`) with recovery hints for each case
 - `similarity_signals` on related-object results let agents explain why objects were surfaced
 - `total_count` on all search responses enables agents to communicate result scope before paginating
 - Over-cap page sizes are served at the cap with a notice instead of rejected, and paging notices name the next `start` outright
@@ -276,7 +280,7 @@ cp .env.example .env
 |:---------|:------------|:--------|
 | `SMITHSONIAN_API_KEY` | **Required.** Free API key from [api.data.gov/signup](https://api.data.gov/signup). | — |
 | `SMITHSONIAN_BASE_URL` | Smithsonian Open Access API base URL. | `https://api.si.edu/openaccess/api/v1.0` |
-| `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` | Seconds to cache each indexed field's term vocabulary. `0` disables caching. | `3600` |
+| `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` | Seconds to cache each indexed field's term vocabulary. `0` disables the cache and the sharing of concurrent cold reads of one field. | `3600` |
 | `SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS` | Seconds to cache each search page in memory. `0` disables the cache and the sharing of concurrent identical requests. | `3600` |
 | `SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS` | Seconds to cache each object record in memory. `0` disables the cache and the sharing of concurrent identical requests. | `86400` |
 | `SMITHSONIAN_CLAMP_LIMITS` | Serve an over-cap `rows` or `limit` at its cap with a notice. `false` rejects it instead and advertises each cap as the schema `maximum`. | `true` |
@@ -287,7 +291,7 @@ cp .env.example .env
 | `MCP_SESSION_MODE` | Session mode: `auto`, `stateful`, or `stateless`. The server declares `stateless` in code; set this only to override it. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
-| `LOGS_DIR` | Directory for log files (Node.js only). | `<project-root>/logs` |
+| `LOGS_DIR` | Directory for log files (Node.js only). A relative path resolves against the application root, which for an installed server is the server package's own directory. | `<app-root>/logs` |
 | `STORAGE_PROVIDER_TYPE` | Storage backend. | `in-memory` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
 

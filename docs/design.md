@@ -15,11 +15,11 @@ When the api.data.gov edge refuses the key (HTTP 403 naming an `API_KEY_*` code)
 | Name | Description | Key Inputs | Annotations | Errors |
 |:-----|:------------|:-----------|:------------|:-------|
 | `smithsonian_search_objects` | Full-text search across 14.5M objects with exact filters. Returns curated summaries, thumbnails, and total count. | `query`, `filters` (unit_code, object_type, date, culture, place, topic, name, scientific_name, online_media_type, online_only, cc0_only, on_view_only), `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `no_results` (NotFound), `invalid_filter` (ValidationError) |
-| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms, plus a `labels` map of museum names for `unit_code`; `contains` narrows the vocabulary by a case-insensitive substring, matching the museum name as well as the code for `unit_code`. Each field's vocabulary is cached (`SMITHSONIAN_TERMS_CACHE_TTL_SECONDS`) since upstream returns the whole set on every call. | `field` (unit_code, culture, place, date, online_media_type, topic), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
-| `smithsonian_get_object` | Normalized metadata by ID, including labeled notes, the record's indexed filter values, current display, scientific names, reported taxonomy/coordinates, and a media summary. | `id` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_list_terms` | Enumerate the valid term vocabulary for an indexed filter field. Controlled-vocabulary terms are often plural or qualified, so drawing filter values from here avoids empty results. Returns one page of the field's distinct terms, plus a `labels` map of museum names for `unit_code`; `contains` narrows the vocabulary by a case-insensitive substring, matching the museum name and the names a unit also goes by (National Museum of Natural History, Freer Gallery of Art and Arthur M. Sackler Gallery, Cooper-Hewitt, National Design Museum) as well as the code for `unit_code`. Each field's vocabulary is cached (`SMITHSONIAN_TERMS_CACHE_TTL_SECONDS`) since upstream returns the whole set on every call, and concurrent cold reads of one field share one request. | `field` (unit_code, culture, place, date, online_media_type, topic), `contains`, `start`, `rows` | `readOnlyHint: true`, `openWorldHint: true` | `no_terms` (NotFound) |
+| `smithsonian_get_object` | Normalized metadata by ID, including labeled notes, the labeled physical description, the record's indexed filter values, current display, the sets the catalog files it under, scientific names, reported taxonomy/coordinates, and a media summary. | `id` (alias `record_id`) | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
 | `smithsonian_browse_category` | Paginated browse within one exact category. Mode: `museum` \| `culture` \| `period` \| `medium` \| `topic`; `value` must be an exact indexed category term, not free text. Searches a constrained query internally and returns the category total, a page of matching objects, and a museum breakdown of that page. | `mode`, `value`, `rows`, `start` | `readOnlyHint: true`, `openWorldHint: true` | `invalid_category` (ValidationError) |
-| `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, named party, topics). Returns a page of related objects (default 10), each tagged with the signals that connected it. | `id`, `limit`, `start`, `unit_code` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
-| `smithsonian_get_media` | Returns CC0 image URLs at multiple resolutions for an object. Filters by each image's license and reports the object metadata license separately. Includes alt text and accessibility descriptions from the catalog. Pages a long image list. | `id`, `start`, `limit` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `no_images` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
+| `smithsonian_find_related` | Given an object ID, finds related items across collections by matching the anchor's metadata signals (culture, period, object_type, named party, topics). Returns a page of related objects (default 10), each tagged with the signals that connected it. | `id` (alias `record_id`), `limit`, `start`, `unit_code` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `invalid_id` (ValidationError) |
+| `smithsonian_get_media` | Returns CC0 image URLs at multiple resolutions for an object, or with `media: "3d"` its CC0 3D model packages and their download files. Filters by each image's or package's license and reports the object metadata license separately. Includes alt text and accessibility descriptions from the catalog. Pages a long image or package list. | `id` (alias `record_id`), `media`, `start`, `limit` | `readOnlyHint: true`, `openWorldHint: true` | `not_found` (NotFound), `no_media` (NotFound), `no_images` (NotFound), `no_models` (NotFound), `not_cc0` (Forbidden), `invalid_id` (ValidationError) |
 
 ### Resources
 
@@ -72,7 +72,7 @@ Single service — one API, one base URL, one auth pattern. Two primary methods 
 |:--------|:---------|:------------|
 | `SMITHSONIAN_API_KEY` | **Yes** | API key from https://api.data.gov/signup. Server fails to start without it. |
 | `SMITHSONIAN_BASE_URL` | No | Override the API base URL (default: `https://api.si.edu/openaccess/api/v1.0`). |
-| `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` | No | Seconds each field's term vocabulary is cached in the `StorageService` (default: `3600`). `/terms/{field}` ignores paging and always returns the whole vocabulary — `place` alone is ~114k terms — so every uncached call re-downloads it. `0` disables caching. |
+| `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS` | No | Seconds each field's term vocabulary is cached in the `StorageService` (default: `3600`). `/terms/{field}` ignores paging and always returns the whole vocabulary — `place` alone is ~114k terms — so every uncached call re-downloads it. Concurrent cold reads of one field in one tenant share one request. `0` disables the cache and that sharing. |
 | `SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS` | No | Seconds each normalized `/search` page is cached in memory, keyed by request URL (default: `3600`). `0` disables the cache and the sharing of concurrent identical requests. |
 | `SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS` | No | Seconds each `/content` record is cached in memory, keyed by request URL (default: `86400`). `0` disables the cache and the sharing of concurrent identical requests. |
 | `SMITHSONIAN_CLAMP_LIMITS` | No | Default `true`: an over-cap `rows` or `limit` is served at its cap with a notice. `false` rejects it and advertises each cap as the schema `maximum`. |
@@ -87,7 +87,7 @@ The mirror variables stay out of `server.json` and `manifest.json`: the mirror i
 2. `SmithsonianService` — `search()` + `getContent()` with retry/backoff, URL construction, API key injection, response normalization helpers (flatten `freetext[]` label-content arrays, extract media, check CC0).
 3. `smithsonian_search_objects` — search returning up to `rows` (≤1,000) curated summaries with offset pagination.
 4. `smithsonian_get_object` — single content fetch with full field normalization.
-5. `smithsonian_get_media` — extract and gate images from a fetched object.
+5. `smithsonian_get_media` — extract and gate images, or with `media: "3d"` model packages, from a fetched object.
 6. `smithsonian_browse_category` — mode-dispatch to constrained searches.
 7. `smithsonian_find_related` — multi-search fan-out.
 
@@ -99,19 +99,19 @@ Each step is independently testable.
 
 ### `smithsonian_search_objects`
 
-**Description:** Search across 14.5 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, scientific name, media type, online/CC0 availability, and objects on display now. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object` and `smithsonian_find_related`.
+**Description:** Search across 14.5 million Smithsonian objects by text query and optional filters. Filters narrow by museum unit, object type, indexed date term, culture, geographic place, subject topic, named party, scientific name, media type, online/CC0 availability, and objects on display now. Returns curated summaries (title, date, museum, thumbnail URL, CC0 flag) with the total match count. The `record_id` in each result is the identifier for `smithsonian_get_object`, `smithsonian_get_media`, and `smithsonian_find_related`.
 
 **Input:**
 - `query: string` — Free-text search. Required. Use specific terms for precision (`"Tlingit totem pole"`) or broad terms for browsing (`"quilt"`). Filters append hard `AND` constraints; plain words and quoted phrases remain ungrouped because EDAN changes implicit matching inside parentheses. Active Lucene expressions are grouped to preserve Boolean precedence; quoted and escaped punctuation stays literal.
 - `filters?: object` — Optional structured filters. The object is strict: an unknown key is rejected by name as a schema validation error, so a misspelled filter fails loudly instead of widening the search.
   - `online_media_type?: string` — exact indexed category from `smithsonian_list_terms { field: "online_media_type" }`, such as Images, 3D Models, or Sound recordings. Quoted and escaped as a hard constraint, composing with availability filters. Invalid terms follow vocabulary-aware `invalid_filter` recovery; valid terms with no overlap are identified as exact. An Images match does not guarantee attached/CC0 images; read `get_object.media_summary`. Media terms feed search only, with no browse mode.
   - `scientific_name?: string` — exact value from `smithsonian_get_object.scientific_names`, quoted and escaped as a hard constraint. Not enumerable through `smithsonian_list_terms`; filtered-zero recovery names the object field as the source.
-  - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. Matched exactly and case-sensitively (`"NMAfA"` carries a lowercase f); `smithsonian_list_terms` with `field: "unit_code"` enumerates the live vocabulary.
+  - `unit_code?: string` — museum unit code (e.g. `"NASM"`, `"SAAM"`). Natural History is indexed under discipline sub-units (`"NMNHBIRDS"`, `"NMNHPALEO"`), not a bare `"NMNH"`. Matched exactly and case-sensitively (`"NMAfA"` carries a lowercase f); `smithsonian_list_terms` with `field: "unit_code"` enumerates the live vocabulary, and `contains: "Natural History"` lists the NMNH codes.
   - `object_type?: string` — object type term from `indexedStructured.object_type` (e.g. `"Paintings"`, `"Photographs"`, `"Aircraft"`). Not enumerable through `smithsonian_list_terms`; take it from `smithsonian_get_object`'s `indexed.object_type` for a known object, or from the `object_type` of search results.
   - `date?: string` — indexed date term from `indexedStructured.date`. Commonly a decade (`"1920s"`, `"1960s"`), but the vocabulary also carries year ranges (`"500-1500"`), century terms (`"21st century"`), and BCE forms (`"-2500"`, `"BCE 1000s"`) — 128 of the 201 indexed terms are not decade-shaped, so no shape gate is applied.
   - `culture?: string` — culture term from `indexedStructured.culture` (e.g. `"Plains Indian"`).
   - `place?: string` — geographic place from `indexedStructured.place` (e.g. `"United States of America"`).
-  - `topic?: string` — subject term from `indexedStructured.topic` (e.g. `"Quilts"`, `"Aviation"`), the vocabulary `smithsonian_get_object` returns as `indexed.topic` (its `topics[]` also carries free-text subject strings such as `"Quilts--History"` that match nothing here). Enumerable via `smithsonian_list_terms` (133,113 terms). A hard constraint: `topic:"Quilts"` matches 1,134 objects where the bare word as free text matches 2,677.
+  - `topic?: string` — subject term from `indexedStructured.topic` (e.g. `"Quilts"`, `"Aviation"`), the vocabulary `smithsonian_get_object` returns as `indexed.topic` (its `topics[]` also carries free-text subject strings such as `"Quilts--History"` that match nothing here). Enumerable via `smithsonian_list_terms` (about 133,000 terms). A hard constraint: `topic:"Quilts"` matches 1,134 objects where the bare word as free text matches 2,677.
   - `name?: string` — indexed named party from `indexedStructured.name` (e.g. `"Warhol, Andy"`), covering every role the catalog records — maker, collector, donor, issuing authority. Written surname-first. Not enumerable via `smithsonian_list_terms`. `smithsonian_get_object`'s `indexed.name` lists every party a record is indexed under, and is the reliable source; its `makers[]` reads the free-text block, which names the same parties in a different form often enough to miss (`"Major J. A. L. Möller (Jacob A.L. Möller/Monty Möller), Non-Indian, 1883-1957"` for the indexed `"Möller, Major J. A. L."`), so it is a starting guess rather than an exact value. A `smithsonian_find_related` name signal also carries the indexed form of a record's first indexed name. Also a hard constraint: `name:"Warhol, Andy"` matches 421 against 715 for the same string as free text. Added so `smithsonian_find_related`'s indexed-name fan-out has a reproducible `search_continuation`.
   - `online_only?: boolean` — when true, ANDs the Lucene term `online_media_type:*` into `q` to restrict to records carrying an indexed `online_media_type` value. That vocabulary covers digitized surrogates (finding aids, catalog cards, scanned books, full text, electronic resources) alongside images, 3D models, and video; the surrogate types often have no deliverable media attached, so a match can still report `has_media: false`. `has_media` reads `descriptiveNonRepeating.online_media` — a separate upstream signal — and is what predicts a `smithsonian_get_media` outcome.
   - `cc0_only?: boolean` — when true, ANDs the Lucene term `media_usage:CC0` into `q`. That term marks a record as *having CC0 media attached*, not as being CC0-licensed, so this selects on media presence rather than license: of 14.5M records, 5.25M carry the term and the 9.24M excluded are CC0 too, just undigitized. `has_media` remains the signal that predicts a `smithsonian_get_media` outcome.
@@ -134,10 +134,10 @@ Each step is independently testable.
 
 ### `smithsonian_get_object`
 
-**Description:** Fetch a normalized catalog metadata projection for a Smithsonian object by its `record_id` (from `smithsonian_search_objects` results). Returns the exposed catalog fields: title, dates, description, makers, materials, dimensions, place and culture associations, topics, the indexed values usable as search filters, exhibition history, current display, credit line, accession identifiers, rights statement, and a curated media summary (count, CC0 status, thumbnail). The `record_id` uses the format returned by search — do not manually construct IDs.
+**Description:** Fetch a normalized catalog metadata projection for a Smithsonian object by its `record_id` (from `smithsonian_search_objects` results). Returns the exposed catalog fields: title, dates, description, makers, the labeled physical description, place and culture associations, topics, the indexed values usable as search filters, exhibition history, current display, the sets the catalog files it under, credit line, accession identifiers, rights statement, and a curated media summary (count, CC0 status, thumbnail). The `record_id` uses the format returned by search — do not manually construct IDs.
 
 **Input:**
-- `id: string` — Object `record_id` as returned by `smithsonian_search_objects` (e.g. `"nasm_A19670093000"`). The service prepends `edanmdm:` automatically.
+- `id: string` — Object `record_id` as returned by `smithsonian_search_objects` (e.g. `"nasm_A19670093000"`). The service prepends `edanmdm:` automatically. `record_id` is accepted as an alias (see [`record_id` vs. `url` for IDs](#record_id-vs-url-for-ids)).
 
 **Output:**
 - `record_id`, `title`, `unit_code` (the code the record is indexed under), `museum_name`, `holding_museum_name?` (the holder, when it differs from `unit_code`; rendered as `Held by` in the text output)
@@ -148,8 +148,7 @@ Each step is independently testable.
 - `taxonomy?` — reported `tax_kingdom`, `tax_phylum`, `tax_class`, `tax_order`, and `tax_family` arrays under their rank names; absent ranks remain omitted.
 - `coordinates[]` — valid decimal `geoLocation[].points.point` latitude/longitude pairs with only the same entry's `Other` locality. Blank, non-decimal, incomplete, non-finite, or out-of-range pairs are omitted; valid zero survives. No coordinate accuracy or geocoding is inferred.
 - `makers[]` — `{ role, name }` — all named parties (Pilot, Manufacturer, Artist, Author, etc.)
-- `materials[]` — physical description strings
-- `dimensions[]` — dimension strings
+- `physical_description[]` — `{ label, value }` for every `freetext.physicalDescription` entry with content, in catalog order with repeated labels kept, each under the catalog's own label (`Medium`, `Dimensions`, `Length - Total`, `Sex`, `Preparation`, `Physical Location`), or `Physical description` when it has none. Nothing is routed or sorted by label; `[]` when the record has none. Separate from `description`, the prose chosen from notes.
 - `place[]` — labeled place fields
 - `culture[]` — culture associations
 - `topics[]` — the indexed topic terms merged with the catalog's free-text subject strings (`"Quilts--History"`), so not every entry is a `topic` filter value; take those from `indexed.topic`
@@ -157,12 +156,13 @@ Each step is independently testable.
 - `exhibitions[]` — free-text exhibition history: `{ name, building? }`, which the catalog rarely fills, so `[]` does not mean the object was never exhibited
 - `on_view?` — `true` when the catalog flags the object as on physical display now (`onPhysicalExhibit` "Yes"), `false` when it flags "No", absent when the record carries no flag, which most do; absence says nothing about display
 - `current_exhibitions[]` — where the object is on display now: `{ building?, room?, title? }`, absent parts omitted, an entry that names nothing dropped; `[]` when it names none. `building` is a building code (`"NASM"`, `"NPG"`, `"NMAI NY"`), not a `unit_code`.
+- `sets[]` — `{ label, value }` for every `freetext.setName` entry with content, in catalog order with repeated labels kept, under the catalog's own label (`See more items in`, `On View`, `Location`, `Exhibition`, `Hangar`, `Department`, `Classification`; the vocabulary varies by unit), or `Set` when it has none. Always present, `[]` when the record lists none; rendered under **Sets:**. For an object on display it names the gallery, floor, hangar, or exhibition that `current_exhibitions` gives only as a building code. It is catalog text, not a second display flag: a National Portrait Gallery record can read `Location: Currently not on view` and carry no `on_view`.
 - `credit_line` — attribution string
 - `identifiers[]` — all `{ label, value }` pairs (accession numbers, call numbers, etc.)
-- `object_rights` — CC0 or other rights statement from `freetext.objectRights`
+- `object_rights` — the rights statements: the content of every `freetext.objectRights` entry, then every `freetext.objectRight` entry (the singular key Smithsonian Institution Archives records use), in catalog order, joined with `; `. Absent when neither key has an entry.
 - `is_cc0` — boolean gated on `metadata_usage.access === 'CC0'`
 - `record_link` — canonical SI URL for the object
-- `media_summary` — `{ count, cc0_image_count, has_cc0_images, thumbnail_url, non_image_media[] }` — `count` is the raw total across all media types (images, 3D models, video); `cc0_image_count` is what `smithsonian_get_media` pages through and reports as its own `cc0_image_count`, so the two reconcile; `thumbnail_url` is ~150px. `non_image_media[]` holds `{ type, url?, is_cc0 }` for every media item typed as something other than Images, in catalog order, so images and non-image items together partition the record's media; the text output renders each as `- [<type>](<url>) · CC0: Yes|No`. Call `smithsonian_get_media` for the full image list
+- `media_summary` — `{ count, cc0_image_count, has_cc0_images, thumbnail_url, non_image_media[] }` — `count` is the raw total across all media types (images, 3D models, video); `cc0_image_count` is what `smithsonian_get_media` pages through and reports as its own `cc0_image_count`, so the two reconcile; `thumbnail_url` is ~150px. `non_image_media[]` holds `{ type, url?, is_cc0 }` for every media item typed as something other than Images, in catalog order, so images and non-image items together partition the record's media; the text output renders each as `- [<type>](<url>) · CC0: Yes|No`. A `3d_voyager` item's `url` is its viewer page; its model files come from `smithsonian_get_media` with `media: "3d"`, not from here. Call `smithsonian_get_media` for the full image list
 - With a mirror configured: `sources`, `mirror_snapshot` (see [Open Access mirror](#open-access-mirror))
 
 **Errors:**
@@ -213,7 +213,7 @@ Each step is independently testable.
 - **Period + type** — `date:` and `object_type:` filters combined into one fan-out.
 
 **Input:**
-- `id: string` — `record_id` of the anchor object (from `smithsonian_search_objects` or `smithsonian_get_object`).
+- `id: string` — `record_id` of the anchor object (from `smithsonian_search_objects` or `smithsonian_get_object`). `record_id` is accepted as an alias.
 - `limit?: number` — max related objects to return (default 10, cap 1,000; served at the cap with a notice).
 - `start?: number` — pagination offset into the interleaved related-object sequence (default 0). Page contiguously by advancing `start` by the number of objects returned (the notice names it): page N+1 continues where page N ended. Each contributing signal is reachable to a depth of 5,000 objects, fetched from upstream in ≤1,000-row chunks. Near a seam a bounded number of objects (up to the active-signal count) can shift by one page, since a deeper page fetches more per signal and may reallocate an object that ranks very differently across signals. Beyond 5,000 matches for a signal, `truncated` stays true but deeper pages aren't reachable.
 - `unit_code?: string` — scopes every signal to one museum with a hard `unit_code` filter, so each fan-out's `search_continuation` carries it. Takes the indexed code a result row's `unit_code` reports (`"NASM"`; the 3D scans are `"OCIO_DPO3D"`), never a `holding_museum_name`. Matched exactly and case-sensitively and not checked against the vocabulary, like `smithsonian_search_objects`'s filter; an empty string reads as omitted. The anchor's own code keeps related objects in its museum, and another code finds related objects held elsewhere. Without it, signals run across every museum, which is how an aerospace anchor reaches natural history and art.
@@ -237,18 +237,20 @@ Each step is independently testable.
 
 ### `smithsonian_get_media`
 
-**Description:** Returns CC0-licensed images for a Smithsonian object at multiple resolutions, reporting the object metadata license separately. Images come in catalog order and can be paged. An object with no CC0 image fails with its own declared error reason — nothing digitized, media that is entirely non-image, or images that are entirely non-CC0 — decided on the whole record before paging, so the reason is the same at any `start`. A `start` at or past `cc0_image_count` returns an empty `images[]`. Each image includes high-res JPEG/TIFF URLs, screen-size and thumbnail URLs, pixel dimensions where the catalog lists them, and accessibility alt text. Intended for use with image-capable MCP clients that can display or analyze the photos.
+**Description:** Returns CC0-licensed images for a Smithsonian object at multiple resolutions, or with `media: "3d"` its CC0 3D model packages and their downloadable files, reporting the object metadata license separately. Items come in catalog order and can be paged. An object with no CC0 item of the requested kind fails with its own declared error reason — nothing digitized, media that is entirely non-image (images mode) or has no 3D package (3D mode), or items that are entirely non-CC0 — decided on the whole record before paging, so the reason is the same at any `start`. A `start` at or past the count returns an empty list. Each image includes high-res JPEG/TIFF URLs, screen-size and thumbnail URLs, pixel dimensions where the catalog lists them, and accessibility alt text. Intended for use with image-capable MCP clients that can display or analyze the photos.
 
 **Input:**
-- `id: string` — `record_id` of the object (e.g. `"nasm_A19670093000"`).
-- `start?: number` — offset into the CC0 images, 0-indexed in catalog order (integer ≥ 0, default 0).
-- `limit?: number` — images to return from `start` (page-size contract, cap 1,000: a larger value is served at the cap with a notice, or rejected under `SMITHSONIAN_CLAMP_LIMITS=false`). Omitted returns every image from `start`.
+- `id: string` — `record_id` of the object (e.g. `"nasm_A19670093000"`). `record_id` is accepted as an alias.
+- `media?: "images" | "3d"` — default `"images"`. `"3d"` returns the record's `3d_voyager` packages in place of its images.
+- `start?: number` — offset into the CC0 images, or with `media: "3d"` the CC0 model packages, 0-indexed in catalog order (integer ≥ 0, default 0).
+- `limit?: number` — images, or with `media: "3d"` packages, to return from `start` (page-size contract, cap 1,000: a larger value is served at the cap with a notice, or rejected under `SMITHSONIAN_CLAMP_LIMITS=false`). Omitted returns everything from `start`.
 
 **Output:**
 - `record_id`, `title`
 - `is_cc0` — boolean, whether the object metadata is CC0
-- `cc0_image_count` — CC0 images on the record before paging, the same count as `smithsonian_get_object`'s `media_summary.cc0_image_count`
-- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when CC0 images remain past this page; the `notice` names the next `start`, or says to omit `limit` to return the rest
+- `cc0_image_count` — CC0 images on the record before paging, the same count as `smithsonian_get_object`'s `media_summary.cc0_image_count`; reported in 3D mode too
+- `cc0_model_count?` — CC0 3D model packages on the record before paging; present only with `media: "3d"`
+- Enrichment: `truncated` / `shown` / `cap` / `truncationCeiling` / `notice` — `truncated` fires only when CC0 items remain past this page; the `notice` names the next `start`, or says to omit `limit` to return the rest. In 3D mode they count packages.
 - With a mirror configured: `sources`, `mirror_snapshot` (see [Open Access mirror](#open-access-mirror))
 - `images[]` — per-image entries, each with:
   - `media_id` — IDS identifier
@@ -259,12 +261,15 @@ Each step is independently testable.
   - `screen_url` — `_screen` URL (~1,200px on the long edge), or the image's full-size delivery URL when the catalog lists no screen image
   - `high_res_jpeg` — `{ url, width?, height? }` — the catalog's high-resolution JPEG with its pixel dimensions, or, when it lists none, `{ url }` set to the image's full-size delivery URL without dimensions; absent only when the image has neither
   - `high_res_tiff` — `{ url, width?, height? }` — archival TIFF when available
+  - Always `[]` with `media: "3d"`.
+- `models[]` — present only with `media: "3d"`: the CC0 `3d_voyager` packages from `start`, each `{ media_id, is_cc0, viewer_url?, thumbnail_url?, files[] }`. Each package is gated on its own `usage.access`, as each image is. `viewer_url` is the Voyager web page, not a file. `files[]` holds the downloads the package lists, in catalog order, `[]` when it lists none (not an error): `{ url, filename?, category?, file_type?, model_file_type?, units?, draco_compressed?, size_bytes? }`. Every field but `url` is the catalog's value as written (`filename` and `category` from the resource, the rest from its `attributes[]` keys `FILE_TYPE`, `MODEL_FILE_TYPE`, `UNITS`, `DRACO_COMPRESSED`, `FILE_SIZE`, read wherever those keys sit across the entries) and absent when the catalog gives none. Spellings vary (`Full resolution`, `Full_resolution`; `glb`, `GLB`) and are passed through.
 
 **Errors:**
 - `not_found` (NotFound) — object not in catalog. Recovery: verify via `smithsonian_search_objects`.
-- `no_media` (NotFound) — object found but has no online media. Recovery: the physical object may not have been digitized.
-- `no_images` (NotFound) — object found with media, but all of it is non-image (3D models, scanned books, documents). Recovery: the hint names the media types present and points at `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item.
-- `not_cc0` (Forbidden) — object found with images, but none of them is CC0 (raised at any `start`). Recovery: use `smithsonian_search_objects` with `filters.cc0_only: true` to find CC0 objects.
+- `no_media` (NotFound) — object found but has no online media, in either mode. Recovery: the physical object may not have been digitized.
+- `no_images` (NotFound) — images mode: object found with media, but all of it is non-image (3D models, scanned books, documents). Recovery: the hint names the media types present and points at `smithsonian_get_object`'s `media_summary.non_image_media`, which links each item; for an object with a 3D package it names the `media: "3d"` call.
+- `no_models` (NotFound) — `media: "3d"`: object found with media, but none of it is a `3d_voyager` package. Recovery: the hint names the media types present and the call that reaches them (the images call when the record has images, else `media_summary.non_image_media`).
+- `not_cc0` (Forbidden) — object found with images, or with `media: "3d"` 3D packages, but none of them is CC0 (raised at any `start`). Recovery: use `smithsonian_search_objects` with `filters.cc0_only: true` to find CC0 objects with images, or `filters.online_media_type: "3D Models"` for objects with 3D packages.
 - `invalid_id` (ValidationError) — ID format is clearly malformed.
 
 **Annotations:** `readOnlyHint: true`, `openWorldHint: true`
@@ -301,9 +306,17 @@ The idea doc assumed a category browse endpoint. Live probing confirmed the `/te
 
 The object endpoint returns a `media_summary` (count, cc0_image_count, has_cc0_images, thumbnail). Full image arrays can be 15–20 images per object, each with 4 resolution variants — 300–500 lines of data in a typical object like the Amelia Earhart Vega. Separating media retrieval keeps `smithsonian_get_object` focused on catalog metadata and lets agents skip the image fetch for text-only research workflows.
 
+### 3D files come from `smithsonian_get_media`'s `media` mode
+
+A 3D package lists its downloads in `resources[]`, one record carries 49 packages, and a package lists up to 14 files. Carrying them in `media_summary.non_image_media` would add that weight to every `smithsonian_get_object` call, and a seventh tool would split media retrieval across two names. `media: "3d"` on `smithsonian_get_media` returns the packages and files instead, so 3D files stay out of `smithsonian_get_object`; images mode is unchanged.
+
+### `physical_description` is one labeled list
+
+`smithsonian_get_object` returns every `freetext.physicalDescription` entry under its own label, in catalog order, and routes none into materials or dimensions by label. Labels can't separate the two: units label specimen attributes (`Sex`, `Preparation`), storage locations (`Physical Location`), and collection depths (`Depth (m)`) alongside materials and measurements, and a list of measurement labels would still miss `Diameter`, `Culmen`, and similar.
+
 ### Rename from `smithsonian_get_image` to `smithsonian_get_media`
 
-The idea doc used `smithsonian_get_image`. Renamed to `smithsonian_get_media` — the API technically supports video and 3D models too (surfaced in `indexedStructured.online_media_type`), and the IDS returns multiple images per call. The current implementation focuses on Images; the name leaves room for future expansion without a breaking rename.
+The idea doc used `smithsonian_get_image`. Renamed to `smithsonian_get_media` — the API technically supports video and 3D models too (surfaced in `indexedStructured.online_media_type`), and the IDS returns multiple images per call. The tool returns images by default and 3D model packages with `media: "3d"`; the name left room for that without a breaking rename.
 
 ### Rename from `smithsonian_search` / `smithsonian_explore` to `smithsonian_search_objects` / `smithsonian_browse_category`
 
@@ -312,6 +325,10 @@ The two-word names presented free-text search and exact-category browse as peer 
 ### `record_id` vs. `url` for IDs
 
 The API response has two ID-like fields: `url` (e.g. `"edanmdm:nasm_A19670093000"`) and `content.descriptiveNonRepeating.record_ID` (e.g. `"nasm_A19670093000"`). The content endpoint accepts the full `edanmdm:` prefixed URL. The design uses `record_id` (the shorter form) as the identifier agents work with; the service layer prepends `edanmdm:` when calling the content endpoint. This matches the observable SI URL patterns (e.g., `si.edu/object/...:nasm_A19670093000`).
+
+### `record_id` is an alias of `id`
+
+Results name the object `record_id`, so an agent following them sends that key. `smithsonian_get_object`, `smithsonian_get_media`, and `smithsonian_find_related` accept it as an alias of their `id` input (`inputAliases: { record_id: 'id' }`). The advertised `inputSchema`, the descriptions, and the recovery hints keep `id`. Sending both keys fails `invalid_arguments`.
 
 ### No DataCanvas — direct paginated returns
 
@@ -336,14 +353,20 @@ Catalog text carries Markdown-significant characters (`M*A*S*H`, bracketed MARC 
 
 `SmithsonianService` keeps an in-process cache of normalized search pages (keyed by request URL, `SMITHSONIAN_SEARCH_CACHE_TTL_SECONDS`, default 1 hour) and raw content records (`SMITHSONIAN_CONTENT_CACHE_TTL_SECONDS`, default 24 hours). The api.data.gov key allows 1,000 requests per hour and every caller of a deployment shares it, so the repeated identical search and the get_object → get_media → find_related chain on one record (three reads of one record) cost one request per TTL. The cache is per instance, holds 64 MiB counted in UTF-8 bytes of the stored JSON, and evicts least recently used first. It stores successes only, so an error is never replayed, and concurrent identical requests share one load. The bare and `edanmdm:` forms of an ID share an entry. A TTL of `0` disables both caching and the sharing for that kind of read. Each tool call has one 50 s deadline, shared by every read the call chains (the anchor, each fan-out and deeper chunk, a vocabulary lookup, a harvest), and each read retries within the time the call has left. A read that starts with none left sends nothing and fails `Timeout` (`reason: 'retry_deadline_exceeded'`). The deadline sits 10 s inside the 60 s request timeout MCP SDK clients default to, so a hung upstream fails here first; a deadline per read would multiply by the reads a call chains. A caller whose read joins a shared load waits on it only until its own deadline, then rejects `Timeout` alone; the shared load keeps its own 50 s ceiling from its start and is aborted once no caller waits, so one caller's cancellation or expiry never cancels a request another caller waits on. A warm vocabulary or stored cache entry still answers after the deadline, since it sends no request. Cancelling a call ends a pending backoff at once.
 
+The shared-load half lives in `src/services/smithsonian/shared-loads.ts`, which `ResponseCache` and the vocabulary read both use. Concurrent cold reads of one field's vocabulary in one tenant share one `/terms` request, keyed by tenant and field as storage is: the load runs on its own signal and 50 s ceiling, writes storage before any waiter resumes, and stores nothing when it fails. `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS=0` turns this sharing off with the cache, so each read then runs on its caller's own signal and deadline.
+
+### Vocabulary loads are keyed by tenant and field, with storage as the only store
+
+The vocabulary read uses `SharedLoads` directly, not `ResponseCache.fetch`: `fetch` would hold a second copy of each vocabulary (`topic` alone is about 3.8 MB) in the 64 MiB instance cache beside the one in `StorageService`. Keying the load as storage is keyed means one load writes the one entry its callers read.
+
 ### Open Access mirror
 
 The Smithsonian publishes the whole Open Access corpus as bulk metadata in a public S3 bucket. The server can hold a local SQLite copy and answer from it, which spends none of the shared 1,000-per-hour key budget.
 
 - **Off by default.** The full mirror needs about 17 GB of disk (measured on a 75k-record sample and extrapolated per unit) and an operator-run first build, and a default install should work with only an API key. `SMITHSONIAN_MIRROR_PATH` turns it on; the variable stays out of `server.json` and `manifest.json` because the one-click install has no place to build a corpus.
 - **What it answers.** Object reads (`get_object`, `get_media`, the `find_related` anchor) once the mirror is ready, falling back to the live API on a miss or a store error. Filter-only searches (empty or `*` query) within a 100,000-index-entry scan budget, measured to keep a mirror query to tens of milliseconds of synchronous work, `filters.on_view_only` included (an `on_view` presence facet derived from `onPhysicalExhibit` "Yes"). Free text, over-budget searches, and `list_terms` stay live.
-- **Stored subset.** Each stored record keeps the fields the tools read, among them `onPhysicalExhibit` and the `exhibition` entries (`building`, `room`, `exhibitionTitle`) that `get_object` reports as `on_view` and `current_exhibitions`.
-- **Schema upgrades.** `SCHEMA_VERSION` 2 added those fields and the `on_view` facet. Opening a store built under version 1 migrates it by clearing every shard's ETag (so the next sync re-reads the whole bucket, rewriting only the records that change) and adding the `shards_etag` index, which answers the stale-shard probe without a scan; the migration is proportional to the shard count, not the record count. Until a shard is re-read, its records and every `on_view` search are answered from the live API, while other filter-only searches stay on the mirror: a stale shard's records are not yet indexed under `on_view`, so a mirror count would be short. A server with a refresh schedule (HTTP with a cron expression) starts the refresh at once instead of waiting for its next tick; one without logs a startup notice naming `mirror:refresh`.
+- **Stored subset.** Each stored record keeps the fields the tools read, among them `onPhysicalExhibit` and the `exhibition` entries (`building`, `room`, `exhibitionTitle`) that `get_object` reports as `on_view` and `current_exhibitions`, the `freetext` entries `setName` and `objectRight` that it reports as `sets` and `object_rights`, and for each 3D file the `category`, `filename`, and `attributes[]` (filtered to `UNITS`, `FILE_TYPE`, `MODEL_FILE_TYPE`, `DRACO_COMPRESSED`, and `FILE_SIZE`) that `get_media` with `media: "3d"` reads.
+- **Schema upgrades.** `SCHEMA_VERSION` 2 added the on-view fields and the `on_view` facet; version 3 added the `setName`, `objectRight`, and 3D file keys. Opening a store built under an older version migrates it by clearing every shard's ETag (so the next sync re-reads the whole bucket) and, from version 2, adding the `shards_etag` index, which answers the stale-shard probe without a scan; the migration is proportional to the shard count, not the record count. A version 3 sync rewrites nearly every stored doc, since most records carry `setName`; facet rows are unchanged. Until a shard is re-read, its records and every `on_view` search are answered from the live API, while other filter-only searches stay on the mirror. On a version 1 store the reason is that a stale shard's records are not yet indexed under `on_view`, so a mirror count would be short; from version 2 on, routing a stale shard live is the conservative choice, since its stored docs lack the newer keys. A server with a refresh schedule (HTTP with a cron expression) starts the refresh at once instead of waiting for its next tick; one without logs a startup notice naming `mirror:refresh`. A rollback across a schema bump needs one manual step on the way back: the older release keeps the newer stamp while it rewrites changed shards under its older subset, so the newer release reopens the store without migrating and serves those docs without the newer keys. Before redeploying the newer release, clear every shard's ETag (`sqlite3 <store> 'UPDATE shards SET etag = NULL'`) so its next refresh re-reads the bucket.
 - **Ordering.** Mirror pages run in ingest order, not the live API's, so a notice says so and a walk lines up only while `sources` stays the same.
 - **Provenance.** The five object-reading tools gain `sources` (`oa_mirror`, `edan_api`) and `mirror_snapshot` (ISO date of the bulk publish) when a mirror is configured, so an agent can cite the snapshot beside a count. A server without a mirror sets neither field.
 - **Build and refresh.** `mirror:init`, `mirror:refresh`, and `mirror:status` run `dist/mirror/cli.js`; init and refresh run the same shard-by-shard pass, resumable after an interrupt. On HTTP, a cron job (`SMITHSONIAN_MIRROR_REFRESH_CRON`, default `0 12 * * *` in server local time, empty for none) runs the CLI refresh in a child process so its per-shard transactions never stall serving threads or `/healthz`; the expression is validated at startup. On stdio the operator refreshes out-of-band. The store's sync lease lets one sync run at a time: a CLI run that finds the lease held exits 75 without syncing, and the cron job logs that tick as skipped, not failed. Teardown stops the refresh child and closes the store.
@@ -351,6 +374,10 @@ The Smithsonian publishes the whole Open Access corpus as bulk metadata in a pub
 - **Never VACUUM the store.** The `facets` index stores `objects.rowid`, which `VACUUM` may renumber for a table without an integer primary key, pointing facet entries at the wrong records.
 - **Dependencies.** `node-cron` schedules the refresh. `better-sqlite3` is an optional peer, needed on Node only.
 - **Docker.** The image creates `/var/lib/smithsonian-mcp-server`, owned by the runtime user, for a mounted volume; the operator sets the path and runs `docker exec <container> bun run mirror:init`.
+
+### The museum alias is match-only
+
+`smithsonian_list_terms` `contains` matches a few extra names per `unit_code` (National Museum of Natural History for the NMNH divisions, Freer Gallery of Art and Arthur M. Sackler Gallery for `NMAA`, Cooper-Hewitt, National Design Museum for `CHNDM` and `CHSDM`) without relabeling. `museum_name` keeps its sourced data-dictionary label: relabeling would change it on every object tool and split it from `holding_museum_name`, which reads `data_source` verbatim.
 
 ### Published agent skill
 
@@ -360,9 +387,9 @@ The Smithsonian publishes the whole Open Access corpus as bulk metadata in a pub
 
 The catalog has two distinct CC0 flags:
 1. `content.descriptiveNonRepeating.metadata_usage.access` — the object *metadata* license
-2. Per-image `media[].usage.access` — each image's individual license
+2. Per-media-item `media[].usage.access` — each image's or 3D package's individual license
 
-`smithsonian_get_media` gates delivery on each image's license and surfaces `is_cc0` on both the object and each returned image. The metadata flag does not gate delivery: an object can have CC0 metadata and restricted images, or the reverse.
+`smithsonian_get_media` gates delivery on each image's license, or with `media: "3d"` on each package's, and surfaces `is_cc0` on both the object and each returned item. The metadata flag does not gate delivery: an object can have CC0 metadata and restricted images, or the reverse.
 
 ---
 
@@ -487,6 +514,27 @@ Key difference from search: the item object is `response` (not `response.rows[0]
 }
 ```
 
+A 3D package is a `3d_voyager` item. Its `content` is the Voyager viewer page, and each `resources[]` entry is a downloadable file. Per-file keys sit in `attributes[]`, which can hold them in one object or split across several:
+
+```json
+{
+  "type": "3d_voyager",
+  "usage": { "access": "CC0" },
+  "content": "https://3d-api.si.edu/voyager/3d_package:c0bc58e6-b172-4543-ad58-50261aea523c",
+  "resources": [
+    {
+      "url": "https://3d-api.si.edu/content/document/3d_package:c0bc58e6-b172-4543-ad58-50261aea523c/resources/TYCHO-100k-2048_std_draco.glb",
+      "category": "Low Resolution",
+      "filename": "TYCHO-100k-2048_std_draco.glb",
+      "attributes": [
+        { "UNITS": "m", "FILE_TYPE": "draco compressed glb", "MODEL_FILE_TYPE": "draco compressed glb", "DRACO_COMPRESSED": true, "GLTF_STANDARDIZED": false },
+        { "FILE_SIZE": 2567980 }
+      ]
+    }
+  ]
+}
+```
+
 ### Error shape (key missing)
 
 ```json
@@ -517,8 +565,8 @@ Key difference from search: the item object is `response` (not `response.rows[0]
 | NMAA | National Museum of Asian Art |
 | NPM | National Postal Museum |
 | ACM | Anacostia Community Museum |
-| NZP | National Zoo & Conservation Biology Institute |
-| SIL | Smithsonian Libraries and Archives |
+| NZP | Smithsonian's National Zoo & Conservation Biology Institute |
+| SIL | Smithsonian Libraries |
 | AAA | Archives of American Art |
 
 ### Resilience
