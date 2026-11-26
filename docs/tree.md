@@ -1,6 +1,6 @@
 # smithsonian-mcp-server - Directory Structure
 
-Generated on: 2026-11-16 05:23:26
+Generated on: 2026-11-26 21:58:13
 
 ```text
 smithsonian-mcp-server/
@@ -28,6 +28,7 @@ smithsonian-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -169,6 +170,7 @@ smithsonian-mcp-server/
 │   │       ├── oa-ingest.ts
 │   │       ├── oa-mirror.ts
 │   │       ├── response-cache.ts
+│   │       ├── shared-loads.ts
 │   │       ├── smithsonian-service.ts
 │   │       └── types.ts
 │   └── index.ts
@@ -197,7 +199,8 @@ smithsonian-mcp-server/
 │   ├── services/
 │   │   └── smithsonian/
 │   │       ├── fixtures/
-│   │       │   └── oa-bulk-lines.jsonl
+│   │       │   ├── oa-bulk-lines.jsonl
+│   │       │   └── oa-mirror-v2.db
 │   │       ├── oa-bucket-fake.ts
 │   │       ├── oa-ingest.test.ts
 │   │       ├── oa-mirror.test.ts

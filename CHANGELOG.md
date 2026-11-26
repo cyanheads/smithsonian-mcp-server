@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-11-26 · ⚠️ Breaking
+
+smithsonian_get_object returns every physical-description entry under its own label and the catalog's sets; smithsonian_get_media returns CC0 3D model files; record_id works for id; concurrent cold vocabulary reads share one request
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-11-15
 
 One 50 s deadline per tool call, on-view status and filter, a record's indexed filter values, and catalog text kept and rendered as written
