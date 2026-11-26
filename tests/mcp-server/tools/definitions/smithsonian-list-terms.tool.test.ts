@@ -503,6 +503,83 @@ describe('smithsonianListTerms', () => {
     });
   });
 
+  describe('museum-name lookup (issue #80)', () => {
+    const NMNH = [
+      'NMNHANTHRO',
+      'NMNHBIRDS',
+      'NMNHBOTANY',
+      'NMNHEDUCATION',
+      'NMNHENTO',
+      'NMNHFISHES',
+      'NMNHHERPS',
+      'NMNHINV',
+      'NMNHMAMMALS',
+      'NMNHMINSCI',
+      'NMNHPALEO',
+    ];
+
+    beforeEach(() => {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      const body = { status: 200, responseCode: 1, response: { terms: ['NASM', 'NMAA', ...NMNH] } };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url: string) => {
+          if (!new URL(url).pathname.endsWith('/terms/unit_code'))
+            throw new Error('unmocked fetch');
+          return {
+            ok: true,
+            status: 200,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          };
+        }),
+      );
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    function lookup(contains: string) {
+      return runToolContract(
+        smithsonianListTerms,
+        { field: 'unit_code', contains },
+        { context: createMockContext({ tenantId: 'test-tenant' }) },
+      );
+    }
+
+    it('says what the unit_code name match covers', () => {
+      const description = smithsonianListTerms.input.shape.contains.description;
+      expect(description).toContain('National Museum of Natural History for the NMNH divisions');
+      expect(description).toContain('Freer Gallery of Art and Arthur M. Sackler Gallery for NMAA');
+      expect(description).toContain('ignoring a leading "Smithsonian"');
+    });
+
+    it('resolves a former name on both surfaces, with the label unchanged', async () => {
+      const result = await lookup('Freer');
+
+      expect(result.structuredContent).toMatchObject({
+        terms: ['NMAA'],
+        total: 1,
+        labels: { NMAA: 'National Museum of Asian Art' },
+      });
+      expect(textOf(result).split('\n')).toContain('- `NMAA` — National Museum of Asian Art');
+    });
+
+    it('resolves an official "Smithsonian …" name to every division code on both surfaces', async () => {
+      const result = await lookup('Smithsonian National Museum of Natural History');
+
+      expect(result.structuredContent).toMatchObject({ terms: NMNH, total: 11 });
+      const lines = textOf(result).split('\n');
+      expect(lines).toContain('- `NMNHPALEO` — NMNH - Paleobiology Dept.');
+      expect(lines.filter((line) => line.startsWith('- `NMNH'))).toHaveLength(11);
+    });
+  });
+
   describe('content[] encoding (issue #70)', () => {
     const render = (output: Parameters<NonNullable<typeof smithsonianListTerms.format>>[0]) =>
       smithsonianListTerms.format!(output)

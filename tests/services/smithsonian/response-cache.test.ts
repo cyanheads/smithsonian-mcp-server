@@ -6,7 +6,8 @@
 
 import { JsonRpcErrorCode, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { type Caller, ResponseCache } from '@/services/smithsonian/response-cache.js';
+import { ResponseCache } from '@/services/smithsonian/response-cache.js';
+import type { Caller } from '@/services/smithsonian/shared-loads.js';
 
 const TTL_MS = 60_000;
 
@@ -63,6 +64,18 @@ async function codeOf(pending: Promise<unknown>): Promise<number | undefined> {
   return ((await pending.catch((error: unknown) => error)) as { code?: number }).code;
 }
 
+/** The rejection of a caller that stopped waiting, as `SharedLoads` and the cache raise it. */
+const CANCELLED = {
+  code: JsonRpcErrorCode.RequestCancelled,
+  message: 'The request was cancelled before the upstream response arrived.',
+};
+
+/** The error code and message a pending call rejected with. */
+async function cancellationOf(pending: Promise<unknown>) {
+  const error = (await pending.catch((e: unknown) => e)) as { code?: number; message?: string };
+  return { code: error.code, message: error.message };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -109,6 +122,17 @@ describe('ResponseCache', () => {
           ['b', 1],
         ]),
       );
+    });
+
+    it('rejects a caller whose signal has already aborted, even when the key is stored', async () => {
+      const cache = new ResponseCache(1024, LOAD_DEADLINE_MS);
+      const load = instant('v');
+      await cache.fetch('k', TTL_MS, caller(), load);
+
+      expect(
+        await cancellationOf(cache.fetch('k', TTL_MS, caller(AbortSignal.abort()), load)),
+      ).toEqual(CANCELLED);
+      expect(load).toHaveBeenCalledTimes(1);
     });
 
     it('answers until the TTL elapses, then loads again', async () => {
@@ -286,7 +310,7 @@ describe('ResponseCache', () => {
       const staying = cache.fetch('k', TTL_MS, caller(), run.load);
       leaving.abort();
 
-      expect(await codeOf(cancelled)).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(await cancellationOf(cancelled)).toEqual(CANCELLED);
       expect(run.signals[0]?.aborted).toBe(false);
       run.resolve();
       expect(await staying).toEqual({ title: 'kept' });

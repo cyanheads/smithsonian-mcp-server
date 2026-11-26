@@ -36,8 +36,10 @@ function makeFullObject(id = 'nasm_TEST001'): FullObject {
     scientific_names: [],
     coordinates: [],
     makers: [{ role: 'Manufacturer', name: 'Lockheed' }],
-    materials: ['Aluminum'],
-    dimensions: ['12 m wingspan'],
+    physical_description: [
+      { label: 'Materials', value: 'Aluminum' },
+      { label: 'Dimensions', value: '12 m wingspan' },
+    ],
     place: [{ label: 'Place of Origin', value: 'United States of America' }],
     culture: ['American'],
     topics: ['Aviation', 'Space Exploration'],
@@ -50,6 +52,7 @@ function makeFullObject(id = 'nasm_TEST001'): FullObject {
     },
     exhibitions: [{ name: 'Milestones of Flight', building: 'Milestones of Flight Hall' }],
     current_exhibitions: [],
+    sets: [{ label: 'See more items in', value: 'National Air and Space Museum Collection' }],
     credit_line: 'Transferred from NASA',
     identifiers: [{ label: 'Accession Number', value: 'A19670093000' }],
     object_rights: 'CC0',
@@ -373,14 +376,14 @@ describe('smithsonianGetObject', () => {
       scientific_names: [],
       coordinates: [],
       makers: [],
-      materials: [],
-      dimensions: [],
+      physical_description: [],
       place: [],
       culture: [],
       topics: [],
       indexed: { name: [], place: [], object_type: [], date: [], topic: [] },
       exhibitions: [],
       current_exhibitions: [],
+      sets: [],
       identifiers: [],
       is_cc0: false,
       media_summary: { count: 0, cc0_image_count: 0, has_cc0_images: false, non_image_media: [] },
@@ -389,6 +392,9 @@ describe('smithsonianGetObject', () => {
     const text = blocks.map((b) => (b.type === 'text' ? b.text : '')).join('');
     expect(text).toContain('nmnh_SPARSE');
     expect(text).toContain('Sparse Object');
+    expect(text).not.toContain('Physical description');
+    expect(text).not.toContain('**Sets:**');
+    expect(text).not.toContain('**Rights:**');
   });
 
   describe('upstream markup and entities (issue #49)', () => {
@@ -919,6 +925,284 @@ describe('smithsonianGetObject', () => {
     });
   });
 
+  describe('physical description, sets, and rights (issues #79, #81, #82)', () => {
+    // The real service over a pathname-routed fetch: the three fields come from
+    // normalizeToFull, and runToolContract parses the output schema, so an undeclared field is
+    // stripped here. Free-text blocks as /content returns them (2026-11-26).
+    const record = (
+      id: string,
+      unitCode: string,
+      freetext: NonNullable<NonNullable<RawEDAN['content']>['freetext']>,
+      indexedStructured?: NonNullable<RawEDAN['content']>['indexedStructured'],
+    ): RawEDAN => ({
+      title: `Object ${id}`,
+      unitCode,
+      content: {
+        descriptiveNonRepeating: { record_ID: id, unit_code: unitCode },
+        freetext,
+        ...(indexedStructured && { indexedStructured }),
+      },
+    });
+
+    beforeEach(() => {
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      stubContent({
+        nmnhvz_7453723: record('nmnhvz_7453723', 'NMNHMAMMALS', {
+          physicalDescription: [
+            { label: 'Length - Total', content: '335 mm' },
+            { label: 'Length - Tail', content: '143 mm' },
+            { label: 'Length - Tail', content: '36 mm' },
+            { label: 'Preparation', content: 'Skin' },
+            { label: 'Preparation', content: 'Skull' },
+            { label: 'Sex', content: 'Male' },
+          ],
+          setName: [
+            { label: 'See more items in', content: 'Vertebrate Zoology' },
+            { label: 'See more items in', content: 'Mammals' },
+          ],
+        }),
+        nasm_A19610048000: record(
+          'nasm_A19610048000',
+          'NASM',
+          {
+            physicalDescription: [
+              { label: 'Materials', content: 'Airframe: Wood' },
+              { label: 'Materials', content: 'Fabric Covering: Muslin' },
+              { label: 'Materials', content: 'Engine Crankcase: Aluminum' },
+              { label: 'Dimensions', content: 'Wingspan: 12.3 m (40 ft 4 in)' },
+              { label: 'Dimensions', content: 'Length: 6.4 m (21 ft 1 in)' },
+              { label: 'Dimensions', content: 'Height: 2.8 m (9 ft 4 in)' },
+              { label: 'Dimensions', content: 'Weight: Empty, 274 kg (605 lb)' },
+              { label: 'Dimensions', content: 'Gross, 341 kg (750 lb)' },
+            ],
+            setName: [
+              { label: 'See more items in', content: 'National Air and Space Museum Collection' },
+              { label: 'Location', content: 'National Air and Space Museum in Washington, DC' },
+              { label: 'Exhibition', content: 'Wright Brothers & The Invention of the Aerial Age' },
+            ],
+            objectRights: [{ label: 'Restrictions & Rights', content: 'CC0' }],
+          },
+          { onPhysicalExhibit: ['Yes'], exhibition: [{ building: 'NASM' }] },
+        ),
+        siris_arc_291804: record('siris_arc_291804', 'SIA', {
+          physicalDescription: [{ label: 'Physical description', content: '4.38 x 2.59' }],
+          setName: [{ label: 'See more items in', content: '007355' }],
+          objectRight: [
+            { label: 'Restrictions & Rights', content: 'No access restrictions' },
+            { label: 'Restrictions & Rights', content: 'No Copyright – United States' },
+          ],
+        }),
+        'nmaahc_2019.26.2': record('nmaahc_2019.26.2', 'NMAAHC', {
+          objectRights: [
+            { label: 'Restrictions & Rights', content: 'Public domain' },
+            {
+              label: 'Restrictions & Rights',
+              content: 'Proper usage is the responsibility of the user.',
+            },
+          ],
+        }),
+        NMAI_58046: record(
+          'NMAI_58046',
+          'NMAI',
+          {
+            setName: [
+              { label: 'See related items', content: 'Iñupiaq' },
+              { label: 'See related items', content: 'Containers and Vessels' },
+              {
+                label: 'On View',
+                content: 'NMAI, New York, NY: Infinity of Nations, Arctic & Subarctic',
+              },
+            ],
+          },
+          { onPhysicalExhibit: ['Yes'], exhibition: [{ building: 'NMAI NY' }] },
+        ),
+        'npg_NPG.91.126.5.A': record('npg_NPG.91.126.5.A', 'NPG', {
+          setName: [
+            { label: 'See more items in', content: 'National Portrait Gallery Collection' },
+            { label: 'Location', content: 'Currently not on view' },
+          ],
+          objectRights: [{ label: 'Restrictions & Rights', content: 'CC0' }],
+        }),
+        siris_sil_10451: record('siris_sil_10451', 'SIL', {
+          physicalDescription: [
+            {
+              label: 'Physical description',
+              content: '79 p illustrations, facsimile, maps, plan 24 cm',
+            },
+          ],
+        }),
+        nmah_bare: record('nmah_bare', 'NMAH', {}),
+      });
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    /** The `**<heading>:**` line and the list items under it. */
+    function listBlock(text: string, heading: string): string[] {
+      const lines = text.split('\n');
+      const at = lines.indexOf(`**${heading}:**`);
+      if (at === -1) return [];
+      const end = lines.findIndex((line, i) => i > at && !line.startsWith('- '));
+      return lines.slice(at, end === -1 ? undefined : end);
+    }
+
+    it('labels the six specimen entries of nmnhvz_7453723 on both surfaces, with no materials or dimensions', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmnhvz_7453723' });
+
+      expect(result.isError).not.toBe(true);
+      expect(
+        (result.structuredContent as { physical_description: unknown }).physical_description,
+      ).toStrictEqual([
+        { label: 'Length - Total', value: '335 mm' },
+        { label: 'Length - Tail', value: '143 mm' },
+        { label: 'Length - Tail', value: '36 mm' },
+        { label: 'Preparation', value: 'Skin' },
+        { label: 'Preparation', value: 'Skull' },
+        { label: 'Sex', value: 'Male' },
+      ]);
+      expect(result.structuredContent).not.toHaveProperty('materials');
+      expect(result.structuredContent).not.toHaveProperty('dimensions');
+      const text = textOf(result);
+      expect(listBlock(text, 'Physical description')).toEqual([
+        '**Physical description:**',
+        '- Length - Total: 335 mm',
+        '- Length - Tail: 143 mm',
+        '- Length - Tail: 36 mm',
+        '- Preparation: Skin',
+        '- Preparation: Skull',
+        '- Sex: Male',
+      ]);
+      expect(text).not.toContain('**Materials:**');
+      expect(text).not.toContain('**Dimensions:**');
+    });
+
+    it('renders each of the eight entries of nasm_A19610048000 once, in catalog order (issue #9)', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_A19610048000' });
+
+      const block = listBlock(textOf(result), 'Physical description');
+      expect(block).toEqual([
+        '**Physical description:**',
+        '- Materials: Airframe: Wood',
+        '- Materials: Fabric Covering: Muslin',
+        '- Materials: Engine Crankcase: Aluminum',
+        '- Dimensions: Wingspan: 12.3 m (40 ft 4 in)',
+        '- Dimensions: Length: 6.4 m (21 ft 1 in)',
+        '- Dimensions: Height: 2.8 m (9 ft 4 in)',
+        '- Dimensions: Weight: Empty, 274 kg (605 lb)',
+        '- Dimensions: Gross, 341 kg (750 lb)',
+      ]);
+      expect(textOf(result).split('Wingspan: 12.3 m')).toHaveLength(2);
+    });
+
+    it('returns the three sets of nasm_A19610048000 on both surfaces, and keeps its rights "CC0"', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nasm_A19610048000' });
+
+      expect((result.structuredContent as { sets: unknown }).sets).toStrictEqual([
+        { label: 'See more items in', value: 'National Air and Space Museum Collection' },
+        { label: 'Location', value: 'National Air and Space Museum in Washington, DC' },
+        { label: 'Exhibition', value: 'Wright Brothers & The Invention of the Aerial Age' },
+      ]);
+      expect(result.structuredContent).toMatchObject({
+        on_view: true,
+        current_exhibitions: [{ building: 'NASM' }],
+        object_rights: 'CC0',
+      });
+      const text = textOf(result);
+      expect(listBlock(text, 'Sets')).toEqual([
+        '**Sets:**',
+        '- See more items in: National Air and Space Museum Collection',
+        '- Location: National Air and Space Museum in Washington, DC',
+        '- Exhibition: Wright Brothers & The Invention of the Aerial Age',
+      ]);
+      expect(labelValues(text, 'Rights')).toEqual(['CC0']);
+    });
+
+    it('returns the On View entry of NMAI_58046 last', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'NMAI_58046' });
+
+      const { sets } = result.structuredContent as {
+        sets: Array<{ label: string; value: string }>;
+      };
+      expect(sets).toHaveLength(3);
+      expect(sets.at(-1)).toStrictEqual({
+        label: 'On View',
+        value: 'NMAI, New York, NY: Infinity of Nations, Arctic & Subarctic',
+      });
+      expect(listBlock(textOf(result), 'Sets').at(-1)).toBe(
+        '- On View: NMAI, New York, NY: Infinity of Nations, Arctic & Subarctic',
+      );
+    });
+
+    it('relays the not-on-view Location of npg_NPG.91.126.5.A in sets and still omits on_view', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'npg_NPG.91.126.5.A' });
+
+      expect((result.structuredContent as { sets: unknown }).sets).toStrictEqual([
+        { label: 'See more items in', value: 'National Portrait Gallery Collection' },
+        { label: 'Location', value: 'Currently not on view' },
+      ]);
+      expect(result.structuredContent).not.toHaveProperty('on_view');
+      const text = textOf(result);
+      expect(listBlock(text, 'Sets')).toContain('- Location: Currently not on view');
+      expect(text).not.toContain('**On view:**');
+    });
+
+    it('returns sets [] and renders no Sets heading for siris_sil_10451', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'siris_sil_10451' });
+
+      expect(result.structuredContent).toMatchObject({
+        sets: [],
+        physical_description: [
+          {
+            label: 'Physical description',
+            value: '79 p illustrations, facsimile, maps, plan 24 cm',
+          },
+        ],
+      });
+      expect(textOf(result)).not.toContain('**Sets:**');
+    });
+
+    it('joins both singular-key statements of siris_arc_291804 into one Rights line', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'siris_arc_291804' });
+
+      expect(result.structuredContent).toMatchObject({
+        object_rights: 'No access restrictions; No Copyright – United States',
+        physical_description: [{ label: 'Physical description', value: '4.38 x 2.59' }],
+      });
+      expect(textOf(result)).toContain(
+        '**Rights:** No access restrictions; No Copyright – United States',
+      );
+    });
+
+    it('keeps the second rights statement of nmaahc_2019.26.2', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmaahc_2019.26.2' });
+
+      expect(result.structuredContent).toMatchObject({
+        object_rights: 'Public domain; Proper usage is the responsibility of the user.',
+      });
+      expect(labelValues(textOf(result), 'Rights')).toEqual([
+        'Public domain; Proper usage is the responsibility of the user.',
+      ]);
+    });
+
+    it('returns empty lists, no rights, and none of the three headings for a record without the blocks', async () => {
+      const result = await runToolContract(smithsonianGetObject, { id: 'nmah_bare' });
+
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ physical_description: [], sets: [] });
+      expect(result.structuredContent).not.toHaveProperty('object_rights');
+      const text = textOf(result);
+      expect(text).not.toContain('**Physical description:**');
+      expect(text).not.toContain('**Sets:**');
+      expect(text).not.toContain('**Rights:**');
+    });
+  });
+
   describe('content[] encoding (issue #70)', () => {
     /** A projection whose strings carry Markdown syntax, separators, edge spaces, and line breaks. */
     function hostileObject(): FullObject {
@@ -948,8 +1232,12 @@ describe('smithsonianGetObject', () => {
           { role: 'Author', name: 'Jahnke, Eugen, 1861-1921' },
           { role: '*Printer*', name: '[Teubner]' },
         ],
-        materials: ['Ink, paper', 'Gold *leaf*'],
-        dimensions: ['24 cm; 1 vol.', '<2> parts'],
+        physical_description: [
+          { label: 'Materials', value: 'Ink, paper' },
+          { label: '*Medium*', value: 'Gold *leaf*' },
+          { label: 'Dimensions', value: '24 cm; 1 vol.' },
+          { label: 'Physical description', value: '<2> parts' },
+        ],
         place: [
           { label: 'Place', value: 'Leipzig; Berlin' },
           { label: 'Site', value: '# 1 Main St' },
@@ -963,9 +1251,13 @@ describe('smithsonianGetObject', () => {
         ],
         on_view: true,
         current_exhibitions: [{ title: 'Numbers', building: 'NMAH' }],
+        sets: [
+          { label: 'See more items in', value: 'Smithsonian <Libraries> Collection' },
+          { label: '[On View]', value: '# 1 Gallery: East *Wing*; Floor 2' },
+        ],
         credit_line: 'Gift of *someone* ',
         identifiers: [{ label: 'Call number', value: 'QA55 .J27 1909_x' }],
-        object_rights: '<a> rights',
+        object_rights: '<a> rights; No *known* copyright',
         is_cc0: true,
         record_link:
           'https://siris-libraries.si.edu/ipac20/ipac.jsp?uri=full=3100001~!43136~!0#focus',
@@ -1031,10 +1323,10 @@ describe('smithsonianGetObject', () => {
         '1, 2',
         'Author: Jahnke, Eugen, 1861-1921',
         '*Printer*: [Teubner]',
-        'Ink, paper',
-        'Gold *leaf*',
-        '24 cm; 1 vol.',
-        '<2> parts',
+        'Materials: Ink, paper',
+        '*Medium*: Gold *leaf*',
+        'Dimensions: 24 cm; 1 vol.',
+        'Physical description: <2> parts',
         'German, Saxon',
         'Plains `Indian`',
         'Berberin <Frau>',
@@ -1044,6 +1336,8 @@ describe('smithsonianGetObject', () => {
         'Site: # 1 Main St',
         'name: Jahnke, Eugen',
         'Numbers · NMAH',
+        'See more items in: Smithsonian <Libraries> Collection',
+        '[On View]: # 1 Gallery: East *Wing*; Floor 2',
         'Math <Tables> (NMAH *East*)',
         '- Mathematics',
         'Call number: QA55 .J27 1909_x',

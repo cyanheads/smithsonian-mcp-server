@@ -26,7 +26,7 @@ import {
 export const smithsonianGetObject = tool('smithsonian_get_object', {
   title: 'Get Smithsonian Object',
   description:
-    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns title, dates, description, labeled notes, makers, materials, dimensions, places, cultures, topics, exhibition history, current display (on_view and current_exhibitions, for objects the catalog flags), credit line, identifiers, rights, and a media summary. indexed carries the exact name, place, object_type, date, and topic values the record is indexed under, each passable verbatim to the smithsonian_search_objects filter of the same name — the free-text makers, places, dates, and topics often differ from them. Natural-history records can include scientific_names, taxonomy, and collection coordinates without inferred precision. The media summary counts the media and links every non-image item (3D models, scanned books, documents); full image URLs come from smithsonian_get_media.',
+    'Fetch a normalized catalog metadata projection for a Smithsonian object by its record_id (from smithsonian_search_objects results). Returns title, dates, description, labeled notes, makers, the labeled physical description (materials, measurements, specimen attributes such as sex and preparation), places, cultures, topics, exhibition history, current display (on_view and current_exhibitions, for objects the catalog flags), the sets the catalog files it under (collections, departments, and for displayed objects the gallery or exhibition), credit line, identifiers, rights, and a media summary. indexed carries the exact name, place, object_type, date, and topic values the record is indexed under, each passable verbatim to the smithsonian_search_objects filter of the same name — the free-text makers, places, dates, and topics often differ from them. Natural-history records can include scientific_names, taxonomy, and collection coordinates without inferred precision. The media summary counts the media and links every non-image item (3D models, scanned books, documents); full image URLs come from smithsonian_get_media, and the model files of a 3d_voyager item from smithsonian_get_media with media: "3d".',
   annotations: { readOnlyHint: true, openWorldHint: true, idempotentHint: true },
 
   input: z.object({
@@ -36,6 +36,8 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
         'Object record_id from smithsonian_search_objects results (e.g. "nasm_A19670093000").',
       ),
   }),
+  // Results name the object `record_id`; a call passing that key reaches `id`.
+  inputAliases: { record_id: 'id' },
 
   output: z.object({
     record_id: z.string().describe('Unique object identifier.'),
@@ -135,12 +137,22 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
           .describe('A single named party entry.'),
       )
       .describe('All named parties associated with this object.'),
-    materials: z
-      .array(z.string().describe('A material or physical description string.'))
-      .describe('Physical material descriptions.'),
-    dimensions: z
-      .array(z.string().describe('A dimension or measurement string.'))
-      .describe('Dimension and measurement strings.'),
+    physical_description: z
+      .array(
+        z
+          .object({
+            label: z
+              .string()
+              .describe(
+                'Catalog label as written ("Medium", "Dimensions", "Length - Total", "Sex", "Preparation", "Physical Location"), or "Physical description" when absent.',
+              ),
+            value: z.string().describe('The entry as the catalog writes it.'),
+          })
+          .describe('One labeled physical-description entry.'),
+      )
+      .describe(
+        "Every entry of the catalog's physical description, in catalog order with repeated labels kept, each under its own label: materials and medium, dimensions and measurements, specimen attributes, and storage locations alike. The label says what an entry is; nothing is sorted by it. Separate from description, the prose chosen from notes. [] when the record has none.",
+      ),
     place: z
       .array(
         z
@@ -203,7 +215,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       .boolean()
       .optional()
       .describe(
-        'True when the catalog flags the object as on physical display now, false when it flags it as not. Absent when the record carries no flag, which most do — absence says nothing about display. smithsonian_search_objects filters.on_view_only finds the flagged objects.',
+        'True when the catalog flags the object as on physical display now, false when it flags it as not. Absent when the record carries no flag, which most do — absence says nothing about display. smithsonian_search_objects filters.on_view_only finds the flagged objects. Venue text, where the catalog gives it, is in sets (On View, Location, Exhibition entries); that is catalog text, not a second display flag.',
       ),
     current_exhibitions: z
       .array(
@@ -220,7 +232,27 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
           })
           .describe('One place the object is on display; absent parts are omitted.'),
       )
-      .describe('Where the object is on display now, from the catalog; [] when it names none.'),
+      .describe(
+        "Where the object is on display now, from the catalog's exhibition index; [] when it names none. Often a building code alone: the gallery, hangar, or exhibition name, when catalogued, is in sets, which is catalog text rather than a second display flag.",
+      ),
+    sets: z
+      .array(
+        z
+          .object({
+            label: z
+              .string()
+              .describe(
+                'Catalog label as written, varying by museum ("See more items in", "On View", "Location", "Exhibition", "Hangar", "Department", "Classification"), or "Set" when absent.',
+              ),
+            value: z
+              .string()
+              .describe('The collection, department, gallery, or exhibition as written.'),
+          })
+          .describe('One labeled set entry.'),
+      )
+      .describe(
+        'The sets the catalog files the object under, in catalog order with repeated labels kept: its collections and departments, and for an object on display the gallery, floor, hangar, or exhibition. Catalog text, not a display flag: a "Location: Currently not on view" entry can stand where on_view is absent. [] when the record lists none.',
+      ),
     credit_line: z.string().optional().describe('Attribution or credit string.'),
     identifiers: z
       .array(
@@ -232,7 +264,12 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
           .describe('A single labeled identifier.'),
       )
       .describe('All accession and catalog identifiers.'),
-    object_rights: z.string().optional().describe('Rights statement from the catalog.'),
+    object_rights: z
+      .string()
+      .optional()
+      .describe(
+        'Every rights statement in the catalog, in catalog order, joined with "; ". Absent when the catalog gives none.',
+      ),
     is_cc0: z
       .boolean()
       .describe(
@@ -281,7 +318,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
               .describe('A non-image media item.'),
           )
           .describe(
-            'Every media item smithsonian_get_media does not deliver — each item typed as something other than Images — in catalog order. Empty when there are none.',
+            'Every media item typed as something other than Images, which smithsonian_get_media does not return as images, in catalog order. The model files of a 3d_voyager item come from smithsonian_get_media with media: "3d". Empty when there are none.',
           ),
       })
       .describe(
@@ -348,16 +385,15 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     const list = (label: string, items: string[]) => {
       if (items.length > 0) lines.push('', `**${label}:**`, ...items.map((item) => `- ${item}`));
     };
+    const labeled = (entries: Array<{ label: string; value: string }>) =>
+      entries.map((entry) => `${esc(entry.label)}: ${esc(entry.value)}`);
     if (result.holding_museum_name) lines.push(`**Held by:** ${esc(result.holding_museum_name)}`);
     lines.push(`**CC0:** ${result.is_cc0 ? 'Yes' : 'No'}`);
     if (result.record_link) {
       lines.push(`**Link:** ${markdownLink('Catalog record', result.record_link)}`);
     }
     if (result.description) lines.push('', esc(result.description));
-    list(
-      'Dates',
-      result.dates.map((d) => `${esc(d.label)}: ${esc(d.value)}`),
-    );
+    list('Dates', labeled(result.dates));
     list(
       'Notes',
       result.notes.map((note) => `${esc(note.label)}: ${esc(note.content)}`),
@@ -383,14 +419,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       'Makers',
       result.makers.map((m) => `${esc(m.role)}: ${esc(m.name)}`),
     );
-    list(
-      'Materials',
-      result.materials.map((material) => esc(material)),
-    );
-    list(
-      'Dimensions',
-      result.dimensions.map((dimension) => esc(dimension)),
-    );
+    list('Physical description', labeled(result.physical_description));
     list(
       'Culture',
       result.culture.map((culture) => esc(culture)),
@@ -399,10 +428,7 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
       'Topics',
       result.topics.map((topic) => esc(topic)),
     );
-    list(
-      'Places',
-      result.place.map((p) => `${esc(p.label)}: ${esc(p.value)}`),
-    );
+    list('Places', labeled(result.place));
     list(
       'Indexed filter values',
       Object.entries(result.indexed).flatMap(([key, values]) =>
@@ -420,16 +446,14 @@ export const smithsonianGetObject = tool('smithsonian_get_object', {
     } else if (venues.length > 0) {
       lines.push('', '**Current exhibitions:**', ...venues);
     }
+    list('Sets', labeled(result.sets));
     list(
       'Exhibitions',
       result.exhibitions.map(
         (ex) => `${esc(ex.name)}${ex.building ? ` (${esc(ex.building)})` : ''}`,
       ),
     );
-    list(
-      'Identifiers',
-      result.identifiers.map((id) => `${esc(id.label)}: ${esc(id.value)}`),
-    );
+    list('Identifiers', labeled(result.identifiers));
     if (result.credit_line || result.object_rights) lines.push('');
     if (result.credit_line) lines.push(`**Credit:** ${esc(result.credit_line)}`);
     if (result.object_rights) lines.push(`**Rights:** ${esc(result.object_rights)}`);

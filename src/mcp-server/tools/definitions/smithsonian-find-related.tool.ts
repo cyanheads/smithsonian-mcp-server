@@ -173,6 +173,8 @@ export const smithsonianFindRelated = tool('smithsonian_find_related', {
         'Scope every signal to one museum: the indexed unit code a result row\'s unit_code reports (e.g. "NASM"; the 3D scans are "OCIO_DPO3D"), never a holding_museum_name. Matched exactly and case-sensitively and not checked against the vocabulary — smithsonian_list_terms { field: "unit_code" } lists the codes. The anchor\'s own code keeps related objects in its museum; another code finds related objects held elsewhere. Omit it, or pass an empty string, to search every museum.',
       ),
   }),
+  // Results name the object `record_id`; a call passing that key reaches `id`.
+  inputAliases: { record_id: 'id' },
 
   output: z.object({
     anchor: z

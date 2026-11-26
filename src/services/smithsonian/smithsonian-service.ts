@@ -19,11 +19,14 @@ import { fetchWithTimeout, isRecord, logger, withRetry } from '@cyanheads/mcp-ts
 import { getServerConfig } from '@/config/server-config.js';
 import type { FacetFilter, OaMirror } from './oa-mirror.js';
 import { ResponseCache } from './response-cache.js';
+import { SharedLoads } from './shared-loads.js';
 import type {
   FullObject,
   ImageItem,
   IndexedFilterValues,
   MediaResolution,
+  ModelFile,
+  ModelPackage,
   NonImageMedia,
   ObjectSummary,
   Provenance,
@@ -32,6 +35,7 @@ import type {
   RawFreetextEntry,
   RawIndexedStructured,
   RawMediaItem,
+  RawMediaResource,
   RawSearchResponse,
   RawTermsResponse,
   TermDescription,
@@ -59,7 +63,9 @@ import type {
  * for `holding_museum_name`.
  *
  * Backs the `museum_name` field on every object-returning tool and the `labels`
- * map `smithsonian_list_terms` returns for `unit_code`.
+ * map `smithsonian_list_terms` returns for `unit_code`. The other names a unit answers
+ * to in that tool's `contains` match are {@link MUSEUM_ALIASES}, which neither field
+ * carries.
  *
  * Keys are matched exactly, including case (`NMAfA` carries a lowercase f upstream)
  * and separators (`OFEO-SG`, `SLA_SRO`, `OCIO_DPO3D`). Two codes that earlier
@@ -125,6 +131,94 @@ function unitName(code: string): string | undefined {
 /** Resolve a unit code to its museum name, echoing the raw code when unmapped. */
 function museumName(unitCode: string | undefined): string {
   return (unitCode && unitName(unitCode)) ?? unitCode ?? 'Smithsonian Institution';
+}
+
+/** The museum every `NMNH - …` division label abbreviates and none spells out. */
+const NMNH_NAME = ['National Museum of Natural History'];
+
+/**
+ * Names a unit code answers to beyond its {@link MUSEUM_NAMES} label, read only by the
+ * `smithsonian_list_terms` name match, so `museum_name` and `labels` never carry them.
+ * Relabeling instead would rewrite sourced upstream text and split `museum_name` from
+ * `holding_museum_name`, which reads `data_source` verbatim.
+ *
+ * - The eleven `NMNH*` divisions: the data dictionary and their records' `data_source`
+ *   name each `NMNH - <division>`, NMNH being the National Museum of Natural History. The
+ *   alias leaves out "Smithsonian", so `contains: "Smithsonian"` does not pull all eleven
+ *   in; the match drops a leading "Smithsonian" from the caller's text instead.
+ * - `NMAA`: the Freer Gallery of Art and the Arthur M. Sackler Gallery, the two galleries
+ *   that became the National Museum of Asian Art in 2019 (the retired `FSG` code).
+ * - `CHNDM`, `CHSDM`: Cooper-Hewitt, National Design Museum, the museum's name until it
+ *   became Cooper Hewitt, Smithsonian Design Museum in 2014 (`CHNDM` is that era's code).
+ *
+ * Each alias is a full, sourced name of its unit: the match runs the caller's text inside
+ * each name, so an alias can claim a code wrongly only by not being a true name of it.
+ * Branch buildings (Renwick, Udvar-Hazy, Heye Center), parent units absent from a code's
+ * own label, and the four unattributed codes get none.
+ */
+const MUSEUM_ALIASES: Record<string, readonly string[]> = {
+  CHNDM: ['Cooper-Hewitt, National Design Museum'],
+  CHSDM: ['Cooper-Hewitt, National Design Museum'],
+  NMAA: ['Freer Gallery of Art', 'Arthur M. Sackler Gallery'],
+  NMNHANTHRO: NMNH_NAME,
+  NMNHBIRDS: NMNH_NAME,
+  NMNHBOTANY: NMNH_NAME,
+  NMNHEDUCATION: NMNH_NAME,
+  NMNHENTO: NMNH_NAME,
+  NMNHFISHES: NMNH_NAME,
+  NMNHHERPS: NMNH_NAME,
+  NMNHINV: NMNH_NAME,
+  NMNHMAMMALS: NMNH_NAME,
+  NMNHMINSCI: NMNH_NAME,
+  NMNHPALEO: NMNH_NAME,
+};
+
+/**
+ * Fold a museum name, or caller text matched against one, to the form the name match
+ * compares: lowercase, curly apostrophes straight, `&` as `and`, every run of hyphens and
+ * whitespace one space, the ends trimmed. One linear pass per step over the text.
+ */
+function foldName(text: string): string {
+  return text
+    .toLowerCase()
+    .replaceAll('‘', "'")
+    .replaceAll('’', "'")
+    .replaceAll('&', 'and')
+    .replace(/[\s-]+/g, ' ')
+    .trim();
+}
+
+/** Every name each mapped code answers to — its label, then its aliases — folded once. */
+const FOLDED_NAMES = new Map(
+  Object.entries(MUSEUM_NAMES).map(([code, name]) => [
+    code,
+    [name, ...(MUSEUM_ALIASES[code] ?? [])].map(foldName),
+  ]),
+);
+
+/** Leading words an official name carries that no label repeats, as {@link foldName} leaves them. */
+const NAME_PREFIXES = ["smithsonian's ", 'smithsonian '];
+
+/**
+ * The caller's `contains` text as the name match reads it: folded, without a leading
+ * "Smithsonian" or "Smithsonian's" when words remain after it, so the official
+ * "Smithsonian National Portrait Gallery" finds the label "National Portrait Gallery" while
+ * "Smithsonian" alone still finds every name carrying the word.
+ */
+function nameNeedle(contains: string): string {
+  const folded = foldName(contains);
+  const prefix = NAME_PREFIXES.find((p) => folded.startsWith(p));
+  return prefix ? folded.slice(prefix.length) : folded;
+}
+
+/**
+ * Whether a name `code` answers to contains `needle`, a {@link nameNeedle} of the caller's
+ * lowercased text `raw`. Text that folds to nothing, only whitespace and hyphens, matches the
+ * label as written instead, so `" "` and `"-"` keep the codes they listed before folding.
+ */
+function matchesMuseumName(code: string, needle: string, raw: string): boolean {
+  if (needle === '') return unitName(code)?.toLowerCase().includes(raw) ?? false;
+  return FOLDED_NAMES.get(code)?.some((name) => name.includes(needle)) ?? false;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,13 +359,22 @@ function firstContent(entries: RawFreetextEntry[] | undefined): string | undefin
   return entries?.find((e) => e.content)?.content;
 }
 
-/** Collect content strings from a freetext label-array, optionally filtered by label. */
-function collectContent(entries: RawFreetextEntry[] | undefined, labelFilter?: string[]): string[] {
-  if (!entries) return [];
-  return entries
-    .filter((e) => !labelFilter || labelFilter.some((l) => e.label?.includes(l)))
-    .map((e) => e.content)
-    .filter((c): c is string => Boolean(c));
+/** The non-empty content strings of a freetext label-array, in catalog order. */
+function collectContent(entries: RawFreetextEntry[] | undefined): string[] {
+  return (entries ?? []).map((e) => e.content).filter((c): c is string => Boolean(c));
+}
+
+/**
+ * Every entry of a freetext label-array that has content, in catalog order with repeated labels
+ * kept, as `{ label, value }` under the entry's own label, or `fallback` when it has none.
+ */
+function labeledEntries(
+  entries: RawFreetextEntry[] | undefined,
+  fallback: string,
+): Array<{ label: string; value: string }> {
+  return (entries ?? []).flatMap((entry) =>
+    entry.content ? [{ label: entry.label ?? fallback, value: entry.content }] : [],
+  );
 }
 
 /**
@@ -281,17 +384,6 @@ function collectContent(entries: RawFreetextEntry[] | undefined, labelFilter?: s
  */
 function distinct(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
-}
-
-/**
- * True when a physicalDescription label marks a measurement rather than material
- * prose. `Dimensions` and `Measurements` are the only dimension labels the live
- * vocabulary uses; both match here. Used to route an entry into `dimensions` and
- * to exclude it from `materials` so a measurement never renders under both headings.
- */
-function isDimensionLabel(label: string | undefined): boolean {
-  const l = (label ?? '').toLowerCase();
-  return l.includes('dim') || l.includes('size') || l.includes('measure');
 }
 
 /** Return true when the object-level metadata_usage.access is CC0. */
@@ -452,12 +544,6 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     coordinates.push({ latitude, longitude, ...(locality && { locality }) });
   }
 
-  // Dates — gather both structured and freetext
-  const dates: Array<{ label: string; value: string }> = [];
-  for (const entry of freetext?.date ?? []) {
-    if (entry.content) dates.push({ label: entry.label ?? 'Date', value: entry.content });
-  }
-
   // Description — prefer Summary/Physical/Brief notes
   const notePriority = ['Summary', 'Physical Description', 'Brief Description'];
   let description: string | undefined;
@@ -489,27 +575,6 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     if (entry.content) makers.push({ role: entry.label ?? 'Name', name: entry.content });
   }
 
-  // Materials — physicalDescription entries that are NOT dimension-labeled, so a
-  // measurement string (claimed by `dimensions` below) never also renders as a
-  // material. A generic "Physical Description" label carries no signal to separate
-  // material prose from measurement prose, so those entries fall through here as-is
-  // — an inherent limit of label-based routing, not resolvable without content parsing.
-  const materials = collectContent(
-    freetext?.physicalDescription?.filter((entry) => !isDimensionLabel(entry.label)),
-  );
-
-  // Dimensions — physicalDescription entries whose label marks a measurement.
-  const dimensions: string[] = [];
-  for (const entry of freetext?.physicalDescription ?? []) {
-    if (isDimensionLabel(entry.label) && entry.content) dimensions.push(entry.content);
-  }
-
-  // Place
-  const place: Array<{ label: string; value: string }> = [];
-  for (const entry of freetext?.place ?? []) {
-    if (entry.content) place.push({ label: entry.label ?? 'Place', value: entry.content });
-  }
-
   // Culture
   const culture = (indexed?.culture ?? []).filter(Boolean);
 
@@ -531,24 +596,22 @@ function normalizeToFull(raw: RawEDAN): FullObject {
 
   const on_view = onView(indexed);
 
-  // Credit
+  // Credit — no sampled record carries a second creditLine entry.
   const credit_line = firstContent(freetext?.creditLine);
 
-  // Identifiers
-  const identifiers: Array<{ label: string; value: string }> = [];
-  for (const entry of freetext?.identifier ?? []) {
-    if (entry.content)
-      identifiers.push({ label: entry.label ?? 'Identifier', value: entry.content });
-  }
-
-  // Rights
-  const object_rights = firstContent(freetext?.objectRights);
+  // Rights — Smithsonian Institution Archives records file theirs under the singular
+  // `objectRight` alone; no sampled record carries both keys, and reading both drops nothing
+  // if one ever does.
+  const rights = [
+    ...collectContent(freetext?.objectRights),
+    ...collectContent(freetext?.objectRight),
+  ];
 
   // Media summary — cc0_image_count runs the SAME image pipeline as
   // smithsonian_get_media (extractImageItems → CC0 filter), so the two counts
   // reconcile by construction. `count` is the raw total across all media types
   // (images, 3D models, scanned books, …), which is why it can exceed
-  // cc0_image_count; non_image_media lists the items that tool never delivers.
+  // cc0_image_count; non_image_media lists the items its images mode never delivers.
   const media = dnr?.online_media?.media ?? [];
   const cc0ImageCount = extractImageItems(media).filter((img) => img.is_cc0).length;
   const mediaCount = dnr?.online_media?.mediaCount ?? media.length;
@@ -560,25 +623,27 @@ function normalizeToFull(raw: RawEDAN): FullObject {
     unit_code: unitCode,
     museum_name: museumName(unitCode),
     ...(holdingName !== undefined && { holding_museum_name: holdingName }),
-    dates,
+    dates: labeledEntries(freetext?.date, 'Date'),
     scientific_names: indexed?.scientific_name ?? [],
     ...(Object.keys(taxonomy).length > 0 && { taxonomy }),
     coordinates,
     ...(description !== undefined && { description: toPlainText(description) }),
     notes,
     makers,
-    materials,
-    dimensions,
-    place,
+    // Every entry under its own label, unsorted: a label can't tell a material from a
+    // measurement, a specimen attribute, or a storage location (issue #79).
+    physical_description: labeledEntries(freetext?.physicalDescription, 'Physical description'),
+    place: labeledEntries(freetext?.place, 'Place'),
     culture,
     topics,
     indexed: indexedFilterValues(indexed),
     exhibitions,
     ...(on_view !== undefined && { on_view }),
     current_exhibitions: currentExhibitions(indexed),
+    sets: labeledEntries(freetext?.setName, 'Set'),
     ...(credit_line !== undefined && { credit_line }),
-    identifiers,
-    ...(object_rights !== undefined && { object_rights }),
+    identifiers: labeledEntries(freetext?.identifier, 'Identifier'),
+    ...(rights.length > 0 && { object_rights: rights.join('; ') }),
     is_cc0: isObjectCC0(raw),
     ...(dnr?.record_link !== undefined && { record_link: dnr.record_link }),
     media_summary: {
@@ -598,8 +663,8 @@ function isMediaCC0(m: RawMediaItem): boolean {
 
 /**
  * The one media type test: an item is non-image when its `type` is set and is not
- * `Images`. smithsonian_get_media treats everything else — `Images` and untyped
- * items — as an image, so {@link extractImageItems} and {@link extractNonImageMedia}
+ * `Images`. smithsonian_get_media's images mode treats everything else — `Images` and
+ * untyped items — as an image, so {@link extractImageItems} and {@link extractNonImageMedia}
  * select complementary sets and no item can land in both or neither.
  */
 function isNonImageMedia(m: RawMediaItem): m is RawMediaItem & { type: string } {
@@ -699,10 +764,10 @@ function extractImageItems(media: RawMediaItem[]): ImageItem[] {
 }
 
 /**
- * The media items smithsonian_get_media does not deliver, each with its `content`
+ * The media items smithsonian_get_media's images mode leaves out, each with its `content`
  * link (issue #62). That link is the item's entry point — a 3D package's viewer, a
  * scanned book's DOI or BHL page, a field book's viewer or PDF — so a package's
- * per-file `resources[]` stay out.
+ * per-file `resources[]` stay out; {@link extractModelPackages} carries them.
  */
 function extractNonImageMedia(media: RawMediaItem[]): NonImageMedia[] {
   return media.filter(isNonImageMedia).map((m) => ({
@@ -710,6 +775,89 @@ function extractNonImageMedia(media: RawMediaItem[]): NonImageMedia[] {
     ...(m.content && { url: m.content }),
     is_cc0: isMediaCC0(m),
   }));
+}
+
+/** The media type of a Voyager 3D package, the catalog's one 3D type. */
+const MODEL_PACKAGE_TYPE = '3d_voyager';
+
+function isByteCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * A 3D file's attribute values, read from every `attributes[]` entry wherever it sits (issue
+ * #83): records keep them in one object, split `FILE_SIZE` into an entry of its own, or give
+ * each key its own entry. No key repeats with a different value, so the first entry carrying a
+ * key settles it. Strings pass through as written; an empty string, a `DRACO_COMPRESSED` that
+ * is not a boolean, and a `FILE_SIZE` that is not a whole number of bytes are left out.
+ */
+function modelFileAttributes(
+  attributes: unknown,
+): Pick<ModelFile, 'file_type' | 'model_file_type' | 'units' | 'draco_compressed' | 'size_bytes'> {
+  let file_type: string | undefined;
+  let model_file_type: string | undefined;
+  let units: string | undefined;
+  let draco_compressed: boolean | undefined;
+  let size_bytes: number | undefined;
+  for (const entry of Array.isArray(attributes) ? attributes : []) {
+    if (!isRecord(entry)) continue;
+    if (file_type === undefined && isText(entry.FILE_TYPE)) file_type = entry.FILE_TYPE;
+    if (model_file_type === undefined && isText(entry.MODEL_FILE_TYPE)) {
+      model_file_type = entry.MODEL_FILE_TYPE;
+    }
+    if (units === undefined && isText(entry.UNITS)) units = entry.UNITS;
+    if (draco_compressed === undefined && typeof entry.DRACO_COMPRESSED === 'boolean') {
+      draco_compressed = entry.DRACO_COMPRESSED;
+    }
+    if (size_bytes === undefined && isByteCount(entry.FILE_SIZE)) size_bytes = entry.FILE_SIZE;
+  }
+  return {
+    ...(file_type !== undefined && { file_type }),
+    ...(model_file_type !== undefined && { model_file_type }),
+    ...(units !== undefined && { units }),
+    ...(draco_compressed !== undefined && { draco_compressed }),
+    ...(size_bytes !== undefined && { size_bytes }),
+  };
+}
+
+/** One file a 3D package lists, or null for a resource with no download URL. */
+function normalizeToModelFile(r: RawMediaResource): ModelFile | null {
+  if (!isText(r.url)) return null;
+  return {
+    url: r.url,
+    ...(isText(r.filename) && { filename: r.filename }),
+    ...(isText(r.category) && { category: r.category }),
+    ...modelFileAttributes(r.attributes),
+  };
+}
+
+/**
+ * Normalize a `3d_voyager` item into a ModelPackage, or null when it has no `id`, as an image
+ * with no media id is dropped. `content` is the Voyager viewer page; a package whose
+ * `resources` key is absent lists no files.
+ */
+function normalizeToModelPackage(m: RawMediaItem): ModelPackage | null {
+  if (!isText(m.id)) return null;
+  return {
+    media_id: m.id,
+    is_cc0: isMediaCC0(m),
+    ...(isText(m.content) && { viewer_url: m.content }),
+    ...(isText(m.thumbnail) && { thumbnail_url: m.thumbnail }),
+    files: (m.resources ?? []).map(normalizeToModelFile).filter((f): f is ModelFile => f !== null),
+  };
+}
+
+/**
+ * The 3D model packages of an online_media `media[]` array, in catalog order: the
+ * `3d_voyager` items with an id, CC0 or not, each with its per-file `resources[]` (issue #83).
+ * Every one is also a {@link extractNonImageMedia} entry. smithsonian_get_media's 3D mode pages
+ * the CC0 ones.
+ */
+function extractModelPackages(media: RawMediaItem[]): ModelPackage[] {
+  return media
+    .filter((m) => m.type === MODEL_PACKAGE_TYPE)
+    .map(normalizeToModelPackage)
+    .filter((p): p is ModelPackage => p !== null);
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,8 +1165,8 @@ const RESPONSE_CACHE_BYTES = 64 * 1024 * 1024;
  * deadline leaves the work after the last read about 10 s inside the client's limit,
  * so a hung upstream fails here first (issue #68).
  *
- * It also caps a shared response-cache load, which runs on its own deadline rather
- * than the starting caller's.
+ * It also caps a shared load — a response-cache read or a cold vocabulary read — which
+ * runs on its own deadline rather than the starting caller's.
  */
 export const CALL_DEADLINE_MS = 50_000;
 
@@ -1104,6 +1252,12 @@ export class SmithsonianService {
    * URL characters in keys.
    */
   private readonly responses = new ResponseCache(RESPONSE_CACHE_BYTES, CALL_DEADLINE_MS);
+
+  /**
+   * Cold `/terms/{field}` reads in progress, keyed by tenant and field. The vocabulary itself
+   * lives in `storage`, so the loads keep nothing once they settle.
+   */
+  private readonly vocabularyLoads = new SharedLoads(CALL_DEADLINE_MS);
 
   /**
    * @param mirror The Open Access bulk mirror, when one is configured. Object reads and
@@ -1412,6 +1566,11 @@ export class SmithsonianService {
     return extractImageItems(raw.content?.descriptiveNonRepeating?.online_media?.media ?? []);
   }
 
+  /** Extract and normalize the `3d_voyager` model packages, CC0 or not, from a raw EDAN record. */
+  toModelPackages(raw: RawEDAN): ModelPackage[] {
+    return extractModelPackages(raw.content?.descriptiveNonRepeating?.online_media?.media ?? []);
+  }
+
   /** Check whether an object is CC0. */
   isCC0(raw: RawEDAN): boolean {
     return isObjectCC0(raw);
@@ -1434,7 +1593,8 @@ export class SmithsonianService {
    * every vocabulary check on a recovery path, into an in-memory scan; the data
    * is a controlled vocabulary with no freshness requirement on the scale of a
    * session, so a TTL of hours is safe and a cold miss costs what an uncached
-   * call costs today. `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS=0` disables it.
+   * call costs today. `SMITHSONIAN_TERMS_CACHE_TTL_SECONDS=0` disables the cache and the
+   * sharing of concurrent cold reads.
    *
    * The framework's storage key validator only accepts `^[a-zA-Z0-9_.\-/]+$`, so
    * the key separator is `/` — a `terms:${field}` key throws at runtime.
@@ -1443,6 +1603,14 @@ export class SmithsonianService {
    * (issue #72), where it would otherwise be stored as an empty vocabulary that
    * every caller of the instance reads as "no such term" for the whole TTL. An empty
    * array is a real answer and is stored like any other.
+   *
+   * Concurrent cold readers of one field in one tenant share one `/terms` request
+   * (issue #77) through {@link SmithsonianService.vocabularyLoads}, the way the response
+   * cache shares a search or content load: on its own signal and its own
+   * {@link CALL_DEADLINE_MS} ceiling, each caller waiting on its own signal and the time its
+   * call has left, the request aborted once every caller has left. The load writes storage
+   * before any caller resumes, and a failed load stores nothing. A TTL of 0 turns the sharing
+   * off with the cache: each read then runs on its caller's own signal and deadline.
    *
    * A warm vocabulary answers whatever time the call has left; a cold one is read by
    * `deadline`, and past it is not read at all.
@@ -1453,29 +1621,39 @@ export class SmithsonianService {
     deadline: CallDeadline,
   ): Promise<string[]> {
     const cfg = getServerConfig();
-    const key = `terms/${field}`;
     const ttl = cfg.termsCacheTtlSeconds;
+    const url = `${cfg.baseUrl}/terms/${encodeURIComponent(field)}`;
+    const read = async (signal: AbortSignal | undefined, readDeadline: number) => {
+      const raw = await this.get(url, ctx, {
+        headers: { 'X-Api-Key': cfg.apiKey },
+        collectionEndpoint: true,
+        payload: {
+          description: 'a term vocabulary (a response.terms array)',
+          holds: (r: RawTermsResponse): r is RawTermsResponse & { response: { terms: string[] } } =>
+            Array.isArray(r.response?.terms),
+        },
+        signal,
+        deadline: readDeadline,
+      });
+      return raw.response.terms;
+    };
+    if (ttl === 0) return await read(callerSignal(ctx), deadline);
 
-    if (ttl > 0) {
+    const key = `terms/${field}`;
+    // Keyed as storage is, per tenant, so one load writes the one entry its callers read.
+    const loadKey = `${ctx.tenantId}/${key}`;
+    // A load in progress means storage was cold when it started. Joining it skips a read that
+    // a slow store could answer with the miss from before the load's write.
+    if (!this.vocabularyLoads.has(loadKey)) {
       const cached = await this.storage.get<string[]>(key, ctx);
       if (cached) return cached;
     }
-
-    const url = `${cfg.baseUrl}/terms/${encodeURIComponent(field)}`;
-    const raw = await this.get(url, ctx, {
-      headers: { 'X-Api-Key': cfg.apiKey },
-      collectionEndpoint: true,
-      payload: {
-        description: 'a term vocabulary (a response.terms array)',
-        holds: (r: RawTermsResponse): r is RawTermsResponse & { response: { terms: string[] } } =>
-          Array.isArray(r.response?.terms),
-      },
-      deadline,
+    const caller = { signal: callerSignal(ctx), deadline };
+    return await this.vocabularyLoads.run(loadKey, caller, async (signal, loadDeadline) => {
+      const terms = await read(signal, loadDeadline);
+      await this.storage.set(key, terms, ctx, { ttl });
+      return terms;
     });
-    const terms = raw.response.terms;
-
-    if (ttl > 0) await this.storage.set(key, terms, ctx, { ttl });
-    return terms;
   }
 
   /**
@@ -1489,9 +1667,13 @@ export class SmithsonianService {
    * `contains` filters that vocabulary in memory, before pagination, so both
    * `total` and the page reflect the match set and an empty result confirms no
    * such term exists. For `unit_code` the substring also matches each code's
-   * museum name, so a caller who knows only the name ("National Air and Space")
-   * resolves it to a code in one call; `labels` returns the name for every code
-   * on the page that has one, and codes outside {@link MUSEUM_NAMES} come back
+   * museum name and its {@link MUSEUM_ALIASES}, so a caller who knows only the name
+   * ("National Air and Space", "Freer", "Smithsonian National Museum of Natural
+   * History") resolves it to its codes in one call. Name matching ignores a leading
+   * "Smithsonian", `&` versus `and`, apostrophe style, and hyphens versus spaces
+   * ({@link nameNeedle}); the code itself still matches the raw case-insensitive
+   * substring, so `OFEO-SG` finds `OFEO-SG`. `labels` returns the label alone for every
+   * code on the page that has one, and codes outside {@link MUSEUM_NAMES} come back
    * bare, as they do on every other tool.
    */
   async listTerms(
@@ -1503,11 +1685,12 @@ export class SmithsonianService {
     const labelled = params.field === 'unit_code';
 
     const needle = params.contains?.toLowerCase();
+    const names = labelled && params.contains ? nameNeedle(params.contains) : undefined;
     const matched = needle
       ? all.filter(
           (term) =>
             term.toLowerCase().includes(needle) ||
-            (labelled && unitName(term)?.toLowerCase().includes(needle) === true),
+            (names !== undefined && matchesMuseumName(term, names, needle)),
         )
       : all;
     const page = matched.slice(params.start, params.start + params.rows);

@@ -14,6 +14,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianBrowseCategory } from '@/mcp-server/tools/definitions/smithsonian-browse-category.tool.js';
+import { smithsonianListTerms } from '@/mcp-server/tools/definitions/smithsonian-list-terms.tool.js';
 import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
 import type { ObjectSummary, TermDescription } from '@/services/smithsonian/types.js';
@@ -394,6 +395,62 @@ describe('smithsonianBrowseCategory', () => {
     const calledParams = searchFn.mock.calls[0]?.[0] as { query: string };
     expect(calledParams.query).toBe('');
     expect(luceneTermsOf(searchFn)).toEqual(['unit_code:"National Museum of Natural History"']);
+  });
+
+  describe('the museum-name recovery end to end (issue #80)', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.unstubAllGlobals();
+    });
+
+    it('ends at the eleven NMNH division codes, through a hint left unchanged', async () => {
+      const NMNH = 'ANTHRO BIRDS BOTANY EDUCATION ENTO FISHES HERPS INV MAMMALS MINSCI PALEO'
+        .split(' ')
+        .map((division) => `NMNH${division}`);
+      vi.stubEnv('SMITHSONIAN_API_KEY', 'test-key-12345');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (url: string) => {
+          const path = new URL(url).pathname;
+          const response = path.endsWith('/search')
+            ? { rows: [], rowCount: 0 }
+            : path.endsWith('/terms/unit_code')
+              ? { terms: ['NASM', 'NMAA', ...NMNH, 'SI'] }
+              : undefined;
+          if (!response) throw new Error('unmocked fetch');
+          const body = { status: 200, responseCode: 1, response };
+          return {
+            ok: true,
+            status: 200,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          };
+        }),
+      );
+      vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(
+        new svcModule.SmithsonianService(createInMemoryStorage()),
+      );
+      const call = { context: createMockContext({ tenantId: 'test-tenant' }) };
+
+      const browsed = await runToolContract(
+        smithsonianBrowseCategory,
+        { mode: 'museum', value: 'National Museum of Natural History' },
+        call,
+      );
+      const hint = (
+        browsed.structuredContent as { error: { data: { recovery: { hint: string } } } }
+      ).error.data.recovery.hint;
+      expect(hint).toBe(
+        '"National Museum of Natural History" is not an exact Smithsonian unit code. Resolve it to a real code with smithsonian_list_terms { field: "unit_code", contains: "National Museum of Natural History" }, which matches museum names as well as codes, then browse again with the exact value.',
+      );
+
+      const listed = await runToolContract(
+        smithsonianListTerms,
+        { field: 'unit_code', contains: 'National Museum of Natural History' },
+        call,
+      );
+      expect(listed.structuredContent).toMatchObject({ terms: NMNH, total: 11 });
+    });
   });
 
   it('keeps the contains substring in the museum hint for a spaceless code (issue #31)', async () => {

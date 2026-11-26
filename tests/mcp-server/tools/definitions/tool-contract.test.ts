@@ -452,6 +452,116 @@ describe('tool contract boundary', () => {
 
       expect(errorOf(result).code).toBe(-32602);
     });
+
+    describe('record_id as an alias of id (issue #84)', () => {
+      const RECORD_TOOLS = [
+        ['smithsonian_get_object', smithsonianGetObject],
+        ['smithsonian_get_media', smithsonianGetMedia],
+        ['smithsonian_find_related', smithsonianFindRelated],
+      ] as const;
+
+      /** A CC0 record with one CC0 image and two related-object signals. */
+      const RECORD = {
+        response: {
+          id: 'ld1-alias',
+          title: 'Alias test object',
+          unitCode: 'NASM',
+          url: 'edanmdm:nasm_ALIAS1',
+          content: {
+            descriptiveNonRepeating: {
+              record_ID: 'nasm_ALIAS1',
+              unit_code: 'NASM',
+              metadata_usage: { access: 'CC0' },
+              online_media: {
+                mediaCount: 1,
+                media: [
+                  {
+                    type: 'Images',
+                    idsId: 'NASM-ALIAS1-0001',
+                    content: 'https://ids.si.edu/ids/deliveryService?id=NASM-ALIAS1-0001',
+                    thumbnail: 'https://ids.si.edu/ids/deliveryService?id=NASM-ALIAS1-0001&max=150',
+                    usage: { access: 'CC0' },
+                  },
+                ],
+              },
+            },
+            indexedStructured: { object_type: ['Aircraft'], date: ['1960s'] },
+          },
+        },
+      };
+
+      /** `/content/{id}` serves {@link RECORD} and `/search` one row; returns the fetch mock. */
+      function stubRecordRoutes() {
+        const fetchMock = vi.fn(async (url: string | URL) => {
+          const body = new URL(String(url)).pathname.includes('/content/')
+            ? RECORD
+            : searchBody(1, 1);
+          return {
+            ok: true,
+            status: 200,
+            json: async () => body,
+            text: async () => JSON.stringify(body),
+          };
+        });
+        vi.stubGlobal('fetch', fetchMock);
+        return fetchMock;
+      }
+
+      /** The `/content/{id}` paths a fetch mock was asked for. */
+      function contentPaths(fetchMock: ReturnType<typeof stubRecordRoutes>): string[] {
+        return fetchMock.mock.calls
+          .map(([url]) => new URL(String(url)).pathname)
+          .filter((path) => path.includes('/content/'));
+      }
+
+      it.each(RECORD_TOOLS)('%s answers record_id exactly as it answers id', async (_name, def) => {
+        const byIdFetch = stubRecordRoutes();
+        const byId = await runToolContract(def, { id: 'nasm_ALIAS1' } as never);
+
+        // A fresh service, so the response cache cannot answer the aliased call.
+        initSmithsonianService({} as AppConfig, createInMemoryStorage());
+        const byAliasFetch = stubRecordRoutes();
+        const byAlias = await runToolContract(def, { record_id: 'nasm_ALIAS1' } as never);
+
+        expect(byId.isError).toBeFalsy();
+        expect(byAlias.isError).toBeFalsy();
+        expect(byAlias.structuredContent).toStrictEqual(byId.structuredContent);
+        expect(byAlias.content).toStrictEqual(byId.content);
+        expect(contentPaths(byAliasFetch)).toEqual(contentPaths(byIdFetch));
+        expect(contentPaths(byAliasFetch)).toEqual([
+          expect.stringMatching(/\/content\/edanmdm%3Anasm_ALIAS1$/),
+        ]);
+      });
+
+      it.each(RECORD_TOOLS)(
+        '%s rejects record_id sent beside id, naming it an alias, before any upstream request',
+        async (_name, def) => {
+          const fetchMock = vi.fn().mockRejectedValue(new Error('unmocked fetch'));
+          vi.stubGlobal('fetch', fetchMock);
+
+          const result = await runToolContract(def, {
+            id: 'nasm_ALIAS1',
+            record_id: 'nasm_OTHER',
+          } as never);
+
+          const error = errorOf(result);
+          expect(error.code).toBe(-32602);
+          expect(error.data?.reason).toBe('invalid_arguments');
+          for (const surface of [error.data?.recovery?.hint ?? '', text(result)]) {
+            expect(surface).toContain('record_id is an alias of id; send one of them, not both.');
+          }
+          expect(fetchMock).not.toHaveBeenCalled();
+        },
+      );
+
+      it.each(RECORD_TOOLS)('%s still advertises id alone', (_name, def) => {
+        const schema = advertisedInput(def) as ReturnType<typeof advertisedInput> & {
+          required?: string[];
+        };
+        expect(Object.keys(schema.properties)).not.toContain('record_id');
+        expect(schema.required).toEqual(['id']);
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -535,6 +645,76 @@ describe('tool contract boundary', () => {
       expect(error.data?.recovery?.hint).toBe(declaredRecovery(def, 'api_key_rejected'));
       expect(text(result)).toContain('(reason api_key_rejected)');
     });
+
+    describe('search calls named by get_media recoveries run as written', () => {
+      /** The `smithsonian_search_objects { … }` call a recovery names, parsed into its arguments. */
+      function namedSearch(recovery: string): Record<string, unknown> {
+        const start = recovery.indexOf('smithsonian_search_objects {');
+        expect(start, recovery).toBeGreaterThanOrEqual(0);
+        const open = recovery.indexOf('{', start);
+        let end = open;
+        for (let depth = 0; end < recovery.length; end++) {
+          if (recovery[end] === '{') depth++;
+          else if (recovery[end] === '}' && --depth === 0) break;
+        }
+        const literal = recovery.slice(open, end + 1).replace(/([{,]\s*)(\w+):/g, '$1"$2":');
+        return JSON.parse(literal) as Record<string, unknown>;
+      }
+
+      it.each([
+        ['no_models', { online_media_type: '3D Models' }],
+        ['not_cc0', { cc0_only: true }],
+      ] as const)('the declared %s recovery names a search that runs', async (reason, filters) => {
+        const args = namedSearch(declaredRecovery(smithsonianGetMedia, reason));
+        expect(args).toMatchObject({ filters });
+        stubJson(searchBody(1, 1));
+
+        const result = await runToolContract(smithsonianSearchObjects, args as never);
+
+        expect(result.isError).toBeFalsy();
+      });
+
+      it('the 3D-mode not_cc0 hint names a search that runs', async () => {
+        stubJson({
+          response: {
+            id: 'ld1-restricted-3d',
+            title: 'Restricted 3D object',
+            unitCode: 'NMNHPALEO',
+            url: 'edanmdm:nmnhpaleo_RESTRICTED3D',
+            content: {
+              descriptiveNonRepeating: {
+                record_ID: 'nmnhpaleo_RESTRICTED3D',
+                unit_code: 'NMNHPALEO',
+                online_media: {
+                  mediaCount: 1,
+                  media: [
+                    {
+                      id: '3d_package:restricted',
+                      type: '3d_voyager',
+                      usage: { access: 'Usage Conditions Apply' },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        });
+        const failed = await runToolContract(smithsonianGetMedia, {
+          id: 'nmnhpaleo_RESTRICTED3D',
+          media: '3d',
+        });
+        expect(errorOf(failed).data?.reason).toBe('not_cc0');
+        const hint = errorOf(failed).data?.recovery?.hint ?? '';
+        expect(text(failed)).toContain(hint);
+
+        const args = namedSearch(hint);
+        expect(args).toMatchObject({ filters: { online_media_type: '3D Models' } });
+        stubJson(searchBody(1, 1));
+        const result = await runToolContract(smithsonianSearchObjects, args as never);
+
+        expect(result.isError).toBeFalsy();
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -590,7 +770,10 @@ describe('tool contract boundary', () => {
 // Open Access mirror provenance (issue #66)
 // ---------------------------------------------------------------------------
 
-/** Real `metadata/edan/` lines (2026-10-26 publish): eight `edanmdm` records and one `ead_component`. */
+/**
+ * Real `metadata/edan/` lines: eight `edanmdm` records and one `ead_component` from the
+ * 2026-10-26 publish, then two `edanmdm` records from the 2026-11-23 publish.
+ */
 const FIXTURE_LINES = readFileSync(
   new URL('../../../services/smithsonian/fixtures/oa-bulk-lines.jsonl', import.meta.url),
   'utf8',
@@ -839,6 +1022,31 @@ describe('Open Access mirror provenance (issue #66)', () => {
       expect(lines[at + 1]).toBe('- HAZY');
     });
 
+    it('reads the labeled physical description of nmnhvz_14945304 from the stored doc as from the full line (issue #79)', async () => {
+      const mirrored = stubEdan();
+      const fromDoc = await runToolContract(smithsonianGetObject, { id: 'nmnhvz_14945304' });
+      expect(mirrored.fetchMock).not.toHaveBeenCalled();
+      expect(answerOf(fromDoc).sources).toEqual(['oa_mirror']);
+
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      const live = stubEdan();
+      const fromLine = await runToolContract(smithsonianGetObject, { id: 'nmnhvz_14945304' });
+      expect(live.requests('content')).toHaveLength(1);
+
+      for (const result of [fromDoc, fromLine]) {
+        expect(
+          (result.structuredContent as { physical_description: unknown }).physical_description,
+        ).toStrictEqual([
+          { label: 'Depth (m)', value: '763 - 763' },
+          { label: 'Prep Count', value: '2' },
+          { label: 'Preparation', value: 'Polyester' },
+        ]);
+        expect(text(result)).toContain(
+          '**Physical description:**\n- Depth (m): 763 - 763\n- Prep Count: 2\n- Preparation: Polyester',
+        );
+      }
+    });
+
     it('composes a clamped, truncated filter-only notice as clamp, guidance, then mirror sentence', async () => {
       const edan = stubEdan();
 
@@ -905,6 +1113,293 @@ describe('Open Access mirror provenance (issue #66)', () => {
         expect(text(result)).not.toContain('Open Access mirror');
       },
     );
+  });
+
+  describe('smithsonian_get_media images mode on mirrored records (issue #83)', () => {
+    /**
+     * Mirror-served images-mode output as the release before the `media` input wrote it, byte
+     * for byte: `structuredContent` as an object whose key order is its JSON, and the
+     * `content[]` text.
+     */
+    const RELEASED: Array<[name: string, input: object, structured: object, text: string]> = [
+      [
+        'every image of nasm_A19820121000',
+        { id: 'nasm_A19820121000' },
+        {
+          record_id: 'nasm_A19820121000',
+          title: 'Missile, Cruise, Air-launched, Flight Test, AGM-86B ALCM',
+          is_cc0: true,
+          cc0_image_count: 2,
+          images: [
+            {
+              media_id: 'NASM-A19820121000-NASM2019-00593',
+              is_cc0: true,
+              alt_text: 'Metallic gray flight test model with US AIR FORCE inscription',
+              description:
+                'Flight test model #2 of cruise missile designed to be air-launched from B-52 and B1B bombers.',
+              thumbnail_url:
+                'https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593_thumb',
+              screen_url:
+                'https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593_screen',
+              high_res_jpeg: {
+                url: 'https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593.jpg',
+                width: 8272,
+                height: 6200,
+              },
+              high_res_tiff: {
+                url: 'https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593.tif',
+                width: 8272,
+                height: 6200,
+              },
+            },
+            {
+              media_id: 'NASM-A19820121000cp17',
+              is_cc0: true,
+              description:
+                'Flight test model #2 of cruise missile designed to be air-launched from B-52 and B1B bombers.',
+              thumbnail_url: 'https://ids.si.edu/ids/download?id=NASM-A19820121000cp17_thumb',
+              screen_url: 'https://ids.si.edu/ids/download?id=NASM-A19820121000cp17_screen',
+              high_res_jpeg: {
+                url: 'https://ids.si.edu/ids/deliveryService?id=NASM-A19820121000cp17',
+              },
+            },
+          ],
+          sources: ['oa_mirror'],
+          mirror_snapshot: SNAPSHOT,
+        },
+        [
+          '# Media: Missile, Cruise, Air-launched, Flight Test, AGM-86B ALCM',
+          '**ID:** `nasm_A19820121000` | **Object CC0:** Yes',
+          '**Images:** 2 of 2 CC0 image(s)',
+          '',
+          '### Image: NASM-A19820121000-NASM2019-00593',
+          '**CC0:** Yes',
+          '**Alt:** Metallic gray flight test model with US AIR FORCE inscription',
+          '**Description:** Flight test model #2 of cruise missile designed to be air-launched from B-52 and B1B bombers.',
+          '**Thumbnail:** ![Thumbnail](<https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593_thumb>)',
+          '**Screen:** [Screen size](<https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593_screen>)',
+          '**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593.jpg>) (8272×6200px)',
+          '**TIFF:** [Archival TIFF](<https://ids.si.edu/ids/download?id=NASM-A19820121000-NASM2019-00593.tif>) (8272×6200px)',
+          '### Image: NASM-A19820121000cp17',
+          '**CC0:** Yes',
+          '**Description:** Flight test model #2 of cruise missile designed to be air-launched from B-52 and B1B bombers.',
+          '**Thumbnail:** ![Thumbnail](<https://ids.si.edu/ids/download?id=NASM-A19820121000cp17_thumb>)',
+          '**Screen:** [Screen size](<https://ids.si.edu/ids/download?id=NASM-A19820121000cp17_screen>)',
+          '**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/deliveryService?id=NASM-A19820121000cp17>)',
+          '',
+          '',
+          '**Sources:** `oa_mirror`',
+          `**Mirror snapshot:** \`${SNAPSHOT}\``,
+        ].join('\n'),
+      ],
+      [
+        'a truncated page of hac_FJP.1987.074',
+        { id: 'hac_FJP.1987.074', start: 0, limit: 1 },
+        {
+          record_id: 'hac_FJP.1987.074',
+          title: 'Bouquet holder, flowers and leaves motif, curlicue handle',
+          is_cc0: true,
+          cc0_image_count: 2,
+          images: [
+            {
+              media_id: 'SG-FJP-1987-074_001',
+              is_cc0: true,
+              thumbnail_url: 'https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001_thumb',
+              screen_url: 'https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001_screen',
+              high_res_jpeg: {
+                url: 'https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001.jpg',
+                width: 2993,
+                height: 4084,
+              },
+              high_res_tiff: {
+                url: 'https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001.tif',
+                width: 2993,
+                height: 4084,
+              },
+            },
+          ],
+          truncated: true,
+          shown: 1,
+          cap: 1,
+          truncationCeiling: 2,
+          notice:
+            '2 CC0 images; this page shows 1 from start 0. Retrieve the next page with start: 1, or omit limit to return every remaining image.',
+          sources: ['oa_mirror'],
+          mirror_snapshot: SNAPSHOT,
+        },
+        [
+          '# Media: Bouquet holder, flowers and leaves motif, curlicue handle',
+          '**ID:** `hac_FJP.1987.074` | **Object CC0:** Yes',
+          '**Images:** 1 of 2 CC0 image(s)',
+          '',
+          '### Image: SG-FJP-1987-074_001',
+          '**CC0:** Yes',
+          '**Thumbnail:** ![Thumbnail](<https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001_thumb>)',
+          '**Screen:** [Screen size](<https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001_screen>)',
+          '**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001.jpg>) (2993×4084px)',
+          '**TIFF:** [Archival TIFF](<https://ids.si.edu/ids/download?id=SG-FJP-1987-074_001.tif>) (2993×4084px)',
+          '',
+          '',
+          '**Sources:** `oa_mirror`',
+          `**Mirror snapshot:** \`${SNAPSHOT}\``,
+          '**truncated:** true',
+          '**shown:** 1',
+          '**cap:** 1',
+          '**truncationCeiling:** 2',
+          '> 2 CC0 images; this page shows 1 from start 0. Retrieve the next page with start: 1, or omit limit to return every remaining image.',
+        ].join('\n'),
+      ],
+      [
+        'no_media on dpo_3d_200085',
+        { id: 'dpo_3d_200085' },
+        {
+          error: {
+            code: -32001,
+            message: 'Object "dpo_3d_200085" has no digitized online media.',
+            data: {
+              record_id: 'dpo_3d_200085',
+              title: 'Homo neanderthalensis',
+              reason: 'no_media',
+              recovery: {
+                hint: 'The physical object may not have been digitized. Use smithsonian_search_objects to find similar objects with media.',
+              },
+            },
+          },
+        },
+        [
+          'Error: Object "dpo_3d_200085" has no digitized online media.',
+          '',
+          'Recovery: The physical object may not have been digitized. Use smithsonian_search_objects to find similar objects with media.',
+          '',
+          '(reason no_media)',
+        ].join('\n'),
+      ],
+    ];
+
+    beforeEach(() => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage(), t.reader);
+    });
+
+    it.each(RELEASED)(
+      '%s, media omitted, is byte-identical to the release on both surfaces',
+      async (_name, input, structured, expected) => {
+        const edan = stubEdan();
+
+        const result = await runToolContract(smithsonianGetMedia, input as never);
+
+        expect(edan.fetchMock).not.toHaveBeenCalled();
+        expect(JSON.stringify(result.structuredContent)).toBe(JSON.stringify(structured));
+        expect(text(result)).toBe(expected);
+      },
+    );
+
+    it.each(RELEASED)(
+      '%s, media "images", is byte-identical to the release on both surfaces',
+      async (_name, input, structured, expected) => {
+        const edan = stubEdan();
+
+        const result = await runToolContract(smithsonianGetMedia, {
+          ...input,
+          media: 'images',
+        } as never);
+
+        expect(edan.fetchMock).not.toHaveBeenCalled();
+        expect(JSON.stringify(result.structuredContent)).toBe(JSON.stringify(structured));
+        expect(text(result)).toBe(expected);
+      },
+    );
+
+    const NO_IMAGES_HINT =
+      'This object\'s online media is 3d_voyager, none of it images. Call smithsonian_get_media { id: "dpo_3d_200122", media: "3d" } for its 3D model files.';
+
+    it.each([
+      ['mirror-served', true],
+      ['live', false],
+    ])(
+      'fails dpo_3d_200122 no_images on a %s read, naming the media "3d" call on both surfaces',
+      async (_name, mirrored) => {
+        if (!mirrored) initSmithsonianService({} as AppConfig, createInMemoryStorage());
+        const edan = stubEdan();
+
+        const result = await runToolContract(smithsonianGetMedia, { id: 'dpo_3d_200122' });
+
+        expect(edan.requests('content')).toHaveLength(mirrored ? 0 : 1);
+        const error = errorOf(result);
+        expect(error.data?.reason).toBe('no_images');
+        expect(error.data?.recovery?.hint).toBe(NO_IMAGES_HINT);
+        expect(text(result)).toContain(`Recovery: ${NO_IMAGES_HINT}`);
+        expect(text(result)).toContain('(reason no_images)');
+      },
+    );
+
+    it('returns the same dpo_3d_200122 models from a mirror-served read as from a live one', async () => {
+      const mirrored = stubEdan();
+      const fromMirror = await runToolContract(smithsonianGetMedia, {
+        id: 'dpo_3d_200122',
+        media: '3d',
+      });
+      expect(mirrored.fetchMock).not.toHaveBeenCalled();
+
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      const live = stubEdan();
+      const fromLive = await runToolContract(smithsonianGetMedia, {
+        id: 'dpo_3d_200122',
+        media: '3d',
+      });
+      expect(live.requests('content')).toHaveLength(1);
+
+      const { sources, mirror_snapshot, ...served } = fromMirror.structuredContent as Record<
+        string,
+        unknown
+      >;
+      expect(sources).toEqual(['oa_mirror']);
+      expect(mirror_snapshot).toBe(SNAPSHOT);
+      expect(served).toStrictEqual(fromLive.structuredContent);
+      expect((served.models as Array<{ files: unknown[] }>)[0]?.files).toHaveLength(7);
+      expect(text(fromMirror)).toContain(text(fromLive));
+    });
+
+    it('returns the dpo_3d_200122 package and its seven files on both surfaces from a live read', async () => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      const edan = stubEdan();
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: 'dpo_3d_200122',
+        media: '3d',
+      });
+
+      expect(edan.requests('content')).toHaveLength(1);
+      expect(result.isError).toBeFalsy();
+      const answer = result.structuredContent as {
+        cc0_image_count: number;
+        cc0_model_count: number;
+        images: unknown[];
+        models: Array<{
+          media_id: string;
+          viewer_url?: string;
+          files: Array<{ url: string; filename?: string; size_bytes?: number }>;
+        }>;
+      };
+      expect(answer).toMatchObject({ cc0_image_count: 0, cc0_model_count: 1, images: [] });
+      const model = answer.models[0];
+      expect(model?.media_id).toBe('3d_package:c0bc58e6-b172-4543-ad58-50261aea523c');
+      expect(model?.files).toHaveLength(7);
+      expect(model?.files.find((f) => f.filename === 'TYCHO-print_ready.zip')).toMatchObject({
+        category: 'Watertight',
+        file_type: 'zip',
+        model_file_type: 'stl',
+        units: 'm',
+        draco_compressed: false,
+        size_bytes: 25027679,
+      });
+      const rendered = text(result);
+      expect(rendered).toContain('### Model: 3d_package:c0bc58e6-b172-4543-ad58-50261aea523c');
+      expect(rendered).toContain(`**Viewer:** [Voyager 3D viewer](<${model?.viewer_url}>)`);
+      for (const file of model?.files ?? []) {
+        expect(rendered).toContain(`- [${file.filename}](<${file.url}>)`);
+        expect(rendered).toContain(`Size: ${file.size_bytes} bytes`);
+      }
+    });
   });
 
   describe('advertised outputSchema', () => {
@@ -1003,8 +1498,7 @@ describe('Open Access mirror provenance (issue #66)', () => {
           'taxonomy',
           'coordinates',
           'makers',
-          'materials',
-          'dimensions',
+          'physical_description',
           'place',
           'culture',
           'topics',
@@ -1012,6 +1506,7 @@ describe('Open Access mirror provenance (issue #66)', () => {
           'exhibitions',
           'on_view',
           'current_exhibitions',
+          'sets',
           'credit_line',
           'identifiers',
           'object_rights',
@@ -1023,7 +1518,17 @@ describe('Open Access mirror provenance (issue #66)', () => {
       ],
       [
         'smithsonian_get_media',
-        ['record_id', 'title', 'is_cc0', 'cc0_image_count', 'images', ...PAGE_ENRICHMENT, 'error'],
+        [
+          'record_id',
+          'title',
+          'is_cc0',
+          'cc0_image_count',
+          'images',
+          'cc0_model_count',
+          'models',
+          ...PAGE_ENRICHMENT,
+          'error',
+        ],
       ],
     ])(
       '%s advertises exactly sources and mirror_snapshot beyond its own keys, both optional',
@@ -1049,6 +1554,30 @@ describe('Open Access mirror provenance (issue #66)', () => {
       expect(
         Object.keys(advertised.get('smithsonian_list_terms')?.properties ?? {}).sort(),
       ).toEqual(['field', 'terms', 'total', 'labels', ...PAGE_ENRICHMENT, 'error'].sort());
+    });
+
+    it('smithsonian_get_media keeps the release required list; models and cc0_model_count are optional (issue #83)', () => {
+      const schema = advertised.get('smithsonian_get_media');
+      const success = schema?.anyOf?.find((branch) => branch.not !== undefined);
+
+      expect(success?.required).toEqual([
+        'record_id',
+        'title',
+        'is_cc0',
+        'cc0_image_count',
+        'images',
+      ]);
+      expect(schema?.properties.cc0_model_count).toMatchObject({ type: 'number' });
+      expect(schema?.properties.models).toMatchObject({
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['media_id', 'is_cc0', 'files'],
+          properties: {
+            files: { type: 'array', items: { type: 'object', required: ['url'] } },
+          },
+        },
+      });
     });
   });
 });

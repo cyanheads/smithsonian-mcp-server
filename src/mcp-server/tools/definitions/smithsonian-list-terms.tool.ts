@@ -51,7 +51,7 @@ export const smithsonianListTerms = tool('smithsonian_list_terms', {
       .string()
       .optional()
       .describe(
-        'Case-insensitive substring filter on the term vocabulary — resolve a filter value (e.g. "greek") to its exact controlled-vocabulary term(s). For unit_code the substring also matches each code\'s museum name, so "National Air and Space" resolves to "NASM".',
+        'Case-insensitive substring filter on the term vocabulary — resolve a filter value (e.g. "greek") to its exact controlled-vocabulary term(s). For unit_code it also matches each code\'s museum name and the names a unit also goes by (National Museum of Natural History for the NMNH divisions, Freer Gallery of Art and Arthur M. Sackler Gallery for NMAA, Cooper-Hewitt, National Design Museum for CHNDM and CHSDM), ignoring a leading "Smithsonian", "&" versus "and", apostrophe style, and hyphens versus spaces, so "Smithsonian National Air & Space Museum" resolves to "NASM".',
       ),
   }),
 

@@ -23,7 +23,7 @@ const ServerConfigSchema = z.object({
     .min(0)
     .default(3600)
     .describe(
-      "Seconds to cache each indexed field's term vocabulary. The upstream /terms endpoint ignores paging and always returns the full set (place is ~114k terms / 3.2 MB), so every uncached call re-downloads it. Terms are a controlled vocabulary with no session-scale freshness requirement. 0 disables caching.",
+      "Seconds to cache each indexed field's term vocabulary. The upstream /terms endpoint ignores paging and always returns the full set (place is ~114k terms / 3.2 MB), so every uncached call re-downloads it. Terms are a controlled vocabulary with no session-scale freshness requirement. 0 disables the cache and the sharing of concurrent cold reads of one field.",
     ),
   searchCacheTtlSeconds: z.coerce
     .number()

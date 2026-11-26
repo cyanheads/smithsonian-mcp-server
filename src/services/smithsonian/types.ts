@@ -7,8 +7,28 @@
 // Raw API response shapes (upstream sparsity-aware — all fields optional except core IDs)
 // ---------------------------------------------------------------------------
 
+/**
+ * One entry of a 3D file's `attributes[]`. Records lay the entries out differently — one object
+ * carrying every key, `FILE_SIZE` in an entry of its own, or one key per entry — and no key
+ * repeats with a different value, so the entries merge.
+ */
+export interface RawModelFileAttributes {
+  DRACO_COMPRESSED?: boolean;
+  /** Bytes. */
+  FILE_SIZE?: number;
+  FILE_TYPE?: string;
+  MODEL_FILE_TYPE?: string;
+  UNITS?: string;
+}
+
 export interface RawMediaResource {
+  /** A `3d_voyager` file's format, size, and units. */
+  attributes?: RawModelFileAttributes[];
+  /** A `3d_voyager` file's tier, as the catalog spells it (`Low resolution`, `Watertight`, …). */
+  category?: string;
   dimensions?: string;
+  /** A `3d_voyager` file's download name. */
+  filename?: string;
   height?: number;
   label?: string;
   url?: string;
@@ -58,9 +78,13 @@ export interface RawFreetext {
   identifier?: RawFreetextEntry[];
   name?: RawFreetextEntry[];
   notes?: RawFreetextEntry[];
+  /** Where Smithsonian Institution Archives records file their rights, in place of `objectRights`. */
+  objectRight?: RawFreetextEntry[];
   objectRights?: RawFreetextEntry[];
   physicalDescription?: RawFreetextEntry[];
   place?: RawFreetextEntry[];
+  /** The collections, departments, galleries, and exhibitions the catalog files a record under. */
+  setName?: RawFreetextEntry[];
   topic?: RawFreetextEntry[];
 }
 
@@ -225,7 +249,6 @@ export interface FullObject {
   current_exhibitions: Array<{ building?: string; room?: string; title?: string }>;
   dates: Array<{ label: string; value: string }>;
   description?: string;
-  dimensions: string[];
   exhibitions: Array<{ name: string; building?: string }>;
   /** Same rule as {@link ObjectSummary.holding_museum_name}. */
   holding_museum_name?: string;
@@ -238,7 +261,6 @@ export interface FullObject {
   indexed: IndexedFilterValues;
   is_cc0: boolean;
   makers: Array<{ role: string; name: string }>;
-  materials: string[];
   media_summary: {
     count: number;
     cc0_image_count: number;
@@ -248,16 +270,27 @@ export interface FullObject {
   };
   museum_name: string;
   notes: Array<{ label: string; content: string }>;
+  /**
+   * Every `objectRights` statement, then every `objectRight` statement, in catalog order, joined
+   * with `; `. Absent when neither key has one.
+   */
   object_rights?: string;
   /**
    * `indexedStructured.onPhysicalExhibit`: true for `"Yes"`, false for `"No"`, absent when the
    * record carries no flag, which says nothing about display.
    */
   on_view?: boolean;
+  /**
+   * Every `physicalDescription` entry with content, in catalog order, under its own label:
+   * materials, measurements, specimen attributes, and storage locations alike, unsorted.
+   */
+  physical_description: Array<{ label: string; value: string }>;
   place: Array<{ label: string; value: string }>;
   record_id: string;
   record_link?: string;
   scientific_names: string[];
+  /** Every `setName` entry with content, in catalog order, under its own label. */
+  sets: Array<{ label: string; value: string }>;
   taxonomy?: Partial<Record<'kingdom' | 'phylum' | 'class' | 'order' | 'family', string[]>>;
   title: string;
   topics: string[];
@@ -271,7 +304,7 @@ export interface MediaResolution {
 }
 
 /**
- * A media item smithsonian_get_media does not deliver: one whose `type` is set and
+ * A media item smithsonian_get_media does not return in images mode: one whose `type` is set and
  * is not `Images` (3D packages, scanned books, document viewers, PDFs). Exactly the
  * items the image selection leaves out, so the two partition `online_media.media[]`.
  */
@@ -291,6 +324,32 @@ export interface ImageItem {
   media_id: string;
   screen_url?: string;
   thumbnail_url?: string;
+}
+
+/**
+ * One downloadable file a `3d_voyager` package lists. Every field but `url` is the catalog's own
+ * value as written, spelling variants included (`Full resolution`, `Full_resolution`; `glb`,
+ * `GLB`), and absent when the catalog gives none.
+ */
+export interface ModelFile {
+  category?: string;
+  draco_compressed?: boolean;
+  /** The container format; a `zip` holds the mesh `model_file_type` names. */
+  file_type?: string;
+  filename?: string;
+  model_file_type?: string;
+  size_bytes?: number;
+  units?: string;
+  url: string;
+}
+
+/** A `3d_voyager` package: one Voyager scene and the model files it lists, in catalog order. */
+export interface ModelPackage {
+  files: ModelFile[];
+  is_cc0: boolean;
+  media_id: string;
+  thumbnail_url?: string;
+  viewer_url?: string;
 }
 
 /**

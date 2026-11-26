@@ -858,86 +858,186 @@ describe('SmithsonianService', () => {
       ]);
     });
 
-    it('excludes Dimensions-labeled physicalDescription entries from materials (issue #9)', () => {
-      // Real freetext shape of nasm_A19740798000: a "Materials" entry alongside a
-      // "Dimensions" entry. The measurement must land in `dimensions` only, never
-      // duplicated into `materials`.
-      const svc = makeService();
-      const raw: RawEDAN = {
-        title: 'Command Module',
-        unitCode: 'NASM',
+    it('keeps every date, place, and identifier with content, in catalog order, under its own label or the fallback', () => {
+      const full = makeService().toFullObject({
         content: {
-          descriptiveNonRepeating: { record_ID: 'nasm_A19740798000' },
           freetext: {
-            physicalDescription: [
-              {
-                label: 'Materials',
-                content:
-                  'Command Module: Aluminum alloy, stainless steel, and titanium structures.',
-              },
-              {
-                label: 'Dimensions',
-                content: 'Overall: 12 ft. 10 in. wide x 34 ft. 2 in. deep (391.16 x 1041.4cm)',
-              },
+            date: [
+              { label: 'Date', content: '1903' },
+              { content: 'ca. 1900' },
+              { label: 'Accession Date', content: '' },
+              { label: 'Date', content: '1903' },
+            ],
+            place: [{ label: 'Place of Origin', content: 'Dayton, Ohio' }, { content: 'Ohio' }],
+            identifier: [
+              { label: 'Inventory Number', content: 'A19610048000' },
+              { content: 'A1961' },
+              { label: 'Empty' },
             ],
           },
         },
-      };
-      const full = svc.toFullObject(raw);
-      expect(full.materials).toEqual([
-        'Command Module: Aluminum alloy, stainless steel, and titanium structures.',
+      });
+      expect(full.dates).toStrictEqual([
+        { label: 'Date', value: '1903' },
+        { label: 'Date', value: 'ca. 1900' },
+        { label: 'Date', value: '1903' },
       ]);
-      expect(full.dimensions).toEqual([
-        'Overall: 12 ft. 10 in. wide x 34 ft. 2 in. deep (391.16 x 1041.4cm)',
+      expect(full.place).toStrictEqual([
+        { label: 'Place of Origin', value: 'Dayton, Ohio' },
+        { label: 'Place', value: 'Ohio' },
+      ]);
+      expect(full.identifiers).toStrictEqual([
+        { label: 'Inventory Number', value: 'A19610048000' },
+        { label: 'Identifier', value: 'A1961' },
+      ]);
+      expect(makeService().toFullObject({})).toMatchObject({
+        dates: [],
+        place: [],
+        identifiers: [],
+      });
+    });
+
+    it('takes credit_line from the first creditLine entry with content, absent when none', () => {
+      const full = makeService().toFullObject({
+        content: {
+          freetext: {
+            creditLine: [
+              { label: 'Credit Line', content: '' },
+              { label: 'Credit Line', content: 'Deposited by the Estate of Orville Wright' },
+              { label: 'Credit Line', content: 'Second line' },
+            ],
+          },
+        },
+      });
+      expect(full.credit_line).toBe('Deposited by the Estate of Orville Wright');
+      expect(makeService().toFullObject({})).not.toHaveProperty('credit_line');
+    });
+
+    it('keeps the one rights statement of nasm_A19610048000 as object_rights "CC0" (issue #82)', () => {
+      const full = makeService().toFullObject({
+        content: {
+          freetext: { objectRights: [{ label: 'Restrictions & Rights', content: 'CC0' }] },
+        },
+      });
+      expect(full.object_rights).toBe('CC0');
+    });
+
+    /** A record whose only free-text block is `freetext.physicalDescription`. */
+    const physical = (physicalDescription: Array<{ label?: string; content?: string }>) =>
+      makeService().toFullObject({ content: { freetext: { physicalDescription } } });
+
+    it('labels each specimen entry of nmnhvz_7453723 as the catalog does, repeats kept (issue #79)', () => {
+      // As /content returns it (2026-11-26): measurements, preparations, and sex, none of them
+      // a material.
+      const full = physical([
+        { label: 'Length - Total', content: '335 mm' },
+        { label: 'Length - Tail', content: '143 mm' },
+        { label: 'Length - Tail', content: '36 mm' },
+        { label: 'Preparation', content: 'Skin' },
+        { label: 'Preparation', content: 'Skull' },
+        { label: 'Sex', content: 'Male' },
+      ]);
+      expect(full.physical_description).toStrictEqual([
+        { label: 'Length - Total', value: '335 mm' },
+        { label: 'Length - Tail', value: '143 mm' },
+        { label: 'Length - Tail', value: '36 mm' },
+        { label: 'Preparation', value: 'Skin' },
+        { label: 'Preparation', value: 'Skull' },
+        { label: 'Sex', value: 'Male' },
+      ]);
+      expect(full).not.toHaveProperty('materials');
+      expect(full).not.toHaveProperty('dimensions');
+    });
+
+    it('keeps the three Materials and then five Dimensions entries of nasm_A19610048000 in order', () => {
+      const full = physical([
+        { label: 'Materials', content: 'Airframe: Wood' },
+        { label: 'Materials', content: 'Fabric Covering: Muslin' },
+        { label: 'Materials', content: 'Engine Crankcase: Aluminum' },
+        { label: 'Dimensions', content: 'Wingspan: 12.3 m (40 ft 4 in)' },
+        { label: 'Dimensions', content: 'Length: 6.4 m (21 ft 1 in)' },
+        { label: 'Dimensions', content: 'Height: 2.8 m (9 ft 4 in)' },
+        { label: 'Dimensions', content: 'Weight: Empty, 274 kg (605 lb)' },
+        { label: 'Dimensions', content: 'Gross, 341 kg (750 lb)' },
+      ]);
+      expect(full.physical_description).toStrictEqual([
+        { label: 'Materials', value: 'Airframe: Wood' },
+        { label: 'Materials', value: 'Fabric Covering: Muslin' },
+        { label: 'Materials', value: 'Engine Crankcase: Aluminum' },
+        { label: 'Dimensions', value: 'Wingspan: 12.3 m (40 ft 4 in)' },
+        { label: 'Dimensions', value: 'Length: 6.4 m (21 ft 1 in)' },
+        { label: 'Dimensions', value: 'Height: 2.8 m (9 ft 4 in)' },
+        { label: 'Dimensions', value: 'Weight: Empty, 274 kg (605 lb)' },
+        { label: 'Dimensions', value: 'Gross, 341 kg (750 lb)' },
       ]);
     });
 
-    it('excludes Dimensions from materials with a Medium label; Measurements also routes to dimensions', () => {
-      // Real freetext shape of chndm_1901-39-3309: a "Medium" entry (material prose)
-      // alongside a "Dimensions" entry. "Measurements" is the other live dimension
-      // label observed in sampling — it must route to dimensions too.
-      const svc = makeService();
-      const raw: RawEDAN = {
-        title: 'Drawing',
-        unitCode: 'CHNDM',
-        content: {
-          descriptiveNonRepeating: { record_ID: 'chndm_1901-39-3309' },
-          freetext: {
-            physicalDescription: [
-              { label: 'Medium', content: 'Brush and gouache on paperboard' },
-              { label: 'Dimensions', content: '40.8 x 25.8 cm (16 1/16 x 10 3/16 in.)' },
-              { label: 'Measurements', content: 'Framed: 50 x 35 cm' },
-            ],
-          },
+    it('lists a measurement once, under its own label, never beside a material copy (issues #9, #79)', () => {
+      // nasm_A19740798000: a "Materials" entry alongside a "Dimensions" entry.
+      const full = physical([
+        {
+          label: 'Materials',
+          content: 'Command Module: Aluminum alloy, stainless steel, and titanium structures.',
         },
-      };
-      const full = svc.toFullObject(raw);
-      expect(full.materials).toEqual(['Brush and gouache on paperboard']);
-      expect(full.dimensions).toEqual([
-        '40.8 x 25.8 cm (16 1/16 x 10 3/16 in.)',
-        'Framed: 50 x 35 cm',
+        {
+          label: 'Dimensions',
+          content: 'Overall: 12 ft. 10 in. wide x 34 ft. 2 in. deep (391.16 x 1041.4cm)',
+        },
+      ]);
+      expect(full.physical_description).toStrictEqual([
+        {
+          label: 'Materials',
+          value: 'Command Module: Aluminum alloy, stainless steel, and titanium structures.',
+        },
+        {
+          label: 'Dimensions',
+          value: 'Overall: 12 ft. 10 in. wide x 34 ft. 2 in. deep (391.16 x 1041.4cm)',
+        },
       ]);
     });
 
-    it('keeps a generic "Physical Description" entry in materials — no label signal to route it', () => {
-      // Inherent limit: a generic "Physical Description" label carries no signal to
-      // separate material prose from measurement prose, so it stays in materials.
-      const svc = makeService();
-      const raw: RawEDAN = {
-        title: 'Generic',
-        unitCode: 'NMAH',
-        content: {
-          descriptiveNonRepeating: { record_ID: 'nmah_GENERIC' },
-          freetext: {
-            physicalDescription: [
-              { label: 'Physical Description', content: 'Carved oak, 30 cm tall' },
-            ],
-          },
-        },
-      };
-      const full = svc.toFullObject(raw);
-      expect(full.materials).toEqual(['Carved oak, 30 cm tall']);
-      expect(full.dimensions).toEqual([]);
+    it.each([
+      [
+        'siris_arc_291804',
+        [{ label: 'Physical description', content: '4.38 x 2.59' }],
+        [{ label: 'Physical description', value: '4.38 x 2.59' }],
+      ],
+      [
+        'fbr_item_MODSI1181',
+        [
+          { label: 'Collection name', content: 'Waldo L. Schmitt Papers, 1907-1978' },
+          { label: 'Physical Description', content: '1 field book' },
+          { label: 'Physical Location', content: 'Smithsonian Institution Archives' },
+          { label: 'Sublocation', content: 'Box 79 Folder 10' },
+        ],
+        [
+          { label: 'Collection name', value: 'Waldo L. Schmitt Papers, 1907-1978' },
+          { label: 'Physical Description', value: '1 field book' },
+          { label: 'Physical Location', value: 'Smithsonian Institution Archives' },
+          { label: 'Sublocation', value: 'Box 79 Folder 10' },
+        ],
+      ],
+    ])('keeps the generic and storage labels of %s as written', (_, entries, expected) => {
+      expect(physical(entries).physical_description).toStrictEqual(expected);
+    });
+
+    it('drops an entry without content and labels one without a label "Physical description"', () => {
+      expect(
+        physical([
+          { label: 'Medium', content: '' },
+          { label: 'Dimensions' },
+          { content: '30 cm tall' },
+          { label: 'Medium', content: 'Carved oak' },
+        ]).physical_description,
+      ).toStrictEqual([
+        { label: 'Physical description', value: '30 cm tall' },
+        { label: 'Medium', value: 'Carved oak' },
+      ]);
+    });
+
+    it('returns physical_description [] for a record without the block', () => {
+      expect(makeService().toFullObject({}).physical_description).toStrictEqual([]);
+      expect(physical([]).physical_description).toStrictEqual([]);
     });
   });
 
@@ -1309,6 +1409,237 @@ describe('SmithsonianService', () => {
       expect(result.terms).toEqual([]);
       expect(result.total).toBe(0);
     });
+  });
+
+  describe('museum-name lookup (issue #80)', () => {
+    /** The live 48-code `unit_code` vocabulary, in its upstream order. */
+    const UNIT_CODES =
+      'AAA AAG ACAH ACM ACMA CFCHFOLKLIFE CHNDM CHSDM EEPA FBR FSA HAC HMSG HSFA NAA NASM NASMAC NMAA NMAAHC NMAH NMAI NMAIA NMAfA NMNHANTHRO NMNHBIRDS NMNHBOTANY NMNHEDUCATION NMNHENTO NMNHFISHES NMNHHERPS NMNHINV NMNHMAMMALS NMNHMINSCI NMNHPALEO NPG NPM NPMA NZP OCIO_DPO3D OFEO-SG SAAM SAAMPAIK SI SIA SIL SILAF SILNMAHTL SLA_SRO'.split(
+        ' ',
+      );
+
+    /** The eleven National Museum of Natural History division codes. */
+    const NMNH = UNIT_CODES.filter((code) => code.startsWith('NMNH'));
+
+    /** Every name the vocabulary's codes carry, as `labels` and `museum_name` give them. */
+    const LABELS = {
+      AAA: 'Archives of American Art',
+      AAG: 'Archives of American Gardens',
+      ACAH: 'Archives Center, National Museum of American History',
+      ACM: 'Anacostia Community Museum',
+      ACMA: 'Anacostia Community Museum Archives',
+      CFCHFOLKLIFE: 'Ralph Rinzler Folklife Archives and Collections',
+      CHNDM: 'Cooper Hewitt, Smithsonian Design Museum',
+      CHSDM: 'Cooper Hewitt, Smithsonian Design Museum',
+      EEPA: 'Eliot Elisofon Photographic Archives',
+      FBR: 'Smithsonian Field Book Project',
+      HAC: 'Smithsonian Gardens',
+      HMSG: 'Hirshhorn Museum and Sculpture Garden',
+      HSFA: 'Human Studies Film Archives',
+      NAA: 'National Anthropological Archives',
+      NASM: 'National Air and Space Museum',
+      NMAA: 'National Museum of Asian Art',
+      NMAAHC: 'National Museum of African American History and Culture',
+      NMAH: 'National Museum of American History',
+      NMAI: 'National Museum of the American Indian',
+      NMAfA: 'National Museum of African Art',
+      NMNHANTHRO: 'NMNH - Anthropology Dept.',
+      NMNHBIRDS: 'NMNH - Vertebrate Zoology - Birds Division',
+      NMNHBOTANY: 'NMNH - Botany Dept.',
+      NMNHEDUCATION: 'NMNH - Education & Outreach',
+      NMNHENTO: 'NMNH - Entomology Dept.',
+      NMNHFISHES: 'NMNH - Vertebrate Zoology - Fishes Division',
+      NMNHHERPS: 'NMNH - Vertebrate Zoology - Herpetology Division',
+      NMNHINV: 'NMNH - Invertebrate Zoology Dept.',
+      NMNHMAMMALS: 'NMNH - Vertebrate Zoology - Mammals Division',
+      NMNHMINSCI: 'NMNH - Mineral Sciences Dept.',
+      NMNHPALEO: 'NMNH - Paleobiology Dept.',
+      NPG: 'National Portrait Gallery',
+      NPM: 'National Postal Museum',
+      NPMA: 'National Postal Museum Archives',
+      NZP: "Smithsonian's National Zoo & Conservation Biology Institute",
+      OCIO_DPO3D:
+        'Office of the Chief Information Officer - Digitization Program Office (3D digitization)',
+      'OFEO-SG': 'Smithsonian Gardens',
+      SAAM: 'Smithsonian American Art Museum',
+      SI: 'Smithsonian Institution',
+      SIA: 'Smithsonian Institution Archives',
+      SIL: 'Smithsonian Libraries',
+      SILAF: 'Smithsonian Libraries',
+      SILNMAHTL: 'Smithsonian Libraries',
+      SLA_SRO: 'Smithsonian Libraries and Archives',
+    };
+
+    /** The vocabulary's codes, in order, whose label contains `text` in any case. */
+    const labelledWith = (text: string) =>
+      UNIT_CODES.filter(
+        (code) =>
+          Object.hasOwn(LABELS, code) &&
+          LABELS[code as keyof typeof LABELS].toLowerCase().includes(text),
+      );
+
+    /** A service whose warm `unit_code` vocabulary is the live one. */
+    async function warmService(): Promise<SmithsonianService> {
+      mockFetch({ status: 200, responseCode: 1, response: { terms: UNIT_CODES } });
+      const svc = makeService();
+      await lookup(svc, undefined);
+      return svc;
+    }
+
+    function lookup(svc: SmithsonianService, contains: string | undefined, field = 'unit_code') {
+      return svc.listTerms(
+        { field, start: 0, rows: 100, ...(contains !== undefined && { contains }) },
+        makeTenantContext(),
+        startCallDeadline(),
+      );
+    }
+
+    it.each([
+      ['Natural History', NMNH],
+      ['National Museum of Natural History', NMNH],
+      ['Smithsonian National Museum of Natural History', NMNH],
+      ['  natural HISTORY ', NMNH],
+      ['Freer', ['NMAA']],
+      ['Sackler', ['NMAA']],
+      ['Freer Gallery of Art', ['NMAA']],
+      ['Arthur M. Sackler Gallery', ['NMAA']],
+      ['National Design Museum', ['CHNDM', 'CHSDM']],
+      ['Cooper-Hewitt', ['CHNDM', 'CHSDM']],
+      ['Smithsonian National Air and Space Museum', ['NASM']],
+      ['Air & Space', ['NASM']],
+      ['Smithsonian National Museum of American History', ['ACAH', 'NMAH']],
+      ["Smithsonian's National Museum of the American Indian", ['NMAI']],
+      ['Smithsonian National Portrait Gallery', ['NPG']],
+      ['Smithsonian National Postal Museum', ['NPM', 'NPMA']],
+      ["Smithsonian's Hirshhorn Museum and Sculpture Garden", ['HMSG']],
+      ['Smithsonian National Museum of African American History and Culture', ['NMAAHC']],
+      ['Smithsonian National Museum of Asian Art', ['NMAA']],
+      ['Smithsonian Anacostia Community Museum', ['ACM', 'ACMA']],
+      ['National Zoo and Conservation Biology Institute', ['NZP']],
+      ['Smithsonian’s National Zoo', ['NZP']],
+      ['Smithsonian‘s National Zoo', ['NZP']],
+      ['Cooper Hewitt, National Design Museum', ['CHNDM', 'CHSDM']],
+      ['Cooper-Hewitt, Smithsonian Design Museum', ['CHNDM', 'CHSDM']],
+      ['Education and Outreach', ['NMNHEDUCATION']],
+    ])('resolves %j to exactly its codes', async (contains, codes) => {
+      const result = await lookup(await warmService(), contains);
+
+      expect(result.terms).toEqual(codes);
+      expect(result.total).toBe(codes.length);
+      expect(result.labels).toStrictEqual(
+        Object.fromEntries(codes.map((code) => [code, LABELS[code as keyof typeof LABELS]])),
+      );
+    });
+
+    it.each([
+      ['Air and Space', ['NASM']],
+      ['NMNH', NMNH],
+      ['OFEO-SG', ['OFEO-SG']],
+      ['nasm', ['NASM', 'NASMAC']],
+      [
+        'Smithsonian',
+        [
+          'CHNDM',
+          'CHSDM',
+          'FBR',
+          'HAC',
+          'NZP',
+          'OFEO-SG',
+          'SAAM',
+          'SI',
+          'SIA',
+          'SIL',
+          'SILAF',
+          'SILNMAHTL',
+          'SLA_SRO',
+        ],
+      ],
+      // A leading "Smithsonian" with no word after it is the whole needle, not a prefix to drop.
+      ['Smithsonian ', labelledWith('smithsonian')],
+      ['Smithsonian’s', labelledWith("smithsonian's")],
+      ['Latino', []],
+      ['  ', []],
+      // Text that folds to nothing still matches the label as written, as before.
+      [' ', UNIT_CODES.filter((code) => code in LABELS)],
+      ['-', [...NMNH, 'OCIO_DPO3D', 'OFEO-SG']],
+      ['- ', [...NMNH, 'OCIO_DPO3D']],
+    ])('keeps %j to the codes it matched before', async (contains, codes) => {
+      const result = await lookup(await warmService(), contains);
+
+      expect(result.terms).toEqual(codes);
+      expect(result.total).toBe(codes.length);
+    });
+
+    it('leaves labels and museum_name byte-identical for every code', async () => {
+      const svc = await warmService();
+
+      expect((await lookup(svc, undefined)).labels).toStrictEqual(LABELS);
+      for (const [code, name] of Object.entries(LABELS)) {
+        expect(svc.toSummary({ unitCode: code }).museum_name, code).toBe(name);
+      }
+    });
+
+    it('leaves contains on other fields a plain case-insensitive substring', async () => {
+      mockFetch({
+        status: 200,
+        responseCode: 1,
+        response: { terms: ['Greek & Roman', 'Greek and Roman', 'Cooper-Hewitt', 'Smithsonian'] },
+      });
+      const svc = makeService();
+
+      expect((await lookup(svc, 'greek and roman', 'culture')).terms).toEqual(['Greek and Roman']);
+      expect((await lookup(svc, 'Cooper Hewitt', 'culture')).terms).toEqual([]);
+      expect((await lookup(svc, 'Smithsonian Cooper-Hewitt', 'culture')).terms).toEqual([]);
+    });
+
+    it.each([
+      ['one long line', (n: number) => `${'§1 x'.repeat(n / 4)}\ny`],
+      ['breaks throughout', (n: number) => '  \r\n'.repeat(n / 4)],
+      ['an ampersand run', (n: number) => '&'.repeat(n)],
+      ['a hyphen and space run', (n: number) => '- '.repeat(n / 2)],
+      ['curly apostrophes', (n: number) => '‘’'.repeat(n / 2)],
+      ['repeated Smithsonian prefixes', (n: number) => "Smithsonian's ".repeat(n / 20)],
+      ['a digit run', (n: number) => '1'.repeat(n)],
+    ])(
+      'matches caller-sized contains text within CPU bounds: %s',
+      async (_shape, make) => {
+        const svc = await warmService();
+        /** CPU microseconds per lookup of `contains`, the least of three batches. */
+        const cpuPerLookup = async (contains: string) => {
+          let least = Number.POSITIVE_INFINITY;
+          for (let batch = 0; batch < 3; batch++) {
+            const start = process.threadCpuUsage();
+            let runs = 0;
+            let cpu = 0;
+            // Accumulate measurable CPU even on clocks that report coarse ticks.
+            do {
+              expect((await lookup(svc, contains)).total).toBe(0);
+              runs++;
+              const elapsed = process.threadCpuUsage(start);
+              cpu = elapsed.user + elapsed.system;
+              expect(cpu).toBeLessThan(1_000_000);
+            } while (cpu < 20_000);
+            expect(cpu / runs).toBeLessThan(100_000);
+            least = Math.min(least, cpu / runs);
+          }
+          return least;
+        };
+        const baseline = make(5_000);
+        let leastGrowth = Number.POSITIVE_INFINITY;
+        // Doubling, each size held to the absolute bound before the next runs; the baseline is
+        // timed again beside each size, so a core switch between the two never reads as growth.
+        for (let size = 10_000; size <= 320_000; size *= 2) {
+          const growth = (await cpuPerLookup(make(size))) / (await cpuPerLookup(baseline));
+          if (size === 320_000) leastGrowth = growth;
+        }
+        for (let pass = 0; pass < 3 && leastGrowth >= 256; pass++) {
+          const large = await cpuPerLookup(make(320_000));
+          leastGrowth = Math.min(leastGrowth, large / (await cpuPerLookup(baseline)));
+        }
+        expect(leastGrowth).toBeLessThan(256);
+      },
+      0,
+    );
   });
 
   describe('describeTerm()', () => {
@@ -1907,6 +2238,539 @@ describe('SmithsonianService', () => {
     });
   });
 
+  describe('concurrent cold vocabulary reads (issue #77)', () => {
+    const TERMS = ['Aztecs', 'Maya'];
+    const PAGE = { terms: TERMS, total: 2 };
+    const EXPIRED = { code: JsonRpcErrorCode.Timeout, reason: 'retry_deadline_exceeded' };
+    const CANCELLED = {
+      code: JsonRpcErrorCode.RequestCancelled,
+      message: 'The request was cancelled before the upstream response arrived.',
+    };
+
+    /** The 200 `/terms/{field}` answers on success. */
+    function termsAnswer(): Upstream {
+      return upstream({ status: 200, responseCode: 1, response: { terms: TERMS } });
+    }
+
+    /** The `/terms/{field}` requests the stub received. */
+    function requestsFor(up: ReturnType<typeof stubUpstream>, field: string): number {
+      return up.fetchMock.mock.calls.filter(([input]) =>
+        new URL(input).pathname.endsWith(`/terms/${field}`),
+      ).length;
+    }
+
+    /** A deadline `ms` from now, as a tool handler holds it partway through its call. */
+    function deadlineIn(ms: number): CallDeadline {
+      return (Date.now() + ms) as CallDeadline;
+    }
+
+    /** One read of a field's first page, the read `smithsonian_list_terms` makes. */
+    function read(
+      svc: SmithsonianService,
+      ctx = makeTenantContext(),
+      field = 'culture',
+      deadline: CallDeadline = startCallDeadline(),
+    ) {
+      return svc.listTerms({ field, start: 0, rows: 50 }, ctx, deadline);
+    }
+
+    /** A context cancelled through `signal`, from a controller the test owns. */
+    function cancellable(signal: AbortSignal) {
+      return createMockContext({ tenantId: 'test-tenant', signal });
+    }
+
+    /**
+     * Resolves once every call started this turn has reached the load: a macrotask runs
+     * after every pending microtask, and nothing on the way to the load waits on a timer.
+     */
+    function joined(): Promise<void> {
+      return new Promise((resolve) => setImmediate(resolve));
+    }
+
+    /** The error code and reason a call rejected with. */
+    async function failureOf(pending: Promise<unknown>) {
+      const error = (await pending.catch((e: unknown) => e)) as {
+        code?: number;
+        data?: { reason?: string };
+      };
+      return { code: error.code, reason: error.data?.reason };
+    }
+
+    /** The error code and message a call rejected with. */
+    async function cancellationOf(pending: Promise<unknown>) {
+      const error = (await pending.catch((e: unknown) => e)) as { code?: number; message?: string };
+      return { code: error.code, message: error.message };
+    }
+
+    /** A store that passes `get` and `set` through to `store` except where `overrides` replaces one. */
+    function storeOver(
+      store: StorageService,
+      overrides: {
+        get?: (...args: Parameters<StorageService['get']>) => unknown;
+        set?: (...args: Parameters<StorageService['set']>) => unknown;
+      },
+    ): StorageService {
+      return {
+        get: (...args: Parameters<StorageService['get']>) => store.get(...args),
+        set: (...args: Parameters<StorageService['set']>) => store.set(...args),
+        ...overrides,
+      } as unknown as StorageService;
+    }
+
+    /**
+     * A store over `store` whose writes wait for `release()`: `written` resolves once a write
+     * has been issued.
+     */
+    function heldWrites(store: StorageService) {
+      const gate = Promise.withResolvers<void>();
+      const written = Promise.withResolvers<void>();
+      const held = storeOver(store, {
+        set: async (...args) => {
+          written.resolve();
+          await gate.promise;
+          return await store.set(...args);
+        },
+      });
+      return { store: held, written: written.promise, release: () => gate.resolve() };
+    }
+
+    /** A service reading the terms TTL as 0 — the config memo is module-level. */
+    async function uncachedService(): Promise<SmithsonianService> {
+      vi.stubEnv('SMITHSONIAN_TERMS_CACHE_TTL_SECONDS', '0');
+      vi.resetModules();
+      const { SmithsonianService: FreshService } = await import(
+        '@/services/smithsonian/smithsonian-service.js'
+      );
+      return new FreshService(createInMemoryStorage());
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('sends one /terms request for five concurrent cold reads of a field, stored before any of them resumes', async () => {
+      const writes = heldWrites(createInMemoryStorage());
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const svc = makeService(writes.store);
+      let settled = 0;
+
+      const pending = Array.from({ length: 5 }, () => read(svc).finally(() => settled++));
+      await held.arrived(1);
+      await joined();
+      held.release();
+      await writes.written;
+      await joined();
+      // The response is in, the write is not: no read has resumed.
+      expect(settled).toBe(0);
+      writes.release();
+
+      for (const page of await Promise.all(pending)) expect(page).toEqual(PAGE);
+      expect(requestsFor(up, 'culture')).toBe(1);
+      // Warm reads, concurrent or not, send nothing.
+      await Promise.all([read(svc), read(svc)]);
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it('rejects every caller of a load whose store write fails with that error, and the next read sends a new request', async () => {
+      const store = createInMemoryStorage();
+      const failure = new Error('The store refused the write.');
+      let refusing = true;
+      const up = stubUpstream({ terms: () => termsAnswer() });
+      const svc = makeService(
+        storeOver(store, {
+          set: async (...args) => {
+            if (refusing) throw failure;
+            return await store.set(...args);
+          },
+        }),
+      );
+
+      const calls = [
+        read(svc),
+        svc.describeTerm('culture', 'Maya', makeTenantContext(), startCallDeadline()),
+      ].map((call) => call.catch((e: unknown) => e));
+      for (const call of calls) expect(await call).toBe(failure);
+      expect(requestsFor(up, 'culture')).toBe(1);
+
+      refusing = false;
+      expect(await read(svc)).toEqual(PAGE);
+      expect(requestsFor(up, 'culture')).toBe(2);
+    });
+
+    it('rejects a cold read whose signal has already aborted RequestCancelled, sending no request', async () => {
+      const up = stubUpstream({ terms: () => termsAnswer() });
+      const svc = makeService();
+
+      expect(await cancellationOf(read(svc, cancellable(AbortSignal.abort())))).toEqual(CANCELLED);
+      expect(requestsFor(up, 'culture')).toBe(0);
+      expect(await read(svc)).toEqual(PAGE);
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it('rejects a caller arriving already aborted at once, counted as no waiter on the load in progress', async () => {
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const svc = makeService();
+      const starting = new AbortController();
+
+      const first = cancellationOf(read(svc, cancellable(starting.signal)));
+      await held.arrived(1);
+      await joined();
+      let lateSettled = false;
+      const late = cancellationOf(read(svc, cancellable(AbortSignal.abort()))).finally(() => {
+        lateSettled = true;
+      });
+      await joined();
+
+      expect(lateSettled).toBe(true);
+      expect(await late).toEqual(CANCELLED);
+      expect(held.signals).toHaveLength(1);
+      // The caller that started the load is its only waiter, so its leaving aborts the request.
+      starting.abort();
+      expect(held.signals[0]?.aborted).toBe(true);
+      expect(await first).toEqual(CANCELLED);
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it('joins a load in progress without reading storage, so a slow store cannot answer with the miss from before its write', async () => {
+      const store = createInMemoryStorage();
+      // A remote store's latency: each read answers with what it saw when issued, once released.
+      const reads: Array<() => void> = [];
+      const slow = storeOver(store, {
+        get: (...args) => {
+          const seen = store.get(...args);
+          return new Promise((resolve) => reads.push(() => resolve(seen)));
+        },
+      });
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const svc = makeService(slow);
+
+      const first = read(svc);
+      await joined();
+      reads[0]?.();
+      await held.arrived(1);
+      const second = read(svc);
+      await joined();
+      held.release();
+      expect(await first).toEqual(PAGE);
+      for (const release of reads.slice(1)) release();
+
+      expect(await second).toEqual(PAGE);
+      expect(reads).toHaveLength(1);
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it('shares the request between cold list_terms calls and a cold recovery lookup on the field', async () => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({
+        terms: held.route,
+        search: () => upstream(makeSearchResponse({ rows: [], rowCount: 0 })),
+      });
+
+      const listed = Array.from({ length: 3 }, () =>
+        runToolContract(
+          smithsonianListTerms,
+          { field: 'culture' },
+          { context: makeTenantContext() },
+        ),
+      );
+      const recovered = runToolContract(
+        smithsonianSearchObjects,
+        { query: 'aircraft', filters: { culture: 'Atlantis' } },
+        { context: makeTenantContext() },
+      );
+      await held.arrived(1);
+      await joined();
+      held.release();
+
+      for (const result of await Promise.all(listed)) {
+        expect(result.structuredContent).toMatchObject(PAGE);
+      }
+      expect((await recovered).structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_filter' } },
+      });
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it('rejects a cancelled caller alone with RequestCancelled; the request runs on and its result is stored', async () => {
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const svc = makeService();
+      const leaving = new AbortController();
+
+      const cancelled = cancellationOf(read(svc, cancellable(leaving.signal)));
+      const listed = read(svc);
+      const described = svc.describeTerm(
+        'culture',
+        'Maya',
+        makeTenantContext(),
+        startCallDeadline(),
+      );
+      await held.arrived(1);
+      await joined();
+      leaving.abort();
+
+      expect(await cancelled).toEqual(CANCELLED);
+      expect(held.signals[0]?.aborted).toBe(false);
+      held.release();
+      expect(await listed).toEqual(PAGE);
+      expect(await described).toMatchObject({ indexed: true });
+      await read(svc);
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it('rejects a caller whose deadline passes Timeout alone; the request outlives the deadline of the caller that started it', async () => {
+      vi.useFakeTimers();
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const svc = makeService();
+
+      const early = failureOf(read(svc, makeTenantContext(), 'culture', deadlineIn(5_000)));
+      const late = read(svc, makeTenantContext(), 'culture', deadlineIn(50_000));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(await early).toEqual(EXPIRED);
+      expect(held.signals).toHaveLength(1);
+      expect(held.signals[0]?.aborted).toBe(false);
+      held.release();
+      expect(await late).toEqual(PAGE);
+      await read(svc);
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it('aborts the request the moment the last caller cancels, and the next read sends a new one', async () => {
+      const held = heldRoute(termsAnswer());
+      let route: Route = held.route;
+      const up = stubUpstream({ terms: (init: RequestInit) => route(init) });
+      const svc = makeService();
+      const first = new AbortController();
+      const second = new AbortController();
+
+      const calls = [first, second].map((c) => cancellationOf(read(svc, cancellable(c.signal))));
+      await held.arrived(1);
+      await joined();
+      first.abort();
+      expect(held.signals[0]?.aborted).toBe(false);
+      second.abort();
+      expect(held.signals[0]?.aborted).toBe(true);
+      for (const call of calls) expect(await call).toEqual(CANCELLED);
+
+      route = () => termsAnswer();
+      expect(await read(svc)).toEqual(PAGE);
+      expect(requestsFor(up, 'culture')).toBe(2);
+    });
+
+    it("aborts the request at the last caller's deadline, not the first's", async () => {
+      vi.useFakeTimers();
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const svc = makeService();
+
+      const first = failureOf(read(svc, makeTenantContext(), 'culture', deadlineIn(5_000)));
+      const second = failureOf(read(svc, makeTenantContext(), 'culture', deadlineIn(8_000)));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(await first).toEqual(EXPIRED);
+      expect(held.signals[0]?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(await second).toEqual(EXPIRED);
+      expect(held.signals[0]?.aborted).toBe(true);
+      expect(requestsFor(up, 'culture')).toBe(1);
+    });
+
+    it.each([
+      [
+        'HTTP 429',
+        () => upstream({ error: { code: 'OVER_RATE_LIMIT', message: 'Try again later.' } }, 429),
+        { code: JsonRpcErrorCode.RateLimited },
+        4,
+      ],
+      [
+        'a 200 without response.terms',
+        () => upstream({ status: 200, responseCode: 1, response: { message: 'no terms' } }),
+        { code: JsonRpcErrorCode.ServiceUnavailable, reason: 'upstream_unavailable' },
+        4,
+      ],
+      [
+        'a refused key',
+        () =>
+          new Response(
+            JSON.stringify({ error: { code: 'API_KEY_INVALID', message: 'Invalid api_key.' } }),
+            {
+              status: 403,
+              statusText: 'Forbidden',
+              headers: { 'Content-Type': 'application/json' },
+            },
+          ) as unknown as Upstream,
+        { code: JsonRpcErrorCode.Forbidden, reason: 'api_key_rejected' },
+        1,
+      ],
+      [
+        'HTTP 404, the host not routing',
+        () => upstream("404 Not Found: Requested route ('api.si.edu') does not exist.", 404),
+        { code: JsonRpcErrorCode.ServiceUnavailable, reason: 'upstream_unavailable' },
+        4,
+      ],
+      [
+        'HTTP 500',
+        () => upstream('Internal Server Error', 500),
+        { code: JsonRpcErrorCode.ServiceUnavailable },
+        4,
+      ],
+      [
+        'HTTP 503',
+        () => upstream('Service Unavailable', 503),
+        { code: JsonRpcErrorCode.ServiceUnavailable },
+        4,
+      ],
+    ] as const)(
+      'rejects every caller of a load failing with %s, from one ladder of requests, and stores nothing',
+      async (_label, failing, expected, attempts) => {
+        let answer: () => Upstream = failing;
+        const up = stubUpstream({ terms: () => answer() });
+        const svc = makeService();
+        vi.useFakeTimers();
+
+        const calls = [
+          read(svc),
+          svc.describeTerm('culture', 'Maya', makeTenantContext(), startCallDeadline()),
+        ].map(failureOf);
+        await vi.runAllTimersAsync();
+        for (const call of calls) expect(await call).toMatchObject(expected);
+        expect(requestsFor(up, 'culture')).toBe(attempts);
+
+        vi.useRealTimers();
+        answer = termsAnswer;
+        expect(await read(svc)).toEqual(PAGE);
+        expect(requestsFor(up, 'culture')).toBe(attempts + 1);
+      },
+    );
+
+    it('falls a recovery lookup sharing a failed load back to an unchecked membership', async () => {
+      initSmithsonianService({} as AppConfig, createInMemoryStorage());
+      let rateLimited = true;
+      const up = stubUpstream({
+        terms: () =>
+          rateLimited
+            ? upstream({ error: { code: 'OVER_RATE_LIMIT', message: 'Try again later.' } }, 429)
+            : termsAnswer(),
+        search: () => upstream(makeSearchResponse({ rows: [], rowCount: 0 })),
+      });
+      vi.useFakeTimers();
+
+      const listed = runToolContract(
+        smithsonianListTerms,
+        { field: 'culture' },
+        { context: makeTenantContext() },
+      );
+      const recovered = runToolContract(
+        smithsonianSearchObjects,
+        { query: 'aircraft', filters: { culture: 'Atlantis' } },
+        { context: makeTenantContext() },
+      );
+      await vi.runAllTimersAsync();
+
+      expect((await listed).structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.RateLimited },
+      });
+      expect((await recovered).structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_filter' } },
+      });
+      expect(requestsFor(up, 'culture')).toBe(4);
+
+      vi.useRealTimers();
+      rateLimited = false;
+      const retried = await runToolContract(
+        smithsonianListTerms,
+        { field: 'culture' },
+        { context: makeTenantContext() },
+      );
+      expect(retried.structuredContent).toMatchObject(PAGE);
+      expect(requestsFor(up, 'culture')).toBe(5);
+    });
+
+    it('never shares a request across fields or tenants, and each load fills its own tenant', async () => {
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const svc = makeService();
+      const calls = () => [
+        read(svc, createMockContext({ tenantId: 'tenant-a' })),
+        read(svc, createMockContext({ tenantId: 'tenant-b' })),
+        read(svc, createMockContext({ tenantId: 'tenant-a' }), 'place'),
+      ];
+
+      const pending = calls();
+      await held.arrived(3);
+      held.release();
+      await Promise.all(pending);
+      expect(requestsFor(up, 'culture')).toBe(2);
+      expect(requestsFor(up, 'place')).toBe(1);
+
+      await Promise.all(calls());
+      expect(up.fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it("at a TTL of 0 sends each read on its caller's own signal, sharing and storing nothing", async () => {
+      const svc = await uncachedService();
+      const held = heldRoute(termsAnswer());
+      const up = stubUpstream({ terms: held.route });
+      const leaving = new AbortController();
+
+      const cancelled = failureOf(read(svc, cancellable(leaving.signal)));
+      const staying = read(svc);
+      await held.arrived(2);
+      leaving.abort();
+
+      expect(held.signals[0]?.aborted).toBe(true);
+      expect(held.signals[1]?.aborted).toBe(false);
+      expect(await cancelled).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      held.release();
+      expect(await staying).toEqual(PAGE);
+      await read(svc);
+      expect(requestsFor(up, 'culture')).toBe(3);
+    });
+
+    it("at a TTL of 0, a body read cut by the caller's deadline throws Timeout, not a bare DOMException", async () => {
+      const svc = await uncachedService();
+      // The headers arrive at once; the body sends its first bytes and stalls until the
+      // request signal aborts, as a real body does.
+      stubUpstream({
+        terms: (init: RequestInit) => {
+          const signal = init.signal as AbortSignal;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"response":{"terms":["Azt'));
+                signal.addEventListener('abort', () => controller.error(signal.reason), {
+                  once: true,
+                });
+              },
+            }),
+            { status: 200 },
+          ) as unknown as Upstream;
+        },
+      });
+      vi.useFakeTimers();
+      let settled = false;
+
+      const outcome = read(svc, makeTenantContext(), 'culture', deadlineIn(5_000))
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(settled).toBe(true);
+      expect(((await outcome) as Error).name).not.toBe('TimeoutError');
+      expect(await failureOf(Promise.reject(await outcome))).toEqual(EXPIRED);
+    });
+  });
+
   describe('markup and entities in projected text (issue #49)', () => {
     /** A record whose title and Summary note carry the upstream markup verbatim. */
     function makeMarkupRecord(): RawEDAN {
@@ -2189,14 +3053,18 @@ function upstream(body: unknown, status = 200) {
 }
 
 type Upstream = ReturnType<typeof upstream>;
-type Endpoint = 'search' | 'content';
+type Endpoint = 'search' | 'content' | 'terms';
 type Route = (init: RequestInit) => Upstream | Promise<Upstream>;
 
-/** The endpoint a request addresses, read from its path: `…/search` or `…/content/{id}`. */
+/**
+ * The endpoint a request addresses, read from its path: `…/search`, `…/content/{id}`, or
+ * `…/terms/{field}`.
+ */
 function endpointOf(input: string): Endpoint | undefined {
   const segments = new URL(input).pathname.split('/');
   if (segments.at(-1) === 'search') return 'search';
   if (segments.at(-2) === 'content') return 'content';
+  if (segments.at(-2) === 'terms') return 'terms';
   return undefined;
 }
 
@@ -3417,6 +4285,156 @@ describe('toFullObject on_view and current_exhibitions (issue #74)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// toFullObject sets — the catalog's freetext.setName (issue #81)
+// ---------------------------------------------------------------------------
+
+describe('toFullObject sets (issue #81)', () => {
+  const svc = new SmithsonianService(createInMemoryStorage());
+  const withSets = (
+    setName: Array<{ label?: string; content?: string }>,
+    indexedStructured?: Record<string, unknown>,
+  ) => svc.toFullObject({ content: { freetext: { setName }, indexedStructured } } as RawEDAN);
+
+  it('returns the three sets of nasm_A19610048000 in catalog order, beside its building-only venue', () => {
+    // As /content returns it (2026-11-26): the gallery and exhibition sit only in setName.
+    const full = withSets(
+      [
+        { label: 'See more items in', content: 'National Air and Space Museum Collection' },
+        { label: 'Location', content: 'National Air and Space Museum in Washington, DC' },
+        { label: 'Exhibition', content: 'Wright Brothers & The Invention of the Aerial Age' },
+      ],
+      { onPhysicalExhibit: ['Yes'], exhibition: [{ building: 'NASM' }] },
+    );
+    expect(full.sets).toStrictEqual([
+      { label: 'See more items in', value: 'National Air and Space Museum Collection' },
+      { label: 'Location', value: 'National Air and Space Museum in Washington, DC' },
+      { label: 'Exhibition', value: 'Wright Brothers & The Invention of the Aerial Age' },
+    ]);
+    expect(full.on_view).toBe(true);
+    expect(full.current_exhibitions).toStrictEqual([{ building: 'NASM' }]);
+  });
+
+  it('keeps the repeated labels of NMAI_58046, its On View entry last', () => {
+    expect(
+      withSets([
+        { label: 'See related items', content: 'Iñupiaq' },
+        { label: 'See related items', content: 'Containers and Vessels' },
+        {
+          label: 'On View',
+          content: 'NMAI, New York, NY: Infinity of Nations, Arctic & Subarctic',
+        },
+      ]).sets,
+    ).toStrictEqual([
+      { label: 'See related items', value: 'Iñupiaq' },
+      { label: 'See related items', value: 'Containers and Vessels' },
+      { label: 'On View', value: 'NMAI, New York, NY: Infinity of Nations, Arctic & Subarctic' },
+    ]);
+  });
+
+  it('relays "Location: Currently not on view" of npg_NPG.91.126.5.A and still omits on_view', () => {
+    const full = withSets([
+      { label: 'See more items in', content: 'National Portrait Gallery Collection' },
+      { label: 'Location', content: 'Currently not on view' },
+    ]);
+    expect(full.sets).toStrictEqual([
+      { label: 'See more items in', value: 'National Portrait Gallery Collection' },
+      { label: 'Location', value: 'Currently not on view' },
+    ]);
+    expect(full).not.toHaveProperty('on_view');
+  });
+
+  it('returns sets [] for a record without setName (siris_sil_10451)', () => {
+    const full = svc.toFullObject({
+      content: {
+        freetext: {
+          physicalDescription: [
+            {
+              label: 'Physical description',
+              content: '79 p illustrations, facsimile, maps, plan 24 cm',
+            },
+          ],
+        },
+      },
+    });
+    expect(full.sets).toStrictEqual([]);
+    expect(svc.toFullObject({}).sets).toStrictEqual([]);
+  });
+
+  it('drops an entry without content and labels one without a label "Set"', () => {
+    expect(
+      withSets([
+        { label: 'On View', content: '' },
+        { label: 'Department' },
+        { content: 'Painting and Sculpture' },
+        { label: 'See more items in', content: 'Smithsonian American Art Museum Collection' },
+      ]).sets,
+    ).toStrictEqual([
+      { label: 'Set', value: 'Painting and Sculpture' },
+      { label: 'See more items in', value: 'Smithsonian American Art Museum Collection' },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// toFullObject object_rights — every rights statement, under either key (issue #82)
+// ---------------------------------------------------------------------------
+
+describe('toFullObject object_rights (issue #82)', () => {
+  const svc = new SmithsonianService(createInMemoryStorage());
+  type Entries = Array<{ label?: string; content?: string }>;
+  const rights = (objectRights?: Entries, objectRight?: Entries) =>
+    svc.toFullObject({
+      content: {
+        freetext: {
+          ...(objectRights && { objectRights }),
+          ...(objectRight && { objectRight }),
+        },
+      },
+    } as RawEDAN);
+
+  it('joins the two singular-key statements of the SIA record siris_arc_291804', () => {
+    const full = rights(undefined, [
+      { label: 'Restrictions & Rights', content: 'No access restrictions' },
+      { label: 'Restrictions & Rights', content: 'No Copyright – United States' },
+    ]);
+    expect(full.object_rights).toBe('No access restrictions; No Copyright – United States');
+  });
+
+  it('keeps the second statement of nmaahc_2019.26.2', () => {
+    const full = rights([
+      { label: 'Restrictions & Rights', content: 'Public domain' },
+      {
+        label: 'Restrictions & Rights',
+        content: 'Proper usage is the responsibility of the user.',
+      },
+    ]);
+    expect(full.object_rights).toBe(
+      'Public domain; Proper usage is the responsibility of the user.',
+    );
+  });
+
+  it('reads every objectRights entry, then every objectRight entry, skipping one without content', () => {
+    const full = rights(
+      [
+        { content: 'First' },
+        { label: 'Restrictions & Rights', content: '' },
+        { content: 'Second' },
+      ],
+      [{ label: 'Restrictions & Rights' }, { content: 'Third' }],
+    );
+    expect(full.object_rights).toBe('First; Second; Third');
+  });
+
+  it.each([
+    ['neither key', undefined, undefined],
+    ['only entries without content', [{ content: '' }], [{ label: 'Restrictions & Rights' }]],
+    ['two empty lists', [], []],
+  ])('omits object_rights for a record with %s', (_, objectRights, objectRight) => {
+    expect(rights(objectRights, objectRight)).not.toHaveProperty('object_rights');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // luceneFilter — the live API's term for each facet filter (issues #42, #74)
 // ---------------------------------------------------------------------------
 
@@ -4302,6 +5320,417 @@ describe('media_summary.non_image_media (issue #62)', () => {
     });
     expect(svc.toFullObject(imagesOnly).media_summary.non_image_media).toEqual([]);
   });
+});
+
+/** The `resources/` URL of `filename` in 3D package `uuid`. */
+const packageFile = (uuid: string, filename: string) =>
+  `https://3d-api.si.edu/content/document/3d_package:${uuid}/resources/${filename}`;
+
+const HESPEROCYON = '0b46b532-888e-419b-bb18-c6b8dd1cec6c';
+
+/** nmnhpaleobiology_13278478's one package: every attribute in one object per file. */
+function hesperocyonPackage(): RawMediaItem {
+  const file = (filename: string, category: string, fileType: string, model: string) => ({
+    url: packageFile(HESPEROCYON, filename),
+    name: 'Hesperocyon sp',
+    type: '3D mesh',
+    title: `Hesperocyon sp (${category} 3D mesh, ${model}, scale in m)`,
+    category,
+    filename,
+    attributes: [
+      {
+        UNITS: 'm',
+        FILE_TYPE: fileType,
+        MODEL_FILE_TYPE: model,
+        DRACO_COMPRESSED: filename.endsWith('_draco.glb'),
+        GLTF_STANDARDIZED: true,
+      },
+    ],
+  });
+  return {
+    id: `3d_package:${HESPEROCYON}`,
+    type: '3d_voyager',
+    usage: { access: 'CC0' },
+    content: `https://3d-api.si.edu/voyager/3d_package:${HESPEROCYON}`,
+    thumbnail: `https://3d-api.si.edu/content/document/3d_package:${HESPEROCYON}/Hesperocyon_sp-image-thumb.jpg`,
+    resources: [
+      file('Hesperocyon_sp-150k-4096_std.glb', 'Low resolution', 'glb', 'glb'),
+      file('Hesperocyon_sp-100k-2048_std_draco.glb', 'Low resolution', 'glb', 'glb'),
+      file('Hesperocyon_sp-100k-2048_std.usdz', 'iOS AR model', 'usdz', 'usdz'),
+      file('Hesperocyon_sp-full_resolution-obj_std.zip', 'Full resolution', 'zip', 'obj'),
+      file('Hesperocyon_sp-150k-4096-gltf_std.zip', 'Low resolution', 'zip', 'gltf'),
+      file('Hesperocyon_sp-150k-4096-obj_std.zip', 'Low resolution', 'zip', 'obj'),
+    ],
+  };
+}
+
+/** One record of `media`, counted as given. */
+const modelRecord = (media: RawMediaItem[]) =>
+  makeMediaRecord({ online_media: { mediaCount: media.length, media } });
+
+describe('toModelPackages() (issue #83)', () => {
+  it('reads every file of nmnhpaleobiology_13278478 from one combined attributes object', () => {
+    const file = (filename: string, category: string, file_type: string, model: string) => ({
+      url: packageFile(HESPEROCYON, filename),
+      filename,
+      category,
+      file_type,
+      model_file_type: model,
+      units: 'm',
+      draco_compressed: filename.endsWith('_draco.glb'),
+    });
+
+    expect(makeService().toModelPackages(modelRecord([hesperocyonPackage()]))).toStrictEqual([
+      {
+        media_id: `3d_package:${HESPEROCYON}`,
+        is_cc0: true,
+        viewer_url: `https://3d-api.si.edu/voyager/3d_package:${HESPEROCYON}`,
+        thumbnail_url: `https://3d-api.si.edu/content/document/3d_package:${HESPEROCYON}/Hesperocyon_sp-image-thumb.jpg`,
+        files: [
+          file('Hesperocyon_sp-150k-4096_std.glb', 'Low resolution', 'glb', 'glb'),
+          file('Hesperocyon_sp-100k-2048_std_draco.glb', 'Low resolution', 'glb', 'glb'),
+          file('Hesperocyon_sp-100k-2048_std.usdz', 'iOS AR model', 'usdz', 'usdz'),
+          file('Hesperocyon_sp-full_resolution-obj_std.zip', 'Full resolution', 'zip', 'obj'),
+          file('Hesperocyon_sp-150k-4096-gltf_std.zip', 'Low resolution', 'zip', 'gltf'),
+          file('Hesperocyon_sp-150k-4096-obj_std.zip', 'Low resolution', 'zip', 'obj'),
+        ],
+      },
+    ]);
+  });
+
+  it('reads FILE_SIZE from the entry dpo_3d_200122 splits it into (bulk fixture line)', () => {
+    const raw = OA_FIXTURE_LINES.map((line) => JSON.parse(line) as RawEDAN).find(
+      (r) => r.url === 'edanmdm:dpo_3d_200122',
+    );
+    const uuid = 'c0bc58e6-b172-4543-ad58-50261aea523c';
+
+    const [pkg, ...rest] = makeService().toModelPackages(raw ?? {});
+
+    expect(rest).toEqual([]);
+    expect(pkg?.files.map((f) => [f.filename, f.size_bytes])).toEqual([
+      ['TYCHO-100k-2048_std_draco.glb', 2567980],
+      ['TYCHO-full_resolution-obj_std.zip', 13577712],
+      ['TYCHO-150k-4096-gltf_std.zip', 8766870],
+      ['TYCHO-150k-4096_std.glb', 11107176],
+      ['TYCHO-print_ready.zip', 25027679],
+      ['TYCHO-100k-2048_std.usdz', 3541386],
+      ['TYCHO-150k-4096-obj_std.zip', 9214208],
+    ]);
+    expect(pkg?.files[0]).toStrictEqual({
+      url: packageFile(uuid, 'TYCHO-100k-2048_std_draco.glb'),
+      filename: 'TYCHO-100k-2048_std_draco.glb',
+      category: 'Low Resolution',
+      file_type: 'draco compressed glb',
+      model_file_type: 'draco compressed glb',
+      units: 'm',
+      draco_compressed: true,
+      size_bytes: 2567980,
+    });
+    expect(pkg?.files.at(-1)?.units).toBe('default');
+  });
+
+  it('reads one key per entry (dpo_3d_200016)', () => {
+    const uuid = '64ff5dbe-cf46-486e-8b3a-cb8e1fd7895c';
+    const raw = modelRecord([
+      {
+        id: `3d_package:${uuid}`,
+        type: '3d_voyager',
+        usage: { access: 'CC0' },
+        content: `https://3d-api.si.edu/voyager/3d_package:${uuid}`,
+        resources: [
+          {
+            url: packageFile(uuid, 'mpc_684-100k-web.glb'),
+            category: 'Low resolution',
+            filename: 'mpc_684-100k-web.glb',
+            attributes: [
+              { UNITS: 'mm' },
+              { MODEL_FILE_TYPE: 'glb' },
+              { FILE_TYPE: 'glb' },
+              { FILE_SIZE: 24283376 },
+            ],
+          },
+        ],
+      },
+    ]);
+
+    expect(makeService().toModelPackages(raw)[0]?.files).toStrictEqual([
+      {
+        url: packageFile(uuid, 'mpc_684-100k-web.glb'),
+        filename: 'mpc_684-100k-web.glb',
+        category: 'Low resolution',
+        file_type: 'glb',
+        model_file_type: 'glb',
+        units: 'mm',
+        size_bytes: 24283376,
+      },
+    ]);
+  });
+
+  it('gives url, filename, and size_bytes alone where nmah_213141 lists nothing else', () => {
+    const uuid = '9172faae-dbbe-424a-a9e7-56f4428a06dd';
+    const filename = 'lincoln_patent_model-full_resolution-obj_std.zip';
+    const raw = modelRecord([
+      { idsId: 'NMAH-2008-10155', type: 'Images', usage: { access: 'CC0' } },
+      {
+        id: `3d_package:${uuid}`,
+        type: '3d_voyager',
+        usage: { access: 'CC0' },
+        content: `https://3d-api.si.edu/voyager/3d_package:${uuid}`,
+        resources: [
+          {
+            url: packageFile(uuid, filename),
+            name: "Abraham Lincoln's Patent Model",
+            title: "Abraham Lincoln's Patent Model",
+            filename,
+            attributes: [{ FILE_SIZE: 623383950 }],
+          },
+        ],
+      },
+    ]);
+
+    expect(makeService().toModelPackages(raw)[0]?.files).toStrictEqual([
+      { url: packageFile(uuid, filename), filename, size_bytes: 623383950 },
+    ]);
+  });
+
+  it('lists no files for a package whose resources key is absent (dpo_3d_200017)', () => {
+    const uuid = '016ceecb-49ea-43e8-b629-c5a2f4ded297';
+    const raw = modelRecord([
+      {
+        id: `3d_package:${uuid}`,
+        type: '3d_voyager',
+        usage: { access: 'CC0' },
+        content: `https://3d-api.si.edu/voyager/3d_package:${uuid}`,
+        thumbnail: `https://3d-api.si.edu/content/document/3d_package:${uuid}/scene-image-thumb.jpg`,
+      },
+    ]);
+
+    expect(makeService().toModelPackages(raw)).toStrictEqual([
+      {
+        media_id: `3d_package:${uuid}`,
+        is_cc0: true,
+        viewer_url: `https://3d-api.si.edu/voyager/3d_package:${uuid}`,
+        thumbnail_url: `https://3d-api.si.edu/content/document/3d_package:${uuid}/scene-image-thumb.jpg`,
+        files: [],
+      },
+    ]);
+  });
+
+  it('passes spellings and upstream contradictions through as written (nmnhvz_7511097)', () => {
+    const uuid = 'a8ab02ba-bcae-470a-9df4-db1265b25905';
+    const attrs = (fileType: string, model: string, units = 'm') => [
+      { UNITS: units, FILE_TYPE: fileType, MODEL_FILE_TYPE: model, DRACO_COMPRESSED: false },
+    ];
+    const raw = modelRecord([
+      {
+        id: `3d_package:${uuid}`,
+        type: '3d_voyager',
+        usage: { access: 'CC0' },
+        resources: [
+          {
+            url: packageFile(uuid, 'a.glb'),
+            category: 'Full Resoluition',
+            attributes: attrs('draco compressed glb', 'draco compressed glb'),
+          },
+          {
+            url: packageFile(uuid, 'b.glb'),
+            category: 'Full_resolution',
+            attributes: attrs('GLB', 'GLB'),
+          },
+          {
+            url: packageFile(uuid, 'c.zip'),
+            category: 'Water_tight',
+            attributes: attrs('ZIP', 'udsz', 'in'),
+          },
+        ],
+      },
+    ]);
+
+    expect(
+      makeService()
+        .toModelPackages(raw)[0]
+        ?.files.map((f) => [
+          f.category,
+          f.file_type,
+          f.model_file_type,
+          f.units,
+          f.draco_compressed,
+        ]),
+    ).toEqual([
+      ['Full Resoluition', 'draco compressed glb', 'draco compressed glb', 'm', false],
+      ['Full_resolution', 'GLB', 'GLB', 'm', false],
+      ['Water_tight', 'ZIP', 'udsz', 'in', false],
+    ]);
+  });
+
+  it('settles a key from the first entry carrying it and leaves out values of the wrong kind', () => {
+    const raw = modelRecord([
+      {
+        id: '3d_package:quirks',
+        type: '3d_voyager',
+        usage: { access: 'CC0' },
+        resources: [
+          {
+            url: 'https://3d-api.si.edu/f/first-wins.glb',
+            attributes: [
+              { UNITS: 'mm', FILE_SIZE: 10, MODEL_FILE_TYPE: 'glb' },
+              {
+                UNITS: 'm',
+                FILE_SIZE: 20,
+                DRACO_COMPRESSED: true,
+                FILE_TYPE: 'draco compressed glb',
+                MODEL_FILE_TYPE: 'obj',
+              },
+              { DRACO_COMPRESSED: false, FILE_TYPE: 'zip', MODEL_FILE_TYPE: 'gltf' },
+            ],
+          },
+          {
+            url: 'https://3d-api.si.edu/f/wrong-kinds.glb',
+            filename: '',
+            category: '',
+            attributes: [
+              null,
+              'UNITS',
+              { UNITS: '', FILE_TYPE: 7, MODEL_FILE_TYPE: '', DRACO_COMPRESSED: 'true' },
+              { FILE_SIZE: '2567980' },
+              { FILE_SIZE: -1 },
+              { FILE_SIZE: 12.5 },
+            ] as never,
+          },
+          { url: 'https://3d-api.si.edu/f/not-an-array.glb', attributes: { UNITS: 'm' } as never },
+          { url: 'https://3d-api.si.edu/f/empty.glb', attributes: [] },
+        ],
+      },
+    ]);
+
+    expect(makeService().toModelPackages(raw)[0]?.files).toStrictEqual([
+      {
+        url: 'https://3d-api.si.edu/f/first-wins.glb',
+        file_type: 'draco compressed glb',
+        model_file_type: 'glb',
+        units: 'mm',
+        draco_compressed: true,
+        size_bytes: 10,
+      },
+      { url: 'https://3d-api.si.edu/f/wrong-kinds.glb' },
+      { url: 'https://3d-api.si.edu/f/not-an-array.glb' },
+      { url: 'https://3d-api.si.edu/f/empty.glb' },
+    ]);
+  });
+
+  it('drops a resource with no url and a package with no id', () => {
+    const raw = modelRecord([
+      {
+        type: '3d_voyager',
+        content: 'https://3d-api.si.edu/voyager/no-id',
+        usage: { access: 'CC0' },
+      },
+      {
+        id: '3d_package:kept',
+        type: '3d_voyager',
+        content: '',
+        thumbnail: '',
+        resources: [
+          { filename: 'orphan.glb' },
+          { url: '', filename: 'blank.glb' },
+          { url: 'https://3d-api.si.edu/f/x.glb' },
+        ],
+      },
+    ]);
+
+    expect(makeService().toModelPackages(raw)).toStrictEqual([
+      {
+        media_id: '3d_package:kept',
+        is_cc0: false,
+        files: [{ url: 'https://3d-api.si.edu/f/x.glb' }],
+      },
+    ]);
+  });
+
+  it('keeps non-CC0 packages with is_cc0 false, and only 3d_voyager items, in catalog order', () => {
+    const raw = modelRecord([
+      { id: '3d_package:a', type: '3d_voyager', usage: { access: 'CC0' } },
+      { id: 'media:img', idsId: 'IMG', type: 'Images', usage: { access: 'CC0' } },
+      { id: '3d_package:b', type: '3d_voyager', usage: { access: 'Usage Conditions Apply' } },
+      { id: 'media:book', type: 'Scanned books', content: 'https://doi.org/10.5479/x' },
+      { id: '3d_package:c', type: '3D_Voyager', usage: { access: 'CC0' } },
+      { id: '3d_package:d', type: '3d_voyager' },
+    ]);
+
+    expect(
+      makeService()
+        .toModelPackages(raw)
+        .map((p) => [p.media_id, p.is_cc0]),
+    ).toEqual([
+      ['3d_package:a', true],
+      ['3d_package:b', false],
+      ['3d_package:d', false],
+    ]);
+  });
+
+  it('lists every package that media_summary.non_image_media links, 49 of them beside 13 images (nmnhvz_7047834)', () => {
+    const images = Array.from({ length: 13 }, (_, i) => ({
+      idsId: `NMNH-IMG-${i}`,
+      type: 'Images',
+      usage: { access: 'CC0' },
+    }));
+    const packages = Array.from({ length: 49 }, (_, i) => ({
+      id: `3d_package:${i}`,
+      type: '3d_voyager',
+      content: `https://3d-api.si.edu/voyager/3d_package:${i}`,
+      usage: { access: 'CC0' },
+      resources: [
+        {
+          url: packageFile(`${i}`, `USNM395636_${i}.ply`),
+          category: 'Full resolution',
+          filename: `USNM395636_${i}.ply`,
+          attributes: [
+            { UNITS: 'mm' },
+            { MODEL_FILE_TYPE: 'ply' },
+            { FILE_TYPE: 'ply' },
+            { FILE_SIZE: 19025414 },
+          ],
+        },
+      ],
+    }));
+    const svc = makeService();
+    const raw = modelRecord([...images, ...packages]);
+
+    const models = svc.toModelPackages(raw);
+
+    expect(models).toHaveLength(49);
+    expect(models.map((p) => p.viewer_url)).toEqual(
+      svc.toFullObject(raw).media_summary.non_image_media.map((m) => m.url),
+    );
+    expect(models.every((p) => p.files.length === 1)).toBe(true);
+    expect(svc.toImageItems(raw)).toHaveLength(13);
+  });
+
+  it('is empty when the record has no media', () => {
+    expect(makeService().toModelPackages({})).toEqual([]);
+    expect(makeService().toModelPackages(modelRecord([]))).toEqual([]);
+  });
+
+  it.each(['edanmdm:dpo_3d_200122', 'edanmdm:dpo_3d_200016'])(
+    'reads the same packages from the stored doc of %s as from its full bulk line',
+    async (url) => {
+      const { decodeDoc, encodeDoc, trimRecord } = await import(
+        '@/services/smithsonian/oa-mirror.js'
+      );
+      const line = OA_FIXTURE_LINES.map((l) => JSON.parse(l) as Record<string, unknown>).find(
+        (l) => l.url === url,
+      );
+      expect(line).toBeDefined();
+      const svc = makeService();
+
+      const fromLine = svc.toModelPackages(line as RawEDAN);
+      const fromDoc = svc.toModelPackages(decodeDoc(encodeDoc(trimRecord(line ?? {}))));
+
+      expect(fromLine[0]?.files.length).toBeGreaterThan(0);
+      expect(fromLine[0]?.files.every((f) => f.size_bytes !== undefined && f.units)).toBe(true);
+      expect(fromDoc).toStrictEqual(fromLine);
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -15,8 +15,13 @@ import { loadClampSwitch } from '@/config/server-config.js';
 import { smithsonianGetMedia } from '@/mcp-server/tools/definitions/smithsonian-get-media.tool.js';
 import { noticeTrailer } from '@/mcp-server/tools/markdown-encoders.js';
 import * as svcModule from '@/services/smithsonian/smithsonian-service.js';
-import type { ImageItem, RawEDAN, RawMediaItem } from '@/services/smithsonian/types.js';
-import { codeSpans, headings, images, labelValues, links } from '../markdown-read-back.js';
+import type {
+  ImageItem,
+  ModelPackage,
+  RawEDAN,
+  RawMediaItem,
+} from '@/services/smithsonian/types.js';
+import { codeSpans, headings, images, items, labelValues, links } from '../markdown-read-back.js';
 import { textOf } from './tool-result.js';
 
 function makeCc0Raw(mediaCount = 1, isCC0 = true): RawEDAN {
@@ -97,6 +102,7 @@ describe('smithsonianGetMedia', () => {
           .mockReturnValue(
             branch === 'no_images' ? [] : [{ ...makeCc0Image(), is_cc0: branch !== 'not_cc0' }],
           ),
+        toModelPackages: vi.fn().mockReturnValue([]),
       } as unknown as svcModule.SmithsonianService);
       const result = await runToolContract(smithsonianGetMedia, { id: 'nasm_TEST001' });
       if (branch === 'success') {
@@ -170,6 +176,7 @@ describe('smithsonianGetMedia', () => {
       getContent: vi.fn().mockResolvedValue({ record: raw }),
       isCC0: vi.fn().mockReturnValue(true),
       toImageItems: vi.fn().mockReturnValue([]),
+      toModelPackages: vi.fn().mockReturnValue([]),
     } as unknown as svcModule.SmithsonianService);
 
     const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
@@ -185,10 +192,10 @@ describe('smithsonianGetMedia', () => {
     });
   });
 
-  it('no_images recovery hint names the media types present and routes to get_object', async () => {
+  it('no_images recovery hint names the media types present and routes a 3D package to media "3d" (issue #83)', async () => {
     // Real dpo_3d_200012 shape: a single 3d_voyager item. The hint has to name the
     // type the object DOES carry — a static hint can't, so it is built at the throw site.
-    const raw: RawEDAN = {
+    serveRecord({
       id: 'ld1-3d',
       title: 'Cassiopeia A Supernova Remnant',
       content: {
@@ -197,16 +204,11 @@ describe('smithsonianGetMedia', () => {
           metadata_usage: { access: 'CC0' },
           online_media: {
             mediaCount: 1,
-            media: [{ id: 'x', type: '3d_voyager', usage: { access: 'CC0' } }],
+            media: [{ id: '3d_package:x', type: '3d_voyager', usage: { access: 'CC0' } }],
           },
         },
       },
-    };
-    vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-      getContent: vi.fn().mockResolvedValue({ record: raw }),
-      isCC0: vi.fn().mockReturnValue(true),
-      toImageItems: vi.fn().mockReturnValue([]),
-    } as unknown as svcModule.SmithsonianService);
+    });
 
     const ctx = createMockContext({ errors: smithsonianGetMedia.errors });
     const input = smithsonianGetMedia.input.parse({ id: 'dpo_3d_200012' });
@@ -214,10 +216,9 @@ describe('smithsonianGetMedia', () => {
       () => null,
       (e: unknown) => e as { data?: { recovery?: { hint?: string } } },
     );
-    const hint = err?.data?.recovery?.hint ?? '';
-    expect(hint).toContain('3d_voyager');
-    expect(hint).toContain('smithsonian_get_object');
-    expect(hint).toContain('media_summary');
+    expect(err?.data?.recovery?.hint).toBe(
+      'This object\'s online media is 3d_voyager, none of it images. Call smithsonian_get_media { id: "dpo_3d_200012", media: "3d" } for its 3D model files.',
+    );
   });
 
   it('throws not_cc0 when object has images but none are CC0', async () => {
@@ -355,30 +356,36 @@ describe('smithsonianGetMedia', () => {
         }),
         isCC0: vi.fn().mockReturnValue(true),
         toImageItems: vi.fn().mockReturnValue([]),
+        toModelPackages: vi.fn().mockReturnValue([]),
       } as unknown as svcModule.SmithsonianService);
     }
 
     it('names non_image_media, not record_link, in the runtime hint on both surfaces', async () => {
-      // dpo_3d_200012 carries one 3d_voyager item and no record_link.
+      // siris_sil_893158 carries two Scanned books items and no record_link.
       stubService({
         online_media: {
-          mediaCount: 1,
-          media: [{ type: '3d_voyager', content: 'https://3d-api.si.edu/voyager/x' }],
+          mediaCount: 2,
+          media: [
+            { type: 'Scanned books', content: 'https://doi.org/10.5479/sil.893158.39088019035187' },
+            {
+              type: 'Scanned books',
+              content: 'https://biodiversitylibrary.org/bibliography/179335',
+            },
+          ],
         },
       });
-      const result = await runToolContract(smithsonianGetMedia, { id: 'dpo_3d_200012' });
+      const result = await runToolContract(smithsonianGetMedia, { id: 'siris_sil_893158' });
       const hint = (
         result.structuredContent as {
           error?: { data?: { reason?: string; recovery?: { hint?: string } } };
         }
       ).error?.data;
       expect(hint?.reason).toBe('no_images');
-      expect(hint?.recovery?.hint).toContain('3d_voyager');
-      expect(hint?.recovery?.hint).toContain(
-        'smithsonian_get_object { id: "dpo_3d_200012" } and read media_summary.non_image_media',
+      // The release's hint for media with no 3D package, unchanged.
+      expect(hint?.recovery?.hint).toBe(
+        'This object\'s online media is Scanned books, which smithsonian_get_media does not deliver. Call smithsonian_get_object { id: "siris_sil_893158" } and read media_summary.non_image_media for each item\'s link.',
       );
-      expect(hint?.recovery?.hint).not.toContain('record_link');
-      expect(textOf(result)).toContain('media_summary.non_image_media');
+      expect(textOf(result)).toContain(`Recovery: ${hint?.recovery?.hint}`);
       expect(textOf(result)).not.toContain('record_link');
     });
 
@@ -423,17 +430,13 @@ describe('smithsonianGetMedia', () => {
 });
 
 /**
- * Serve `raw` through the real image normalization and CC0 test: only the record read is
- * stubbed, so the images the tool pages are the ones `normalizeToImage` builds.
+ * Serve `raw` through the real normalization and CC0 tests: only the record read is stubbed,
+ * so the images and model packages the tool pages are the ones the service builds.
  */
 function serveRecord(raw: RawEDAN) {
   const real = new svcModule.SmithsonianService(createInMemoryStorage());
-  const getContent = vi.fn().mockResolvedValue({ record: raw });
-  vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue({
-    getContent,
-    isCC0: (record: RawEDAN) => real.isCC0(record),
-    toImageItems: (record: RawEDAN) => real.toImageItems(record),
-  } as unknown as svcModule.SmithsonianService);
+  const getContent = vi.spyOn(real, 'getContent').mockResolvedValue({ record: raw });
+  vi.spyOn(svcModule, 'getSmithsonianService').mockReturnValue(real);
   return { real, getContent };
 }
 
@@ -813,5 +816,1136 @@ describe('smithsonianGetMedia content[] encoding (issue #70)', () => {
 
   it('renders its notice through the escaping trailer', () => {
     expect(smithsonianGetMedia.enrichmentTrailer?.notice).toBe(noticeTrailer);
+  });
+});
+
+/** A 3D package shaped like the CC0 `3d_voyager` items of nmnhvz_7047834. */
+function voyagerPackage(uuid: string, access = 'CC0'): RawMediaItem {
+  const doc = `https://3d-api.si.edu/content/document/3d_package:${uuid}`;
+  return {
+    id: `3d_package:${uuid}`,
+    type: '3d_voyager',
+    content: `https://3d-api.si.edu/voyager/3d_package:${uuid}`,
+    thumbnail: `${doc}/scene-image-thumb.jpg`,
+    usage: { access },
+    resources: [
+      {
+        url: `${doc}/resources/skull-150k-4096_std.glb`,
+        category: 'Low resolution',
+        filename: 'skull-150k-4096_std.glb',
+        attributes: [
+          { UNITS: 'mm', FILE_TYPE: 'glb', MODEL_FILE_TYPE: 'glb', DRACO_COMPRESSED: false },
+          { FILE_SIZE: 9214208 },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Mixed media like nmnhvz_7047834's — images among 3D packages — with the image fields
+ * that render differently on each surface: markup in the title, accessibility text that needs
+ * escaping, every resolution, and a restricted image the CC0 gate drops.
+ */
+function mixedRecord(): RawEDAN {
+  const ids = (n: number) => `https://ids.si.edu/ids/deliveryService?id=NMNH-2024-0000${n}`;
+  return {
+    title: 'Tamias striatus <i>skull</i> &amp; mandible',
+    content: {
+      descriptiveNonRepeating: {
+        record_ID: 'nmnhvz_7047834',
+        metadata_usage: { access: 'CC0' },
+        online_media: {
+          mediaCount: 6,
+          media: [
+            voyagerPackage('0b46b532-888e-419b-bb18-c6b8dd1cec6c'),
+            {
+              id: 'media:NMNH-2024-00001',
+              idsId: 'NMNH-2024-00001',
+              type: 'Images',
+              content: ids(1),
+              thumbnail: ids(1),
+              usage: { access: 'CC0' },
+              altTextAccessibility: 'Skull of *Tamias*, <dorsal> view',
+              resources: [
+                { label: 'Screen Image', url: `${ids(1)}&max=1200` },
+                { label: 'Thumbnail Image', url: `${ids(1)}&max=150` },
+                {
+                  label: 'High-resolution JPEG',
+                  url: 'https://ids.si.edu/ids/download?id=NMNH-2024-00001.jpg',
+                  width: 4000,
+                  height: 2667,
+                },
+                {
+                  label: 'High-resolution TIFF',
+                  url: 'https://ids.si.edu/ids/download?id=NMNH-2024-00001.tif',
+                },
+              ],
+            },
+            {
+              idsId: 'NMNH-2024-00002',
+              type: 'Images',
+              content: ids(2),
+              usage: { access: 'CC0' },
+              extDescrAccessibility: 'Lateral view.\n\nScale bar 10 mm.',
+            },
+            {
+              idsId: 'NMNH-2024-00003',
+              type: 'Images',
+              usage: { access: 'Usage Conditions Apply' },
+            },
+            voyagerPackage('732d123d-7a35-411b-a4e1-5e355adcacf8'),
+            { idsId: 'NMNH-2024-00004', type: 'Images', content: ids(4), usage: { access: 'CC0' } },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/** Images that are all restricted beside a CC0 3D package: images mode fails not_cc0. */
+function restrictedRecord(): RawEDAN {
+  return {
+    title: 'Patent model',
+    content: {
+      descriptiveNonRepeating: {
+        record_ID: 'nmah_RESTRICTED',
+        metadata_usage: { access: 'CC0' },
+        online_media: {
+          mediaCount: 3,
+          media: [
+            { idsId: 'NMAH-R1', type: 'Images', usage: { access: 'Usage Conditions Apply' } },
+            { idsId: 'NMAH-R2', type: 'Images', usage: { access: 'Usage Conditions Apply' } },
+            voyagerPackage('c0bc58e6-b172-4543-ad58-50261aea523c'),
+          ],
+        },
+      },
+    },
+  };
+}
+
+/** A record with nothing digitized. */
+function bareRecord(): RawEDAN {
+  return {
+    title: 'Field notes',
+    content: {
+      descriptiveNonRepeating: {
+        record_ID: 'nmnhvz_5105499',
+        metadata_usage: { access: 'CC0' },
+        online_media: { mediaCount: 0, media: [] },
+      },
+    },
+  };
+}
+
+/**
+ * Images-mode output as the release before the `media` input (0.4.1) wrote it: an image page, a
+ * truncated page, a page past the end, and the no_media and not_cc0 failures. Each row is the
+ * record, the paging, `structuredContent` as an object whose key order is its JSON, and the
+ * `content[]` text.
+ *
+ * Every row matches 0.4.1 byte for byte except not_cc0, which holds this release's declared
+ * recovery: `smithsonian_search_objects { query: "", filters: { cc0_only: true } }`, a call that
+ * runs as written. 0.4.1 wrote "Use smithsonian_search_objects with filters.cc0_only: true to find
+ * CC0 objects with downloadable images.", a call that fails as written because `query` is
+ * required. no_images has no row: its hint for a 3D object now names the `media: "3d"` call
+ * (#83), so it no longer matches 0.4.1.
+ */
+const RELEASED_IMAGES_MODE: Array<
+  [name: string, record: () => RawEDAN, paging: object, structured: object, text: string]
+> = [
+  [
+    'every image of a mixed record',
+    mixedRecord,
+    {},
+    {
+      record_id: 'nmnhvz_7047834',
+      title: 'Tamias striatus skull & mandible',
+      is_cc0: true,
+      cc0_image_count: 3,
+      images: [
+        {
+          media_id: 'NMNH-2024-00001',
+          is_cc0: true,
+          alt_text: 'Skull of *Tamias*, <dorsal> view',
+          thumbnail_url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00001&max=150',
+          screen_url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00001&max=1200',
+          high_res_jpeg: {
+            url: 'https://ids.si.edu/ids/download?id=NMNH-2024-00001.jpg',
+            width: 4000,
+            height: 2667,
+          },
+          high_res_tiff: { url: 'https://ids.si.edu/ids/download?id=NMNH-2024-00001.tif' },
+        },
+        {
+          media_id: 'NMNH-2024-00002',
+          is_cc0: true,
+          description: 'Lateral view.\n\nScale bar 10 mm.',
+          screen_url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002',
+          high_res_jpeg: { url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002' },
+        },
+        {
+          media_id: 'NMNH-2024-00004',
+          is_cc0: true,
+          screen_url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00004',
+          high_res_jpeg: { url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00004' },
+        },
+      ],
+    },
+    [
+      '# Media: Tamias striatus skull & mandible',
+      '**ID:** `nmnhvz_7047834` | **Object CC0:** Yes',
+      '**Images:** 3 of 3 CC0 image(s)',
+      '',
+      '### Image: NMNH-2024-00001',
+      '**CC0:** Yes',
+      '**Alt:** Skull of \\*Tamias\\*, \\<dorsal> view',
+      '**Thumbnail:** ![Thumbnail](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00001&max=150>)',
+      '**Screen:** [Screen size](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00001&max=1200>)',
+      '**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/download?id=NMNH-2024-00001.jpg>) (4000×2667px)',
+      '**TIFF:** [Archival TIFF](<https://ids.si.edu/ids/download?id=NMNH-2024-00001.tif>)',
+      '### Image: NMNH-2024-00002',
+      '**CC0:** Yes',
+      '**Description:** Lateral view.\\',
+      '\\',
+      'Scale bar 10 mm.',
+      '**Screen:** [Screen size](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002>)',
+      '**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002>)',
+      '### Image: NMNH-2024-00004',
+      '**CC0:** Yes',
+      '**Screen:** [Screen size](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00004>)',
+      '**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00004>)',
+    ].join('\n'),
+  ],
+  [
+    'a truncated page',
+    mixedRecord,
+    { start: 1, limit: 1 },
+    {
+      record_id: 'nmnhvz_7047834',
+      title: 'Tamias striatus skull & mandible',
+      is_cc0: true,
+      cc0_image_count: 3,
+      images: [
+        {
+          media_id: 'NMNH-2024-00002',
+          is_cc0: true,
+          description: 'Lateral view.\n\nScale bar 10 mm.',
+          screen_url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002',
+          high_res_jpeg: { url: 'https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002' },
+        },
+      ],
+      truncated: true,
+      shown: 1,
+      cap: 1,
+      truncationCeiling: 3,
+      notice:
+        '3 CC0 images; this page shows 1 from start 1. Retrieve the next page with start: 2, or omit limit to return every remaining image.',
+    },
+    [
+      '# Media: Tamias striatus skull & mandible',
+      '**ID:** `nmnhvz_7047834` | **Object CC0:** Yes',
+      '**Images:** 1 of 3 CC0 image(s)',
+      '',
+      '### Image: NMNH-2024-00002',
+      '**CC0:** Yes',
+      '**Description:** Lateral view.\\',
+      '\\',
+      'Scale bar 10 mm.',
+      '**Screen:** [Screen size](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002>)',
+      '**JPEG:** [Full-size JPEG](<https://ids.si.edu/ids/deliveryService?id=NMNH-2024-00002>)',
+      '',
+      '',
+      '**truncated:** true',
+      '**shown:** 1',
+      '**cap:** 1',
+      '**truncationCeiling:** 3',
+      '> 3 CC0 images; this page shows 1 from start 1. Retrieve the next page with start: 2, or omit limit to return every remaining image.',
+    ].join('\n'),
+  ],
+  [
+    'a start past the last image',
+    mixedRecord,
+    { start: 9 },
+    {
+      record_id: 'nmnhvz_7047834',
+      title: 'Tamias striatus skull & mandible',
+      is_cc0: true,
+      cc0_image_count: 3,
+      images: [],
+    },
+    [
+      '# Media: Tamias striatus skull & mandible',
+      '**ID:** `nmnhvz_7047834` | **Object CC0:** Yes',
+      '**Images:** 0 of 3 CC0 image(s)',
+      '',
+    ].join('\n'),
+  ],
+  [
+    'no_media',
+    bareRecord,
+    {},
+    {
+      error: {
+        code: -32001,
+        message: 'Object "nmnhvz_5105499" has no digitized online media.',
+        data: {
+          record_id: 'nmnhvz_5105499',
+          title: 'Field notes',
+          reason: 'no_media',
+          recovery: {
+            hint: 'The physical object may not have been digitized. Use smithsonian_search_objects to find similar objects with media.',
+          },
+        },
+      },
+    },
+    [
+      'Error: Object "nmnhvz_5105499" has no digitized online media.',
+      '',
+      'Recovery: The physical object may not have been digitized. Use smithsonian_search_objects to find similar objects with media.',
+      '',
+      '(reason no_media)',
+    ].join('\n'),
+  ],
+  [
+    'not_cc0 beside a CC0 3D package',
+    restrictedRecord,
+    { start: 2, limit: 1 },
+    {
+      error: {
+        code: -32005,
+        message: 'Object "nmah_RESTRICTED" has 2 image(s) but none are CC0 open access.',
+        data: {
+          record_id: 'nmah_RESTRICTED',
+          title: 'Patent model',
+          image_count: 2,
+          reason: 'not_cc0',
+          recovery: {
+            hint: 'Use smithsonian_search_objects { query: "", filters: { cc0_only: true } } to find CC0 objects with downloadable images.',
+          },
+        },
+      },
+    },
+    [
+      'Error: Object "nmah_RESTRICTED" has 2 image(s) but none are CC0 open access.',
+      '',
+      'Recovery: Use smithsonian_search_objects { query: "", filters: { cc0_only: true } } to find CC0 objects with downloadable images.',
+      '',
+      '(reason not_cc0)',
+    ].join('\n'),
+  ],
+];
+
+describe('images mode is byte-identical to the release before the media input (issue #83)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(RELEASED_IMAGES_MODE)(
+    '%s, with media omitted',
+    async (_name, record, paging, structured, text) => {
+      const raw = record();
+      serveRecord(raw);
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: raw.content?.descriptiveNonRepeating?.record_ID ?? '',
+        ...paging,
+      });
+
+      expect(JSON.stringify(result.structuredContent)).toBe(JSON.stringify(structured));
+      expect(textOf(result)).toBe(text);
+    },
+  );
+
+  it.each(RELEASED_IMAGES_MODE)(
+    '%s, with media: "images"',
+    async (_name, record, paging, structured, text) => {
+      const raw = record();
+      serveRecord(raw);
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: raw.content?.descriptiveNonRepeating?.record_ID ?? '',
+        media: 'images',
+        ...paging,
+      });
+
+      expect(JSON.stringify(result.structuredContent)).toBe(JSON.stringify(structured));
+      expect(textOf(result)).toBe(text);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// media: "3d" (issue #83)
+// ---------------------------------------------------------------------------
+
+/** A CC0 record `recordId` titled `title` whose media is `media`, counted as given. */
+function modelRecord(recordId: string, title: string, media: RawMediaItem[]): RawEDAN {
+  return {
+    title,
+    content: {
+      descriptiveNonRepeating: {
+        record_ID: recordId,
+        metadata_usage: { access: 'CC0' },
+        online_media: { mediaCount: media.length, media },
+      },
+    },
+  };
+}
+
+const VOYAGER = 'https://3d-api.si.edu/voyager';
+const DOCUMENT = 'https://3d-api.si.edu/content/document';
+const HESPEROCYON = '3d_package:0b46b532-888e-419b-bb18-c6b8dd1cec6c';
+
+/** nmnhpaleobiology_13278478's one package and its six files, every attribute in one object. */
+function hesperocyon(): RawEDAN {
+  const file = (filename: string, category: string, fileType: string, model: string) => ({
+    url: `${DOCUMENT}/${HESPEROCYON}/resources/${filename}`,
+    name: 'Hesperocyon sp',
+    type: '3D mesh',
+    category,
+    filename,
+    attributes: [
+      {
+        UNITS: 'm',
+        FILE_TYPE: fileType,
+        MODEL_FILE_TYPE: model,
+        DRACO_COMPRESSED: filename.endsWith('_draco.glb'),
+      },
+    ],
+  });
+  return modelRecord('nmnhpaleobiology_13278478', 'Hesperocyon sp', [
+    {
+      id: HESPEROCYON,
+      type: '3d_voyager',
+      usage: { access: 'CC0' },
+      content: `${VOYAGER}/${HESPEROCYON}`,
+      thumbnail: `${DOCUMENT}/${HESPEROCYON}/Hesperocyon_sp-image-thumb.jpg`,
+      resources: [
+        file('Hesperocyon_sp-150k-4096_std.glb', 'Low resolution', 'glb', 'glb'),
+        file('Hesperocyon_sp-100k-2048_std_draco.glb', 'Low resolution', 'glb', 'glb'),
+        file('Hesperocyon_sp-100k-2048_std.usdz', 'iOS AR model', 'usdz', 'usdz'),
+        file('Hesperocyon_sp-full_resolution-obj_std.zip', 'Full resolution', 'zip', 'obj'),
+        file('Hesperocyon_sp-150k-4096-gltf_std.zip', 'Low resolution', 'zip', 'gltf'),
+        file('Hesperocyon_sp-150k-4096-obj_std.zip', 'Low resolution', 'zip', 'obj'),
+      ],
+    },
+  ]);
+}
+
+/** nmnhvz_7047834: 13 CC0 images and 49 CC0 packages of one file each, interleaved. */
+function gorilla(): RawEDAN {
+  const media: RawMediaItem[] = [];
+  for (let i = 0; i < 49; i++) {
+    const id = `3d_package:gorilla-${i}`;
+    media.push({
+      id,
+      type: '3d_voyager',
+      usage: { access: 'CC0' },
+      content: `${VOYAGER}/${id}`,
+      thumbnail: `${DOCUMENT}/${id}/scene-image-thumb.jpg`,
+      resources: [
+        {
+          url: `${DOCUMENT}/${id}/resources/USNM395636_bone_${i}.ply`,
+          category: 'Full resolution',
+          filename: `USNM395636_bone_${i}.ply`,
+          attributes: [
+            { UNITS: 'mm' },
+            { MODEL_FILE_TYPE: 'ply' },
+            { FILE_TYPE: 'ply' },
+            { FILE_SIZE: 19025414 + i },
+          ],
+        },
+      ],
+    });
+    if (i < 13) {
+      media.push({
+        idsId: `NMNH-GORILLA-${i}`,
+        type: 'Images',
+        content: `https://ids.si.edu/ids/deliveryService?id=NMNH-GORILLA-${i}`,
+        usage: { access: 'CC0' },
+      });
+    }
+  }
+  return modelRecord('nmnhvz_7047834', 'Gorilla beringei beringei', media);
+}
+
+/** The fields these tests read off a successful 3D-mode `structuredContent`. */
+interface ModelPage extends MediaPage {
+  cc0_model_count?: number;
+  models?: ModelPackage[];
+}
+
+const modelsOf = (result: { structuredContent?: unknown }) => result.structuredContent as ModelPage;
+
+describe('media: "3d" returns CC0 model packages and their files (issue #83)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    loadClampSwitch();
+  });
+
+  it('returns nmnhpaleobiology_13278478 as one model with its viewer and six files on both surfaces', async () => {
+    serveRecord(hesperocyon());
+
+    const result = await runToolContract(smithsonianGetMedia, {
+      id: 'nmnhpaleobiology_13278478',
+      media: '3d',
+    });
+
+    expect(result.isError).not.toBe(true);
+    const page = modelsOf(result);
+    expect(page).toMatchObject({ images: [], cc0_image_count: 0, cc0_model_count: 1 });
+    expect(page.models).toHaveLength(1);
+    const model = page.models?.[0];
+    expect(model).toMatchObject({
+      media_id: HESPEROCYON,
+      is_cc0: true,
+      viewer_url: `${VOYAGER}/${HESPEROCYON}`,
+      thumbnail_url: `${DOCUMENT}/${HESPEROCYON}/Hesperocyon_sp-image-thumb.jpg`,
+    });
+    expect(model?.files.map((f) => f.filename)).toEqual([
+      'Hesperocyon_sp-150k-4096_std.glb',
+      'Hesperocyon_sp-100k-2048_std_draco.glb',
+      'Hesperocyon_sp-100k-2048_std.usdz',
+      'Hesperocyon_sp-full_resolution-obj_std.zip',
+      'Hesperocyon_sp-150k-4096-gltf_std.zip',
+      'Hesperocyon_sp-150k-4096-obj_std.zip',
+    ]);
+    expect(model?.files.every((f) => f.units === 'm')).toBe(true);
+    expect(model?.files.filter((f) => f.draco_compressed).map((f) => f.filename)).toEqual([
+      'Hesperocyon_sp-100k-2048_std_draco.glb',
+    ]);
+    expect(result.structuredContent).not.toHaveProperty('truncated');
+
+    const text = textOf(result);
+    expect(headings(text)).toEqual(['Media: Hesperocyon sp', `Model: ${HESPEROCYON}`]);
+    expect(labelValues(text, 'Models')).toEqual(['1 of 1 CC0 3D model package(s)']);
+    expect(labelValues(text, 'CC0 images')).toEqual(['0']);
+    expect(labelValues(text, 'Files')).toEqual(['6']);
+    expect(images(text)).toEqual([{ alt: 'Thumbnail', url: model?.thumbnail_url }]);
+    expect(links(text)).toEqual([
+      { text: 'Voyager 3D viewer', url: model?.viewer_url },
+      ...(model?.files ?? []).map((f) => ({ text: f.filename, url: f.url })),
+    ]);
+    expect(items(text)[1]).toBe(
+      'Hesperocyon_sp-100k-2048_std_draco.glb · Category: Low resolution · File type: glb · Model file type: glb · Units: m · Draco compressed: Yes',
+    );
+  });
+
+  it('carries every file field of nmnhvz_7511097 on both surfaces, its Watertight meshes included', async () => {
+    const id = '3d_package:a8ab02ba-bcae-470a-9df4-db1265b25905';
+    const watertight = (filename: string, size: number) => ({
+      url: `${DOCUMENT}/${id}/resources/${filename}`,
+      category: 'Watertight',
+      filename,
+      attributes: [
+        { UNITS: 'mm', FILE_TYPE: 'zip', MODEL_FILE_TYPE: 'stl', DRACO_COMPRESSED: false },
+        { FILE_SIZE: size },
+      ],
+    });
+    const others = Array.from({ length: 12 }, (_, i) => ({
+      url: `${DOCUMENT}/${id}/resources/USNM_VZ_20957_${i}-100k-2048_std_draco.glb`,
+      category: i % 2 ? 'Low resolution' : 'Medium resolution',
+      filename: `USNM_VZ_20957_${i}-100k-2048_std_draco.glb`,
+      attributes: [
+        {
+          UNITS: 'm',
+          FILE_TYPE: 'draco compressed glb',
+          MODEL_FILE_TYPE: 'draco compressed glb',
+          DRACO_COMPRESSED: false,
+        },
+        { FILE_SIZE: 958444 + i },
+      ],
+    }));
+    serveRecord(
+      modelRecord('nmnhvz_7511097', 'Globicephala melas melas (Traill, 1809)', [
+        { idsId: 'NMNH-PILOT-1', type: 'Images', usage: { access: 'CC0' } },
+        {
+          id,
+          type: '3d_voyager',
+          usage: { access: 'CC0' },
+          content: `${VOYAGER}/${id}`,
+          resources: [
+            ...others,
+            watertight('USNM_VZ_20957_jaw_cleaned_999k.zip', 28063568),
+            watertight('USNM_VZ_20957_pilot_whale_skull_processed.zip', 59317548),
+          ],
+        },
+      ]),
+    );
+
+    const result = await runToolContract(smithsonianGetMedia, {
+      id: 'nmnhvz_7511097',
+      media: '3d',
+    });
+
+    const page = modelsOf(result);
+    expect(page.cc0_image_count).toBe(1);
+    const files = page.models?.[0]?.files ?? [];
+    expect(files).toHaveLength(14);
+    expect(files.filter((f) => f.category === 'Watertight')).toStrictEqual([
+      {
+        url: `${DOCUMENT}/${id}/resources/USNM_VZ_20957_jaw_cleaned_999k.zip`,
+        filename: 'USNM_VZ_20957_jaw_cleaned_999k.zip',
+        category: 'Watertight',
+        file_type: 'zip',
+        model_file_type: 'stl',
+        units: 'mm',
+        draco_compressed: false,
+        size_bytes: 28063568,
+      },
+      {
+        url: `${DOCUMENT}/${id}/resources/USNM_VZ_20957_pilot_whale_skull_processed.zip`,
+        filename: 'USNM_VZ_20957_pilot_whale_skull_processed.zip',
+        category: 'Watertight',
+        file_type: 'zip',
+        model_file_type: 'stl',
+        units: 'mm',
+        draco_compressed: false,
+        size_bytes: 59317548,
+      },
+    ]);
+
+    // content[] carries every file field structuredContent does, one list item per file.
+    const text = textOf(result);
+    expect(items(text)).toEqual(
+      files.map((f) =>
+        [
+          f.filename,
+          `Category: ${f.category}`,
+          `File type: ${f.file_type}`,
+          `Model file type: ${f.model_file_type}`,
+          `Units: ${f.units}`,
+          `Draco compressed: ${f.draco_compressed ? 'Yes' : 'No'}`,
+          `Size: ${f.size_bytes} bytes`,
+        ].join(' · '),
+      ),
+    );
+    expect(links(text).slice(1)).toEqual(files.map((f) => ({ text: f.filename, url: f.url })));
+    expect(labelValues(text, 'CC0 images')).toEqual(['1 — call with media "images" to list them']);
+  });
+
+  it('gives nmah_213141 files with url, filename, and size_bytes only, and renders no other field', async () => {
+    const id = '3d_package:9172faae-dbbe-424a-a9e7-56f4428a06dd';
+    const names = [
+      'lincoln_patent_model-100k-2048_std_draco.glb',
+      'lincoln_patent_model-150k-4096-obj_std.zip',
+      'lincoln_patent_model-150k-4096-gltf_std.zip',
+      'lincoln_patent_model-150k-4096_std.glb',
+      'lincoln_patent_model-full_resolution-obj_std.zip',
+      'lincoln_patent_model-100k-2048_std.usdz',
+    ];
+    const sizes = [2223008, 8583524, 8340668, 10205544, 623383950, 11430246];
+    serveRecord(
+      modelRecord('nmah_213141', "Abraham Lincoln's Patent Model", [
+        ...cc0Images(11),
+        {
+          id,
+          type: '3d_voyager',
+          usage: { access: 'CC0' },
+          content: `${VOYAGER}/${id}`,
+          resources: names.map((filename, i) => ({
+            url: `${DOCUMENT}/${id}/resources/${filename}`,
+            name: "Abraham Lincoln's Patent Model",
+            title: "Abraham Lincoln's Patent Model",
+            filename,
+            attributes: [{ FILE_SIZE: sizes[i] }],
+          })),
+        },
+      ]),
+    );
+
+    const result = await runToolContract(smithsonianGetMedia, { id: 'nmah_213141', media: '3d' });
+
+    const files = modelsOf(result).models?.[0]?.files;
+    expect(files).toStrictEqual(
+      names.map((filename, i) => ({
+        url: `${DOCUMENT}/${id}/resources/${filename}`,
+        filename,
+        size_bytes: sizes[i],
+      })),
+    );
+    expect(files?.[4]).toMatchObject({
+      filename: 'lincoln_patent_model-full_resolution-obj_std.zip',
+      size_bytes: 623383950,
+    });
+    expect(items(textOf(result))[4]).toBe(
+      'lincoln_patent_model-full_resolution-obj_std.zip · Size: 623383950 bytes',
+    );
+  });
+
+  it('returns dpo_3d_200017 as one model with its viewer and no files, not an error', async () => {
+    const id = '3d_package:016ceecb-49ea-43e8-b629-c5a2f4ded297';
+    serveRecord(
+      modelRecord('dpo_3d_200017', 'Fossil whale excavation site MPC 685', [
+        { id, type: '3d_voyager', usage: { access: 'CC0' }, content: `${VOYAGER}/${id}` },
+      ]),
+    );
+
+    const result = await runToolContract(smithsonianGetMedia, { id: 'dpo_3d_200017', media: '3d' });
+
+    expect(result.isError).not.toBe(true);
+    expect(modelsOf(result).models).toStrictEqual([
+      { media_id: id, is_cc0: true, viewer_url: `${VOYAGER}/${id}`, files: [] },
+    ]);
+    const text = textOf(result);
+    expect(labelValues(text, 'Files')).toEqual(['0']);
+    expect(items(text)).toEqual([]);
+    expect(links(text)).toEqual([{ text: 'Voyager 3D viewer', url: `${VOYAGER}/${id}` }]);
+  });
+
+  it('counts only CC0 images beside the packages: restricted images leave cc0_image_count 0 on both surfaces', async () => {
+    serveRecord(restrictedRecord());
+
+    const result = await runToolContract(smithsonianGetMedia, {
+      id: 'nmah_RESTRICTED',
+      media: '3d',
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(modelsOf(result)).toMatchObject({
+      images: [],
+      cc0_image_count: 0,
+      cc0_model_count: 1,
+    });
+    const text = textOf(result);
+    expect(text).toContain('**CC0 images:** 0\n');
+    expect(labelValues(text, 'CC0 images')).toEqual(['0']);
+    expect(text).not.toContain('call with media "images"');
+  });
+
+  describe('paging the 49 packages of nmnhvz_7047834', () => {
+    const ID = 'nmnhvz_7047834';
+
+    it('omits limit to return all 49, with images empty and cc0_image_count 13', async () => {
+      serveRecord(gorilla());
+
+      const result = await runToolContract(smithsonianGetMedia, { id: ID, media: '3d' });
+
+      const page = modelsOf(result);
+      expect(page).toMatchObject({ cc0_model_count: 49, cc0_image_count: 13, images: [] });
+      expect(page.models).toHaveLength(49);
+      expect(page.models?.every((m) => m.files.length === 1)).toBe(true);
+      expect(result.structuredContent).not.toHaveProperty('truncated');
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(labelValues(textOf(result), 'Models')).toEqual(['49 of 49 CC0 3D model package(s)']);
+      expect(labelValues(textOf(result), 'CC0 images')).toEqual([
+        '13 — call with media "images" to list them',
+      ]);
+    });
+
+    it('start 40, limit 5 returns 5 models and a notice naming start 45', async () => {
+      serveRecord(gorilla());
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: ID,
+        media: '3d',
+        start: 40,
+        limit: 5,
+      });
+
+      const page = modelsOf(result);
+      expect(page.models?.map((m) => m.media_id)).toEqual(
+        [40, 41, 42, 43, 44].map((i) => `3d_package:gorilla-${i}`),
+      );
+      expect(result.structuredContent).toMatchObject({
+        cc0_model_count: 49,
+        truncated: true,
+        shown: 5,
+        cap: 5,
+        truncationCeiling: 49,
+      });
+      const notice =
+        '49 CC0 model packages; this page shows 5 from start 40. Retrieve the next page with start: 45, or omit limit to return every remaining package.';
+      expect(page.notice).toBe(notice);
+      expect(textOf(result)).toContain(`> ${notice}`);
+      expect(labelValues(textOf(result), 'Models')).toEqual(['5 of 49 CC0 3D model package(s)']);
+    });
+
+    it('a page ending on the last package is not truncated', async () => {
+      serveRecord(gorilla());
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: ID,
+        media: '3d',
+        start: 45,
+        limit: 4,
+      });
+
+      expect(modelsOf(result).models).toHaveLength(4);
+      expect(result.structuredContent).not.toHaveProperty('truncated');
+    });
+
+    it.each([49, 500])(
+      'start %d, at or past the last package, returns no models and the count',
+      async (start) => {
+        serveRecord(gorilla());
+
+        const result = await runToolContract(smithsonianGetMedia, { id: ID, media: '3d', start });
+
+        expect(result.isError).not.toBe(true);
+        expect(modelsOf(result)).toMatchObject({ models: [], cc0_model_count: 49 });
+        expect(result.structuredContent).not.toHaveProperty('notice');
+        expect(labelValues(textOf(result), 'Models')).toEqual(['0 of 49 CC0 3D model package(s)']);
+      },
+    );
+
+    it('serves a limit over the cap with the clamp sentence alone', async () => {
+      serveRecord(gorilla());
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: ID,
+        media: '3d',
+        limit: 1500,
+      });
+
+      expect(modelsOf(result).models).toHaveLength(49);
+      expect(modelsOf(result).notice).toBe(
+        'limit 1500 exceeds the cap of 1000; the page was served with limit 1000.',
+      );
+      expect(result.structuredContent).not.toHaveProperty('truncated');
+    });
+
+    it('images mode on the same record is unchanged: 13 images and no model fields', async () => {
+      serveRecord(gorilla());
+
+      const result = await runToolContract(smithsonianGetMedia, { id: ID });
+
+      expect(pageOf(result).images).toHaveLength(13);
+      expect(result.structuredContent).not.toHaveProperty('models');
+      expect(result.structuredContent).not.toHaveProperty('cc0_model_count');
+      expect(textOf(result)).not.toContain('Model');
+    });
+  });
+
+  describe('whole-record failures', () => {
+    it('fails no_models on npg_NPG.77.61, one image and no 3D, naming the images call', async () => {
+      serveRecord(modelRecord('npg_NPG.77.61', 'Self-portrait', cc0Images(1)));
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: 'npg_NPG.77.61',
+        media: '3d',
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.NotFound,
+          message:
+            'Object "npg_NPG.77.61" has 1 media item(s), but no 3D model package (media types: Images).',
+          data: {
+            reason: 'no_models',
+            record_id: 'npg_NPG.77.61',
+            media_count: 1,
+            media_types: ['Images'],
+            recovery: {
+              hint: 'This object has no 3D model package; its online media is Images. Call smithsonian_get_media { id: "npg_NPG.77.61" } for its images.',
+            },
+          },
+        },
+      });
+      expect(textOf(result)).toContain(
+        'Recovery: This object has no 3D model package; its online media is Images. Call smithsonian_get_media { id: "npg_NPG.77.61" } for its images.',
+      );
+      expect(textOf(result)).toContain('(reason no_models)');
+    });
+
+    it('fails no_models with the get_object route when the media is neither images nor 3D', async () => {
+      serveRecord(
+        modelRecord('siris_sil_893158', 'Senkeiban zushiki', [
+          { type: 'Scanned books', content: 'https://doi.org/10.5479/sil.893158.39088019035187' },
+        ]),
+      );
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: 'siris_sil_893158',
+        media: '3d',
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'no_models',
+            recovery: {
+              hint: 'This object has no 3D model package; its online media is Scanned books. Call smithsonian_get_object { id: "siris_sil_893158" } and read media_summary.non_image_media for each item\'s link.',
+            },
+          },
+        },
+      });
+    });
+
+    /** An image the catalog does not release as CC0. */
+    const restrictedImage = {
+      type: 'Images',
+      idsId: 'NMAH-RESTRICTED-1',
+      content: 'https://ids.si.edu/ids/deliveryService?id=NMAH-RESTRICTED-1',
+      usage: { access: 'Usage Conditions Apply' },
+    };
+
+    it('fails no_models without naming the images call when no image is CC0', async () => {
+      serveRecord(modelRecord('nmah_RESTRICTED', 'Patent model', [restrictedImage]));
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: 'nmah_RESTRICTED',
+        media: '3d',
+      });
+
+      const hint =
+        'This object has no 3D model package; its online media is Images. None of its images are CC0, and this tool returns CC0 media only. Use smithsonian_search_objects { query: "", filters: { online_media_type: "3D Models" } } to find objects with 3D models.';
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'no_models', recovery: { hint } } },
+      });
+      expect(textOf(result)).toContain(`Recovery: ${hint}`);
+    });
+
+    it('fails no_models with the get_object route when no image is CC0 beside other media', async () => {
+      serveRecord(
+        modelRecord('nmah_RESTRICTED_BOOK', 'Patent model', [
+          restrictedImage,
+          { type: 'Scanned books', content: 'https://doi.org/10.5479/sil.893158.39088019035187' },
+        ]),
+      );
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: 'nmah_RESTRICTED_BOOK',
+        media: '3d',
+      });
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'no_models',
+            recovery: {
+              hint: 'This object has no 3D model package; its online media is Images, Scanned books. Call smithsonian_get_object { id: "nmah_RESTRICTED_BOOK" } and read media_summary.non_image_media for each item\'s link.',
+            },
+          },
+        },
+      });
+    });
+
+    it('fails no_models with the declared recovery when no item names a type', async () => {
+      serveRecord(modelRecord('nmnh_UNTYPED', 'Untyped', [{}]));
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: 'nmnh_UNTYPED',
+        media: '3d',
+      });
+
+      const declared = smithsonianGetMedia.errors?.find((e) => e.reason === 'no_models')?.recovery;
+      expect(declared).toContain('smithsonian_get_media without media');
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'no_models', recovery: { hint: declared } } },
+      });
+      expect(textOf(result)).toContain(`Recovery: ${declared}`);
+    });
+
+    it('fails no_media in 3D mode exactly as in images mode', async () => {
+      serveRecord(bareRecord());
+      const images = await runToolContract(smithsonianGetMedia, { id: 'nmnhvz_5105499' });
+      serveRecord(bareRecord());
+      const models = await runToolContract(smithsonianGetMedia, {
+        id: 'nmnhvz_5105499',
+        media: '3d',
+      });
+
+      expect(models.structuredContent).toMatchObject({ error: { data: { reason: 'no_media' } } });
+      expect(JSON.stringify(models.structuredContent)).toBe(
+        JSON.stringify(images.structuredContent),
+      );
+      expect(textOf(models)).toBe(textOf(images));
+    });
+
+    it('leaves out a non-CC0 package and pages the CC0 ones', async () => {
+      serveRecord(
+        modelRecord('nmnh_MIXED3D', 'Mixed packages', [
+          voyagerPackage('a'),
+          voyagerPackage('b', 'Usage Conditions Apply'),
+          voyagerPackage('c'),
+        ]),
+      );
+
+      const result = await runToolContract(smithsonianGetMedia, {
+        id: 'nmnh_MIXED3D',
+        media: '3d',
+        start: 1,
+      });
+
+      expect(modelsOf(result).cc0_model_count).toBe(2);
+      expect(modelsOf(result).models?.map((m) => m.media_id)).toEqual(['3d_package:c']);
+    });
+
+    it('fails not_cc0 when no package is CC0, with a 3D hint, at any start', async () => {
+      for (const start of [0, 1, 50]) {
+        serveRecord(
+          modelRecord('nmnh_RESTRICTED3D', 'Restricted scan', [
+            ...cc0Images(2),
+            voyagerPackage('r1', 'Usage Conditions Apply'),
+            voyagerPackage('r2', 'Usage Conditions Apply'),
+          ]),
+        );
+
+        const result = await runToolContract(smithsonianGetMedia, {
+          id: 'nmnh_RESTRICTED3D',
+          media: '3d',
+          start,
+          limit: 1,
+        });
+
+        expect(result.structuredContent).toMatchObject({
+          error: {
+            code: JsonRpcErrorCode.Forbidden,
+            message:
+              'Object "nmnh_RESTRICTED3D" has 2 3D model package(s) but none are CC0 open access.',
+            data: {
+              reason: 'not_cc0',
+              model_count: 2,
+              recovery: {
+                hint: 'None of this object\'s 3D model packages are CC0, and this tool returns CC0 media only. Use smithsonian_search_objects { query: "", filters: { online_media_type: "3D Models" } } to find objects with 3D models.',
+              },
+            },
+          },
+        });
+      }
+    });
+
+    it('fails no_models at any start on a record without 3D packages', async () => {
+      for (const start of [0, 3, 500]) {
+        serveRecord(mediaRecord(cc0Images(3)));
+        const result = await runToolContract(smithsonianGetMedia, {
+          id: 'chndm_1945-55-16',
+          media: '3d',
+          start,
+          limit: 1,
+        });
+        expect(result.structuredContent).toMatchObject({
+          error: { data: { reason: 'no_models' } },
+        });
+      }
+    });
+
+    it.each(['3D', 'models', '', 'image'])(
+      'rejects media %j as invalid_arguments, before reading the record',
+      async (media) => {
+        const { getContent } = serveRecord(hesperocyon());
+
+        const result = await runToolContract(smithsonianGetMedia, {
+          id: 'nmnhpaleobiology_13278478',
+          media,
+        });
+
+        expect(result.structuredContent).toMatchObject({
+          error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_arguments' } },
+        });
+        expect(textOf(result)).toContain('media');
+        expect(getContent).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('no_images names the media: "3d" call for a 3D record', () => {
+    it('names it on both surfaces for dpo_3d_200012', async () => {
+      serveRecord(
+        modelRecord('dpo_3d_200012', 'Cassiopeia A Supernova Remnant', [
+          voyagerPackage('732d123d-7a35-411b-a4e1-5e355adcacf8'),
+        ]),
+      );
+
+      const result = await runToolContract(smithsonianGetMedia, { id: 'dpo_3d_200012' });
+
+      const hint =
+        'This object\'s online media is 3d_voyager, none of it images. Call smithsonian_get_media { id: "dpo_3d_200012", media: "3d" } for its 3D model files.';
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          message:
+            'Object "dpo_3d_200012" has 1 media item(s), but none of them are images (media types: 3d_voyager).',
+          data: { reason: 'no_images', media_types: ['3d_voyager'], recovery: { hint } },
+        },
+      });
+      expect(textOf(result)).toContain(`Recovery: ${hint}`);
+    });
+
+    it('names both routes when a 3D package sits beside other non-image media', async () => {
+      serveRecord(
+        modelRecord('nmnh_3DBOOK', 'Scan and catalog', [
+          voyagerPackage('p'),
+          { type: 'Scanned books', content: 'https://doi.org/10.5479/sil.1' },
+        ]),
+      );
+
+      const result = await runToolContract(smithsonianGetMedia, { id: 'nmnh_3DBOOK' });
+
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'no_images',
+            recovery: {
+              hint: 'This object\'s online media is 3d_voyager, Scanned books, none of it images. Call smithsonian_get_media { id: "nmnh_3DBOOK", media: "3d" } for its 3D model files, and smithsonian_get_object { id: "nmnh_3DBOOK" } and read media_summary.non_image_media for each other item\'s link.',
+            },
+          },
+        },
+      });
+    });
+
+    it('declares a recovery that names both the media "3d" call and non_image_media', () => {
+      const entry = smithsonianGetMedia.errors?.find((e) => e.reason === 'no_images');
+      expect(entry?.recovery).toContain('media: "3d"');
+      expect(entry?.recovery).toContain('media_summary.non_image_media');
+      expect(smithsonianGetMedia.description).not.toMatch(/does not deliver|images only/);
+    });
+  });
+
+  describe('content[] encoding of model fields', () => {
+    const render = (models: ModelPackage[]) =>
+      smithsonianGetMedia.format!({
+        record_id: 'nmnh_`3d`',
+        title: 'Skull *cast*',
+        is_cc0: true,
+        cc0_image_count: 0,
+        images: [],
+        cc0_model_count: models.length,
+        models,
+      })
+        .map((b) => (b.type === 'text' ? b.text : ''))
+        .join('');
+
+    it('reads every upstream string back under CommonMark', () => {
+      const model: ModelPackage = {
+        media_id: '3d_package:<x>_*y*',
+        is_cc0: true,
+        viewer_url: 'https://3d-api.si.edu/voyager/3d_package:x?a=1&b=2',
+        thumbnail_url: 'https://3d-api.si.edu/content/document/x/scene-image-thumb.jpg',
+        files: [
+          {
+            url: 'https://3d-api.si.edu/content/document/x/resources/a b.glb',
+            filename: 'skull_*final*<v2>.glb',
+            category: 'Full_resolution [print]',
+            file_type: '`glb`',
+            model_file_type: 'draco compressed glb',
+            units: '<mm>',
+            draco_compressed: false,
+            size_bytes: 0,
+          },
+          { url: 'https://3d-api.si.edu/content/document/x/resources/nameless' },
+        ],
+      };
+
+      const text = render([model]);
+
+      expect(headings(text)).toEqual(['Media: Skull *cast*', `Model: ${model.media_id}`]);
+      expect(codeSpans(text)).toEqual(['nmnh_`3d`']);
+      expect(links(text)).toEqual([
+        { text: 'Voyager 3D viewer', url: model.viewer_url },
+        { text: 'skull_*final*<v2>.glb', url: model.files[0]?.url },
+        { text: 'Download', url: model.files[1]?.url },
+      ]);
+      expect(images(text)).toEqual([{ alt: 'Thumbnail', url: model.thumbnail_url }]);
+      expect(items(text)).toEqual([
+        'skull_*final*<v2>.glb · Category: Full_resolution [print] · File type: `glb` · Model file type: draco compressed glb · Units: <mm> · Draco compressed: No · Size: 0 bytes',
+        'Download',
+      ]);
+    });
   });
 });
