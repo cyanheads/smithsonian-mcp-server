@@ -8,6 +8,8 @@
 /scripts/
 /changelog/
 /coverage/
+/.vitest/
+/node_modules/.vitest-cache/
 /.github/
 /.vscode/
 /.claude-plugin/
