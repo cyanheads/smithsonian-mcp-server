@@ -29,7 +29,11 @@ import { bulkLine, FakeBucket, openTestMirror, type TestMirror } from './oa-buck
 
 type Line = Record<string, unknown> & RawEDAN;
 
-/** Real `metadata/edan/` lines (2026-10-26 publish), byte for byte, plus one `ead_component`. */
+/**
+ * Real `metadata/edan/` lines, byte for byte: eight `edanmdm` records and one `ead_component`
+ * from the 2026-10-26 publish, then `siris_arc_396415` (`sia/0f.txt`) and `dpo_3d_200016`
+ * (`ocio_dpo3d/bf.txt`) from the 2026-11-23 publish.
+ */
 const FIXTURE_LINES = readFileSync(
   new URL('./fixtures/oa-bulk-lines.jsonl', import.meta.url),
   'utf8',
@@ -170,6 +174,240 @@ describe('stored doc', () => {
     expect(summary).toStrictEqual(svc.toSummary(line));
   });
 
+  it('keeps every setName and objectRight entry with content as its label and content (issues #81, #82)', () => {
+    const doc = trimRecord(
+      JSON.parse(
+        bulkLine('ft1', {
+          content: {
+            freetext: {
+              setName: [
+                {
+                  label: 'See more items in',
+                  content: 'National Air and Space Museum Collection',
+                  indexedContent: 'National Air and Space Museum Collection',
+                },
+                { label: 'Location' },
+                {
+                  label: 'Exhibition',
+                  content: 'Wright Brothers & The Invention of the Aerial Age',
+                },
+              ],
+              objectRight: [
+                { label: 'Restrictions & Rights', content: 'No access restrictions' },
+                { label: 'Restrictions & Rights', content: '' },
+                { label: 'Restrictions & Rights', content: 'No Copyright – United States' },
+              ],
+              publisher: [{ label: 'Publisher', content: 'Not stored' }],
+            },
+          },
+        }),
+      ),
+    );
+    expect(doc.content?.freetext).toStrictEqual({
+      setName: [
+        { label: 'See more items in', content: 'National Air and Space Museum Collection' },
+        { label: 'Exhibition', content: 'Wright Brothers & The Invention of the Aerial Age' },
+      ],
+      objectRight: [
+        { label: 'Restrictions & Rights', content: 'No access restrictions' },
+        { label: 'Restrictions & Rights', content: 'No Copyright – United States' },
+      ],
+    });
+  });
+
+  it('keeps the setName and SIA objectRight entries of the fixture lines (issues #81, #82)', () => {
+    expect(stored(byUrl('edanmdm:siris_arc_396415')).content?.freetext?.objectRight).toStrictEqual([
+      { label: 'Restrictions & Rights', content: 'No access restrictions' },
+      { label: 'Restrictions & Rights', content: 'No Copyright – United States' },
+    ]);
+    expect(stored(byUrl('edanmdm:nasm_A19820121000')).content?.freetext?.setName).toStrictEqual([
+      { label: 'See more items in', content: 'National Air and Space Museum Collection' },
+      { label: 'Location', content: 'Steven F. Udvar-Hazy Center in Chantilly, VA' },
+      { label: 'Exhibit Station', content: 'Rockets & Missiles' },
+    ]);
+    const withSets = RECORDS.filter((r) => r.content?.freetext?.setName);
+    expect(withSets).toHaveLength(6);
+    for (const line of withSets) {
+      expect(stored(line).content?.freetext?.setName).toStrictEqual(
+        line.content?.freetext?.setName?.map(({ label, content }) => ({ label, content })),
+      );
+    }
+  });
+
+  it('keeps each 3D file’s category, filename, and model attributes in their upstream layout, and image resources as before (issue #83)', () => {
+    const file = (filename: string, attributes: unknown) => ({
+      url: `https://3d-api.si.edu/content/document/3d_package:p1/resources/${filename}`,
+      name: 'Model',
+      type: '3D mesh',
+      title: `Model (${filename})`,
+      category: 'Low resolution',
+      filename,
+      attributes,
+    });
+    const url = (filename: string) =>
+      `https://3d-api.si.edu/content/document/3d_package:p1/resources/${filename}`;
+    const doc = trimRecord(
+      JSON.parse(
+        bulkLine('m1', {
+          content: {
+            descriptiveNonRepeating: {
+              online_media: {
+                mediaCount: 2,
+                media: [
+                  {
+                    id: '3d_package:p1',
+                    type: '3d_voyager',
+                    usage: { text: '', codes: '', access: 'CC0' },
+                    content: 'https://3d-api.si.edu/voyager/3d_package:p1',
+                    voyagerId: '3d_package:p1',
+                    resources: [
+                      // One object holding every key.
+                      file('combined.glb', [
+                        {
+                          UNITS: 'm',
+                          FILE_TYPE: 'glb',
+                          MODEL_FILE_TYPE: 'glb',
+                          DRACO_COMPRESSED: false,
+                          GLTF_STANDARDIZED: true,
+                          FILE_SIZE: 100,
+                        },
+                      ]),
+                      // FILE_SIZE in an object of its own.
+                      file('split.glb', [
+                        {
+                          UNITS: 'm',
+                          FILE_TYPE: 'draco compressed glb',
+                          MODEL_FILE_TYPE: 'draco compressed glb',
+                          DRACO_COMPRESSED: true,
+                          GLTF_STANDARDIZED: false,
+                        },
+                        { FILE_SIZE: 200 },
+                      ]),
+                      // One key per object.
+                      file('per-key.zip', [
+                        { UNITS: 'mm' },
+                        { MODEL_FILE_TYPE: 'obj' },
+                        { FILE_TYPE: 'zip' },
+                        { GLTF_STANDARDIZED: false },
+                        { FILE_SIZE: 300 },
+                      ]),
+                      { url: url('bare.zip'), name: 'Model', filename: 'bare.zip', attributes: [] },
+                    ],
+                  },
+                  {
+                    idsId: 'img1',
+                    type: 'Images',
+                    usage: { access: 'CC0' },
+                    resources: [
+                      {
+                        label: 'High-resolution JPEG',
+                        url: 'https://ids.si.edu/ids/download?id=img1.jpg',
+                        width: 3000,
+                        height: 2000,
+                        dimensions: '3000x2000',
+                      },
+                      {
+                        label: 'Screen Image',
+                        url: 'https://ids.si.edu/ids/deliveryService?id=img1',
+                      },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      ),
+    );
+    const media = doc.content?.descriptiveNonRepeating?.online_media?.media ?? [];
+    expect(media.map((m) => m.resources)).toStrictEqual([
+      [
+        {
+          url: url('combined.glb'),
+          category: 'Low resolution',
+          filename: 'combined.glb',
+          attributes: [
+            {
+              UNITS: 'm',
+              FILE_TYPE: 'glb',
+              MODEL_FILE_TYPE: 'glb',
+              DRACO_COMPRESSED: false,
+              FILE_SIZE: 100,
+            },
+          ],
+        },
+        {
+          url: url('split.glb'),
+          category: 'Low resolution',
+          filename: 'split.glb',
+          attributes: [
+            {
+              UNITS: 'm',
+              FILE_TYPE: 'draco compressed glb',
+              MODEL_FILE_TYPE: 'draco compressed glb',
+              DRACO_COMPRESSED: true,
+            },
+            { FILE_SIZE: 200 },
+          ],
+        },
+        {
+          url: url('per-key.zip'),
+          category: 'Low resolution',
+          filename: 'per-key.zip',
+          attributes: [
+            { UNITS: 'mm' },
+            { MODEL_FILE_TYPE: 'obj' },
+            { FILE_TYPE: 'zip' },
+            {},
+            { FILE_SIZE: 300 },
+          ],
+        },
+        { url: url('bare.zip'), filename: 'bare.zip', attributes: [] },
+      ],
+      [
+        {
+          label: 'High-resolution JPEG',
+          url: 'https://ids.si.edu/ids/download?id=img1.jpg',
+          width: 3000,
+          height: 2000,
+        },
+        { label: 'Screen Image', url: 'https://ids.si.edu/ids/deliveryService?id=img1' },
+      ],
+    ]);
+  });
+
+  it('stores the 3D files of the fixture lines as their bulk lines list them (issue #83)', () => {
+    type File = Record<string, unknown> & { attributes: Array<Record<string, unknown>> };
+    const files = (doc: RawEDAN) =>
+      (doc.content?.descriptiveNonRepeating?.online_media?.media ?? [])
+        .filter((m) => m.type === '3d_voyager')
+        .flatMap((m) => (m.resources ?? []) as unknown as File[]);
+    for (const url of ['edanmdm:dpo_3d_200122', 'edanmdm:dpo_3d_200016']) {
+      const line = byUrl(url);
+      const listed = files(line);
+      expect(listed.length).toBeGreaterThan(0);
+      expect(files(stored(line))).toStrictEqual(
+        listed.map(({ url, category, filename, attributes }) => ({
+          url,
+          category,
+          filename,
+          attributes: attributes.map(({ GLTF_STANDARDIZED: _, ...kept }) => kept),
+        })),
+      );
+    }
+    expect(files(stored(byUrl('edanmdm:dpo_3d_200016')))[0]).toStrictEqual({
+      url: 'https://3d-api.si.edu/content/document/3d_package:64ff5dbe-cf46-486e-8b3a-cb8e1fd7895c/resources/mpc_684-full-res.obj.zip',
+      category: 'Full resolution',
+      filename: 'mpc_684-full-res.obj.zip',
+      attributes: [
+        { UNITS: 'mm' },
+        { MODEL_FILE_TYPE: 'obj' },
+        { FILE_TYPE: 'zip' },
+        { FILE_SIZE: 56991185 },
+      ],
+    });
+  });
+
   it('drops every field no reader uses', () => {
     const kept = {
       record: ['content', 'title', 'unitCode', 'url'],
@@ -192,22 +430,44 @@ describe('stored doc', () => {
         'type',
         'usage',
       ],
-      resource: ['height', 'label', 'url', 'width'],
+      resource: ['attributes', 'category', 'filename', 'height', 'label', 'url', 'width'],
+      attribute: ['DRACO_COMPRESSED', 'FILE_SIZE', 'FILE_TYPE', 'MODEL_FILE_TYPE', 'UNITS'],
+      freetext: [
+        'creditLine',
+        'date',
+        'exhibitionHistory',
+        'identifier',
+        'name',
+        'notes',
+        'objectRight',
+        'objectRights',
+        'physicalDescription',
+        'place',
+        'setName',
+        'topic',
+      ],
     };
     const keysAt = (docs: RawEDAN[]) => {
       const dnrs = docs.flatMap((d) => d.content?.descriptiveNonRepeating ?? []);
       const media = dnrs.flatMap((d) => d.online_media?.media ?? []);
+      const resources = media.flatMap((m) => (m.resources ?? []) as Array<Record<string, unknown>>);
       return {
         record: new Set(docs.flatMap(Object.keys)),
         descriptive: new Set(dnrs.flatMap(Object.keys)),
         media: new Set(media.flatMap(Object.keys)),
-        resource: new Set(media.flatMap((m) => (m.resources ?? []).flatMap(Object.keys))),
+        resource: new Set(resources.flatMap(Object.keys)),
+        attribute: new Set(
+          resources
+            .flatMap((r) => (Array.isArray(r.attributes) ? r.attributes : []))
+            .flatMap(Object.keys),
+        ),
+        freetext: new Set(docs.flatMap((d) => Object.keys(d.content?.freetext ?? {}))),
       };
     };
     const raw = keysAt(RECORDS);
     const trimmed = keysAt(RECORDS.map(stored));
-    for (const level of ['record', 'descriptive', 'media', 'resource'] as const) {
-      // The fixture carries fields to drop at every level (hash, guid, maxsize, filename, …).
+    for (const level of Object.keys(kept) as Array<keyof typeof kept>) {
+      // The fixture carries fields to drop at every level (hash, guid, maxsize, name, GLTF_STANDARDIZED, publisher, …).
       expect([...raw[level]].filter((k) => !kept[level].includes(k)).length).toBeGreaterThan(0);
       expect([...trimmed[level]].filter((k) => !kept[level].includes(k))).toEqual([]);
     }
@@ -511,14 +771,14 @@ describe('read API', () => {
 
     it('pages one term in ingest order, with its total from the term count', async () => {
       expect(await search([{ field: 'unit_code', value: 'OCIO_DPO3D' }])).toEqual({
-        total: 2,
-        urls: ['edanmdm:dpo_3d_200122', 'edanmdm:dpo_3d_200085'],
+        total: 3,
+        urls: ['edanmdm:dpo_3d_200122', 'edanmdm:dpo_3d_200085', 'edanmdm:dpo_3d_200016'],
       });
       expect(await search([{ field: 'online_only' }], 1, 2)).toEqual({
-        total: 4,
+        total: 5,
         urls: ['edanmdm:nmnhvz_14945304', 'edanmdm:hac_FJP.1987.074'],
       });
-      expect(await search([{ field: 'online_only' }], 4, 2)).toEqual({ total: 4, urls: [] });
+      expect(await search([{ field: 'online_only' }], 5, 2)).toEqual({ total: 5, urls: [] });
     });
 
     it('intersects several terms and counts the intersection', async () => {
@@ -565,8 +825,13 @@ describe('read API', () => {
 
     it('pages every record with no filter, with the total from the last sync', async () => {
       expect(await search([], 6, 5)).toEqual({
-        total: 8,
-        urls: ['edanmdm:hac_FJP.1987.074', 'edanmdm:nmnheducation_11054667'],
+        total: 10,
+        urls: [
+          'edanmdm:hac_FJP.1987.074',
+          'edanmdm:nmnheducation_11054667',
+          'edanmdm:siris_arc_396415',
+          'edanmdm:dpo_3d_200016',
+        ],
       });
     });
 
@@ -643,7 +908,7 @@ describe('read API', () => {
         total: 3,
         urls: [IN_STALE, 'edanmdm:nmnhvz_14945304', IN_CURRENT],
       });
-      expect((await search([], 0, 1)).total).toBe(8);
+      expect((await search([], 0, 1)).total).toBe(10);
     });
 
     it('serves that shard again once a refresh re-reads it, downloading it alone', async () => {

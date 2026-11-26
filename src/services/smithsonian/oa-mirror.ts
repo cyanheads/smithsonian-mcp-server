@@ -95,7 +95,7 @@ const ARRAY_FACETS = [
 // ---------------------------------------------------------------------------
 
 /** The store's schema version. */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** The auxiliary tables, one statement each: `bun:sqlite`'s multi-statement `exec` drops errors. */
 const AUXILIARY_TABLES = [
@@ -105,16 +105,13 @@ const AUXILIARY_TABLES = [
 ];
 
 /**
- * Version 2 stores `onPhysicalExhibit` and `exhibition` and derives the `on_view` facet. Clearing
- * every shard's ETag makes the next sync re-read the whole bucket, which rewrites only the docs
- * that change and indexes them under `on_view`; until a shard is re-read, its records are served
- * live ({@link OaMirror.getDoc}, {@link OaMirror.searchFacets}). The index answers that
- * stale-shard probe without a scan. Proportional to the shard count, not the record count.
+ * The migration of every schema version that changes the stored subset. Clearing every shard's
+ * ETag makes the next sync re-read the whole bucket and rewrite only the docs that change. Until a
+ * shard is re-read, its records are served live ({@link OaMirror.getDoc}), and so is every
+ * `on_view` search ({@link OaMirror.searchFacets}). Proportional to the shard count, not the
+ * record count.
  */
-const SCHEMA_V2 = [
-  'UPDATE shards SET etag = NULL',
-  'CREATE INDEX IF NOT EXISTS shards_etag ON shards(etag)',
-];
+const REREAD_EVERY_SHARD = 'UPDATE shards SET etag = NULL';
 
 /** Whether any shard still awaits its re-read after a schema change. */
 const STALE_SHARD_PROBE = 'SELECT 1 AS stale FROM shards WHERE etag IS NULL LIMIT 1';
@@ -139,9 +136,19 @@ export function oaMirrorStore(path: string): MirrorStore {
         },
       },
       {
+        // Stores `onPhysicalExhibit` and `exhibition`, and derives the `on_view` facet from them.
         version: 2,
         up(handle: SqliteHandle) {
-          for (const sql of SCHEMA_V2) handle.exec(sql);
+          handle.exec(REREAD_EVERY_SHARD);
+          // Answers the stale-shard probe without a scan.
+          handle.exec('CREATE INDEX IF NOT EXISTS shards_etag ON shards(etag)');
+        },
+      },
+      {
+        // Stores `freetext.setName`, `freetext.objectRight`, and each 3D file's keys.
+        version: 3,
+        up(handle: SqliteHandle) {
+          handle.exec(REREAD_EVERY_SHARD);
         },
       },
     ],
@@ -165,7 +172,16 @@ const MEDIA_KEYS = [
   'altTextAccessibility',
   'extDescrAccessibility',
 ];
-const RESOURCE_KEYS = ['label', 'url', 'width', 'height'];
+/** An image rendition's label and size, and a 3D file's category and filename; both have a url. */
+const RESOURCE_KEYS = ['label', 'url', 'width', 'height', 'category', 'filename'];
+/** The keys a 3D file's `attributes[]` entries carry that `smithsonian_get_media` reads. */
+const RESOURCE_ATTRIBUTE_KEYS = [
+  'UNITS',
+  'FILE_TYPE',
+  'MODEL_FILE_TYPE',
+  'DRACO_COMPRESSED',
+  'FILE_SIZE',
+];
 const FREETEXT_FIELDS = [
   'date',
   'notes',
@@ -177,6 +193,8 @@ const FREETEXT_FIELDS = [
   'creditLine',
   'identifier',
   'objectRights',
+  'objectRight',
+  'setName',
 ];
 const INDEXED_KEYS = [
   ...ARRAY_FACETS,
@@ -200,13 +218,29 @@ function isEmpty(fields: Fields): boolean {
   return Object.keys(fields).length === 0;
 }
 
+/**
+ * A media resource's {@link RESOURCE_KEYS}, and for a 3D file its `attributes[]` in upstream
+ * layout: every entry keeps its place and its {@link RESOURCE_ATTRIBUTE_KEYS} only, so the keys
+ * sit in one entry, `FILE_SIZE` in a second, or one per entry, as the upstream lists them.
+ */
+function trimResource(resource: Fields): Fields {
+  const out = pick(resource, RESOURCE_KEYS);
+  if (Array.isArray(resource.attributes)) {
+    out.attributes = resource.attributes
+      .filter(isRecord)
+      .map((entry) => pick(entry, RESOURCE_ATTRIBUTE_KEYS));
+  }
+  return out;
+}
+
+/** A media item's {@link MEDIA_KEYS}, its `usage.access`, and its resources ({@link trimResource}). */
 function trimMedia(item: Fields): Fields {
   const out = pick(item, MEDIA_KEYS);
   if (isRecord(item.usage) && item.usage.access !== undefined) {
     out.usage = { access: item.usage.access };
   }
   if (Array.isArray(item.resources)) {
-    out.resources = item.resources.filter(isRecord).map((r) => pick(r, RESOURCE_KEYS));
+    out.resources = item.resources.filter(isRecord).map(trimResource);
   }
   return out;
 }
@@ -224,7 +258,10 @@ function trimDescriptive(descriptive: Fields): Fields {
   return out;
 }
 
-/** Freetext entries without content are dropped: every reader skips an entry lacking it. */
+/**
+ * The label and content of each {@link FREETEXT_FIELDS} entry. Entries without content are
+ * dropped: every reader skips an entry lacking it.
+ */
 function trimFreetext(freetext: Fields): Fields {
   const out: Fields = {};
   for (const field of FREETEXT_FIELDS) {
@@ -286,8 +323,10 @@ function trimIndexed(indexed: Fields): Fields {
  * them, the same trust the live `/content` path gives a response.
  *
  * Changing what this keeps (or what {@link facetTerms} derives) changes stored docs: ship it
- * with a migration that clears `shards.etag`, so the next sync re-reads every shard, as
- * schema version 2 does for `onPhysicalExhibit` and `exhibition`.
+ * with a new schema version whose migration clears `shards.etag` ({@link REREAD_EVERY_SHARD}),
+ * so the next sync re-reads every shard, as version 2 does for `onPhysicalExhibit` and
+ * `exhibition`, and version 3 for `freetext.setName`, `freetext.objectRight`, and each 3D file's
+ * `category`, `filename`, and `attributes`.
  */
 export function trimRecord(line: Fields): RawEDAN {
   const content = isRecord(line.content) ? line.content : {};
@@ -340,7 +379,7 @@ function arrayOf(value: unknown): unknown[] {
  * unindexes a changed doc under the terms this derives from its old copy, and leaves an
  * unchanged doc's facets alone, so a new facet read from an existing key would unindex terms
  * never written and never reach the unchanged docs. `on_view` reads `onPhysicalExhibit`, which
- * only schema version 2 stores.
+ * schema version 2 first stored.
  */
 export function facetTerms(doc: RawEDAN): Map<string, FacetTerm> {
   const terms = new Map<string, FacetTerm>();
